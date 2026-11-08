@@ -1,0 +1,147 @@
+# WFH Wineskin
+
+`WineskinSupport/` holds everything that makes this Wine fork build and run on **OS X 10.9.5 Mavericks**,
+and that packages it as a **WFH Wineskin wrapper**: a single app that holds a Wine engine, a Windows environment and the program it
+runs. A blank wrapper is copied once per program; there is no separate wrapper-creation app.
+
+The build runs on a 10.9 host with the in-tree clang 22 against the **10.9 SDK**, deployment target 10.9.
+Wine is built as a classic WoW64 pair: an x86_64 host tree with x86_64 PE modules, and an i386 host tree
+(10.9 runs i386 processes natively) with i386 PE modules. `wine` runs either kind of program and switches
+to the other loader as needed.
+
+## The one rule: source vs. artifact
+
+If a script can regenerate it, it is an artifact: it lives in a gitignored `build/` (or `deps/work/`) and
+is never committed. Everything else is committed.
+
+## Layout
+
+```
+WineskinSupport/
+├── README.md               this file
+├── build.sh                configure (first run) and build build/wine64 and build/wine32, then stage the engine
+├── toolchain/
+│   ├── bootstrap.sh        assembles toolchain/build: clang 22 from vendor/, and m4, autoconf, bison,
+│   │                       GNU make, pkgconf and nasm from source
+│   ├── vendor/clang/       COMMITTED: clang 22 + lld (bzip2), llvm-ar, resource headers, compiler-rt
+│   └── scripts/            build_gnu.sh (one GNU-style tool from a release tarball)
+├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType), universal i386 + x86_64
+├── polyfill/               the 10.9 gap layer: libwineskin_polyfill.a + a header overlay (see below)
+├── scripts/
+│   ├── env.sh              (sourced) toolchain PATH, SDK, deployment target, per-arch host flags
+│   ├── build-log.sh        (sourced) the one build log, /tmp/wineskin_build.log
+│   ├── configure-wine.sh   configure one tree
+│   ├── track-polyfill.sh   make one tree depend on the polyfill layer (its GNUmakefile)
+│   └── stage-engine.sh     install both trees into build/engine, the skeleton of a wrapper app
+└── wrapper/
+    ├── src/main.m          the launcher and configuration window
+    ├── Info.plist
+    └── build-wrapper.sh    assemble build/WFH Wineskin.app
+```
+
+## Building
+
+1. Install Xcode with the 10.9 SDK (or set `WINESKIN_SDK` to a `MacOSX10.9.sdk`).
+2. `WineskinSupport/toolchain/bootstrap.sh`
+3. `WineskinSupport/deps/build_deps.sh`
+4. `WineskinSupport/build.sh` — wait for `REBUILD DONE (rc=0)` in `/tmp/wineskin_build.log`. It builds the
+   polyfill layer first, on every run.
+5. `WineskinSupport/wrapper/build-wrapper.sh` — produces `build/WFH Wineskin.app`, a blank wrapper.
+
+## Compilers and linkers
+
+- Host (Mach-O) code: `toolchain/build/host/bin/clang`, the in-tree clang with ld64 as its linker (Apple's
+  clang has it so): a link gets `-fuse-ld=/usr/bin/ld -mlinker-version=241.9`, a compile nothing extra.
+  lld's Mach-O port has no i386, and the Wine loader and preloader rely on ld64's segment options.
+  Compiles use `--no-default-config -isysroot <10.9 SDK> -mmacosx-version-min=10.9`.
+- PE code: the in-tree clang as Wine's cross compiler (`-target <arch>-windows`), linked by lld-link.
+- Every compile goes through ccache (`build/ccache`). A configure starts a fresh build tree; unchanged
+  objects come back from the cache.
+
+## The preloader on 10.9
+
+On 10.9, CoreFoundation decides which compatibility behaviours a process gets from the libraries its main
+executable links (later systems read the SDK version instead). The main executable of a Wine process is
+the preloader, so it links libSystem: AppKit then behaves as for any app built with the 10.9 SDK, which is
+what winemac.drv's drawing (`-updateLayer`) depends on.
+
+libSystem initializes before the preloader runs, so the address ranges Wine needs are taken before it can
+allocate there: the x86_64 low 8GB and, on i386, the low 64k, the DOS area, the low memory below
+0x20000000 and the top-down area are zero-fill segments of the preloader, mapped by the kernel at exec.
+The i386 range 0x20000000-0x68000000, which ntdll gives back to the system once the process is running,
+is no segment of any image; the preloader reserves its free parts at startup.
+
+## The polyfill layer
+
+`polyfill/src/*.c` implement libc and framework entry points Wine uses that 10.9 lacks (the `*at()`
+family, `clock_gettime`, `getattrlistat`, `os_unfair_lock`, …), compiled for both architectures with
+hidden visibility into `polyfill/build/libwineskin_polyfill.a`. Every host link takes the archive, so an
+image that calls a gap function holds a private copy. `polyfill/include/` is on every host compile's
+system include path ahead of the SDK: wrapper headers that `#include_next` the SDK's header and add the
+declarations later SDKs carry. Configure sees both, so Wine detects the functions as present.
+
+A polyfill honors the real API's contract. Most of `src/` comes from macports-legacy-support by way of
+the Aqua WebKit port; `polyfill/LICENSE` has the terms.
+
+Wine's makedep sees neither the overlay nor the archive, so `build.sh` tracks them itself. It rebuilds
+the polyfill layer on every run (ccache makes that about a second); a member, generated header, stub or
+rsp keeps its modification time unless its bytes change. Before each make, `scripts/track-polyfill.sh`
+writes the tree's `GNUmakefile`, which make reads ahead of `Makefile`:
+
+- Every host compile also writes `<object>.d` (`-MD -MP`), the compiler's list of every header it read,
+  overlay and generated ones included, and make reads the lists: an overlay header change recompiles
+  the objects that include it.
+- Every host image depends on `link-<arch>.rsp`, the stub Metal, and each archive member that defines a
+  symbol the image names, defined or imported: a member change relinks the images that hold it or
+  would now take it from the archive. A member whose bytes did not change relinks nothing.
+
+An object compiled before its tree had a `GNUmakefile` gets its `.d` from a syntax-only pass. `make -C
+build/wine64` honors the dependencies too; `make -f Makefile` does not. An overlay header the tools
+include (`stdio.h`, `unistd.h`, …) or an rsp change relinks the tools, and with them every PE module.
+
+## OpenGL on 10.9
+
+winemac's views are layer-backed, and 10.9's AppKit gives an `NSOpenGLContext` attached to a
+layer-backed view no drawable (its default framebuffer is `GL_FRAMEBUFFER_UNDEFINED`). The AppKit
+polyfill (`polyfill/src/objc/AppKit.m`) has `-setView:` attach the context the way it attaches to a view
+without a layer, a window-server surface over the view. The same file finishes `-[NSOpenGLContext
+dealloc]` as an `NSOpenGLContext`, since 10.9's dealloc messages `-clearDrawable` to the half-freed
+subclass.
+
+winemac probes OpenGL with accelerated renderers only, as upstream does. A Mac with no accelerated
+renderer, such as a virtual machine, falls back to the software renderer automatically
+(`opengl.c: has_accelerated_renderer`), so no machine-specific setting lives in a wrapper's prefix.
+Don't set `AllowSoftwareRendering` in a prefix that will be copied to a Mac with a GPU.
+
+## The wrapper
+
+```
+Name.app/Contents/
+├── MacOS/Wineskin                the launcher
+├── Resources/Engine/             the Wine installation (bin, lib/wine, share/wine) + FreeType
+└── SharedSupport/
+    ├── prefix/                   the Windows environment (WINEPREFIX)
+    ├── Wineskin.plist            the program and options
+    └── Logs/
+```
+
+A configured wrapper's launcher execs Wine before AppKit starts, so the program runs in the process
+LaunchServices launched. Every Wine process carries `CFProcessPath`, naming the launcher, from which
+CoreFoundation finds its main bundle: the program is the wrapper app to the system, under the wrapper's
+one Dock icon, and Keep in Dock and Recent Items open the wrapper.
+
+The other Wine processes (explorer, services, a program's helpers) take the bundle as theirs too. A
+bundle's Info.plist makes a process a Dock app the moment AppKit starts, so winemac (`cocoa_main.m`)
+gives every Wine process but the launched one (`WINESKIN_APP_PID`) an in-memory `LSUIElement`: they
+start as agents, as unbundled Wine processes do, and become Dock apps only when they show a window. The
+bundle on disk stays an ordinary application. The Run button in the configuration window execs the
+program the same way.
+
+A wrapper is named by its file name. On the first launch after a copy or rename, the launcher writes
+`CFBundleName` and a `CFBundleIdentifier` of its own (`com.wowfunhappy.wfhwineskin.<name>`) into
+Info.plist, registers the bundle, and relaunches once through LaunchServices, so the menu bar, Cmd-Tab,
+Keep in Dock and Recent Items all name and open this wrapper, never another copy.
+
+Opening a wrapper with no program, or with Option held, shows the configuration window: install
+software, choose the program and its arguments, Wine's tools (configuration, registry, command prompt,
+task manager), and the Mac driver options.

@@ -1,0 +1,5 @@
+/build/
+.DS_Store
+# WINESKIN: build outputs of WineskinSupport/ and autoconf's cache
+/WineskinSupport/*/build/
+/autom4te.cache/
