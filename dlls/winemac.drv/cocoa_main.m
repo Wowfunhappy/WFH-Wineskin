@@ -72,6 +72,13 @@ static void run_cocoa_app(void* info)
     {
         if (!NSApp)
         {
+            /* WINESKIN: Every Wine process of a wrapper takes the wrapper's bundle as its own
+               (CFProcessPath). The process the wrapper launched is the bundle's application; the
+               others start as agents, as an unbundled process does, until they show a window. */
+            const char *app_pid = getenv("WINESKIN_APP_PID");
+            if (app_pid && atoi(app_pid) != getpid())
+                CFDictionarySetValue((CFMutableDictionaryRef)CFBundleGetInfoDictionary(CFBundleGetMainBundle()),
+                                     CFSTR("LSUIElement"), kCFBooleanTrue);
             [WineApplication sharedApplication];
             created_app = TRUE;
         }

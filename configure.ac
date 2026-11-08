@@ -991,6 +991,8 @@ case $host_os in
     WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 
     case $HOST_ARCH in
+      dnl WINESKIN: the i386 macOS host loads through the preloader.
+      i386) wine_use_preloader=yes ;;
       x86_64)
         dnl If the -no_huge linker option is present (added in Xcode 15.3), use zerofill sections instead of the preloader
         WINE_TRY_CFLAGS([-Wl,-no_huge],
@@ -1003,10 +1005,22 @@ case $host_os in
 
     if test "$wine_use_preloader" = "yes"
     then
-        WINEPRELOADER_LDFLAGS="-nostartfiles -nodefaultlibs -e _start -ldylib1.o -mmacosx-version-min=10.7 -Wl,-no_new_main,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+        dnl WINESKIN: the preloader is the process's main executable, whose linked libSystem is the SDK
+        dnl WINESKIN: 10.9's CoreFoundation checks its compatibility behaviours against.
+        dnl WINEPRELOADER_LDFLAGS="-nostartfiles -nodefaultlibs -e _start -ldylib1.o -mmacosx-version-min=10.7 -Wl,-no_new_main,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+        WINEPRELOADER_LDFLAGS="-nostartfiles -nodefaultlibs -e _start -ldylib1.o -lSystem -mmacosx-version-min=10.7 -Wl,-no_new_main,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
         WINE_TRY_CFLAGS([-Wl,-no_pie],
                         [WINEPRELOADER_LDFLAGS="-Wl,-no_pie $WINEPRELOADER_LDFLAGS"])
-        WINEPRELOADER_LDFLAGS="-Wl,-image_base,0x200000000,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000 $WINEPRELOADER_LDFLAGS"
+        dnl WINESKIN: the i386 preloader sits above the ranges it reserves.
+        dnl WINEPRELOADER_LDFLAGS="-Wl,-image_base,0x200000000,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000 $WINEPRELOADER_LDFLAGS"
+        case $HOST_ARCH in
+          i386)
+            WINEPRELOADER_LDFLAGS="-Wl,-image_base,0x7d400000,-segalign,0x1000,-segaddr,WINE_LOW64K,0x1000,-segaddr,WINE_DOS,0x10000,-segaddr,WINE_LOW,0x110000,-segaddr,WINE_TOP_DOWN,0x7f000000 $WINEPRELOADER_LDFLAGS"
+            ;;
+          x86_64)
+            WINEPRELOADER_LDFLAGS="-Wl,-image_base,0x200000000,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000 $WINEPRELOADER_LDFLAGS"
+            ;;
+        esac
         dnl If preloader is used, the loader needs to be an LC_UNIXTHREAD binary to avoid AppKit/Core Animation problems.
         WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -mmacosx-version-min=10.7"
     fi

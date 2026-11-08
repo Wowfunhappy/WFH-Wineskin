@@ -47,12 +47,25 @@
 
 #include "wine/asm.h"
 #include "main.h"
+#ifdef __i386__ /* WINESKIN: reserve_free_ranges() reads the address space. */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif /* WINESKIN: closes the __i386__ guard above. */
 
+#ifdef __x86_64__ /* WINESKIN: the i386 host's zero-fill sections follow. */
 /* Reserve the low 8GB using a zero-fill section, this is the only way to
  * prevent system frameworks from using any of it (including allocations
  * before any preloader code runs)
  */
 __asm__(".zerofill WINE_RESERVE,WINE_RESERVE,___wine_reserve,0x1fffff000");
+#else /* WINESKIN: the i386 host's ranges below 0x20000000 and its top-down range, as zero-fill sections for
+         the same reason. ntdll releases 0x20000000-0x7f000000 to the system once the process is running, so
+         that range is no part of this image: its free parts are reserved at startup instead. */
+__asm__(".zerofill WINE_LOW64K,WINE_LOW64K,___wine_low64k,0xf000");
+__asm__(".zerofill WINE_DOS,WINE_DOS,___wine_dos,0x100000");
+__asm__(".zerofill WINE_LOW,WINE_LOW,___wine_low,0x1fef0000");
+__asm__(".zerofill WINE_TOP_DOWN,WINE_TOP_DOWN,___wine_top_down,0x00ff0000");
+#endif /* WINESKIN: closes the __x86_64__ guard above. */
 
 #ifndef LC_MAIN
 #define LC_MAIN 0x80000028
@@ -67,7 +80,17 @@ struct entry_point_command
 
 static struct wine_preload_info preload_info[] =
 {
+#ifdef __i386__ /* WINESKIN: the i386 host's ranges, as the i386 Linux preloader reserves them. */
+    { (void *)0x00000000, 0x00010000 },  /* low 64k: page zero and WINE_LOW64K section */
+    { (void *)0x00010000, 0x00100000 },  /* DOS area: WINE_DOS section */
+    { (void *)0x00110000, 0x1fef0000 },  /* low memory area below 0x20000000: WINE_LOW section */
+    { (void *)0x7f000000, 0x00ff0000 },  /* top-down allocations + shared user data: WINE_TOP_DOWN section */
+    /* the free parts of the low memory area above 0x20000000, filled in by reserve_free_ranges() */
+    { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 },
+    { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 },
+#else /* WINESKIN: the x86_64 range follows. */
     { (void *)0x00001000, 0x1fffff000 }, /* WINE_RESERVE section */
+#endif /* WINESKIN: closes the __i386__ ranges above. */
     { 0, 0 }                             /* end of list */
 };
 
@@ -155,6 +178,81 @@ __attribute__ ((section ("__DATA,__program_vars")))  = { &__dso_handle, &NXArgc,
  *  <https://github.com/apple-oss-distributions/dyld/blob/dyld-852.2/src/dyldStartup.s>
  */
 
+#ifdef __i386__ /* WINESKIN: the i386 host's entry point and system calls. */
+
+#define target_mach_header      mach_header
+#define target_segment_command  segment_command
+#define TARGET_LC_SEGMENT       LC_SEGMENT
+#define target_thread_state_t   i386_thread_state_t
+#ifdef __DARWIN_UNIX03
+#define target_thread_ip(x)     (x)->__eip
+#else
+#define target_thread_ip(x)     (x)->eip
+#endif
+
+#define SYSCALL_FUNC( name, nr ) \
+    __ASM_GLOBAL_FUNC( name, \
+                       "\tmovl $" #nr ",%eax\n" \
+                       "\tint $0x80\n" \
+                       "\tjnb 1f\n" \
+                       "\tmovl $-1,%eax\n" \
+                       "1:\tret\n" )
+
+#define SYSCALL_NOERR( name, nr ) \
+    __ASM_GLOBAL_FUNC( name, \
+                       "\tmovl $" #nr ",%eax\n" \
+                       "\tint $0x80\n" \
+                       "\tret\n" )
+
+__ASM_GLOBAL_FUNC( start,
+                   __ASM_CFI("\t.cfi_undefined %eip\n")
+                   /* The first 16 bytes are used as a function signature on i386 */
+                   "\t.byte 0x6a,0x00\n"            /* pushl $0: push a zero for debugger end of frames marker */
+                   "\t.byte 0x89,0xe5\n"            /* movl %esp,%ebp: pointer to base of kernel frame */
+                   "\t.byte 0x83,0xe4,0xf0\n"       /* andl $-16,%esp: force SSE alignment */
+                   "\t.byte 0x83,0xec,0x10\n"       /* subl $16,%esp: room for new argc, argv, & envp, SSE aligned */
+                   "\t.byte 0x8b,0x5d,0x04\n"       /* movl 4(%ebp),%ebx: pickup argc in %ebx */
+                   "\t.byte 0x89,0x5c,0x24,0x00\n"  /* movl %ebx,0(%esp): argc to reserved stack word */
+
+                   /* call wld_start(stack, &is_unix_thread) */
+                   "\tleal 4(%ebp),%eax\n"
+                   "\tmovl %eax,0(%esp)\n"          /* stack */
+                   "\tleal 8(%esp),%eax\n"
+                   "\tmovl %eax,4(%esp)\n"          /* &is_unix_thread */
+                   "\tmovl $0,(%eax)\n"
+                   "\tcall _wld_start\n"
+
+                   /* jmp based on is_unix_thread */
+                   "\tcmpl $0,8(%esp)\n"
+                   "\tjne 2f\n"
+
+                   "\tmovl 4(%ebp),%edi\n"          /* %edi = argc */
+                   "\tleal 8(%ebp),%esi\n"          /* %esi = argv */
+                   "\tleal 4(%esi,%edi,4),%edx\n"   /* %edx = env */
+                   "\tmovl %edx,%ecx\n"
+                   "1:\tmovl (%ecx),%ebx\n"
+                   "\tadd $4,%ecx\n"
+                   "\torl %ebx,%ebx\n"              /* look for the NULL ending the env[] array */
+                   "\tjnz 1b\n"                     /* %ecx = apple data */
+
+                   /* LC_MAIN */
+                   "\tmovl %edi,0(%esp)\n"          /* argc */
+                   "\tmovl %esi,4(%esp)\n"          /* argv */
+                   "\tmovl %edx,8(%esp)\n"          /* env */
+                   "\tmovl %ecx,12(%esp)\n"         /* apple data */
+                   "\tcall *%eax\n"                 /* call main(argc,argv,env,apple) */
+                   "\tmovl %eax,(%esp)\n"           /* pass result from main() to exit() */
+                   "\tcall _wld_exit\n"             /* need to use call to keep stack aligned */
+                   "\thlt\n"
+
+                   /* LC_UNIXTHREAD */
+                   "\t2:movl %ebp,%esp\n"           /* restore the unaligned stack pointer */
+                   "\taddl $4,%esp\n"               /* remove the debugger end frame marker */
+                   "\tmovl $0,%ebp\n"               /* restore ebp back to zero */
+                   "\tjmpl *%eax\n" )               /* jump to the entry point */
+
+#else /* WINESKIN: the x86_64 host's entry point and system calls follow. */
+
 #define target_mach_header      mach_header_64
 #define target_segment_command  segment_command_64
 #define TARGET_LC_SEGMENT       LC_SEGMENT_64
@@ -220,6 +318,8 @@ __ASM_GLOBAL_FUNC( start,
                    "\tmovq $0,%rbp\n"               /* restore ebp back to zero */
                    "\tjmpq *%rax\n" )               /* jump to the entry point */
 
+#endif /* WINESKIN: closes the __i386__ entry point above. */
+
 void wld_exit( int code ) __attribute__((noreturn));
 SYSCALL_NOERR( wld_exit, 1 /* SYS_exit */ );
 
@@ -228,6 +328,11 @@ SYSCALL_FUNC( wld_write, 4 /* SYS_write */ );
 
 void *wld_mmap( void *start, size_t len, int prot, int flags, int fd, off_t offset );
 SYSCALL_FUNC( wld_mmap, 197 /* SYS_mmap */ );
+
+#ifdef __i386__ /* WINESKIN: the i386 host's ranges are reserved where they are free. */
+void *wld_munmap( void *start, size_t len );
+SYSCALL_FUNC( wld_munmap, 73 /* SYS_munmap */ );
+#endif /* WINESKIN: closes the __i386__ guard above. */
 
 static intptr_t (*p_dyld_get_image_slide)( const struct target_mach_header* mh );
 
@@ -437,6 +542,92 @@ static void set_program_vars( void *stack, void *mod )
     environ = env;
 }
 
+#ifdef __i386__ /* WINESKIN: reserve an i386 range only where nothing is mapped yet. */
+static void remove_preload_range( int i )
+{
+    while (preload_info[i].size)
+    {
+        preload_info[i].addr = preload_info[i+1].addr;
+        preload_info[i].size = preload_info[i+1].size;
+        i++;
+    }
+}
+
+static const struct wine_preload_info zerofill_sections[] =
+{
+    { (void *)0x00010000, 0x00100000 },  /* WINE_DOS section */
+    { (void *)0x00110000, 0x1fef0000 },  /* WINE_LOW section */
+    { (void *)0x7f000000, 0x00ff0000 },  /* WINE_TOP_DOWN section */
+    { 0, 0 }                             /* end of list */
+};
+
+static int is_zerofill( struct wine_preload_info *info )
+{
+    int i;
+
+    for (i = 0; zerofill_sections[i].size; i++)
+    {
+        if ((zerofill_sections[i].addr == info->addr) &&
+            (zerofill_sections[i].size == info->size))
+            return 1;
+    }
+    return 0;
+}
+
+static int map_region( struct wine_preload_info *info )
+{
+    int flags = MAP_PRIVATE | MAP_ANON;
+    void *ret;
+
+    if (!info->addr || is_zerofill( info )) flags |= MAP_FIXED;
+
+    ret = wld_mmap( info->addr, info->size, PROT_NONE, flags, -1, 0 );
+    if (ret == info->addr) return 1;
+    if (ret != (void *)-1) wld_munmap( ret, info->size );
+
+    /* don't warn for zero page */
+    if (info->addr >= (void *)0x1000)
+        wld_printf( "preloader: Warning: failed to reserve range %p-%p\n",
+                    info->addr, (char *)info->addr + info->size );
+    return 0;
+}
+
+/* Reserve the parts of [start, end) nothing has mapped yet, on 64k boundaries, as preload ranges. */
+static void reserve_free_ranges( char *start, char *end )
+{
+    mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)start;
+    int i;
+
+    for (i = 0; preload_info[i].size; i++) ;
+    while (addr < (uintptr_t)end && i < sizeof(preload_info) / sizeof(preload_info[0]) - 1)
+    {
+        mach_vm_address_t region = addr, gap_end;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object;
+
+        if (mach_vm_region( mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64,
+                            (vm_region_info_t)&info, &count, &object ))
+            region = (uintptr_t)end;
+        gap_end = region < (uintptr_t)end ? region : (uintptr_t)end;
+        addr = (addr + 0xffff) & ~(mach_vm_address_t)0xffff;
+        gap_end &= ~(mach_vm_address_t)0xffff;
+        if (gap_end > addr)
+        {
+            preload_info[i].addr = (void *)(uintptr_t)addr;
+            preload_info[i].size = gap_end - addr;
+            if (wld_mmap( preload_info[i].addr, preload_info[i].size, PROT_NONE,
+                          MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0 ) == preload_info[i].addr)
+                i++;
+            else
+                preload_info[i].addr = 0, preload_info[i].size = 0;
+        }
+        addr = region + size;
+    }
+}
+#endif /* WINESKIN: closes the __i386__ guard above. */
+
 void *wld_start( void *stack, int *is_unix_thread )
 {
     struct wine_preload_info **wine_main_preload_info;
@@ -464,9 +655,20 @@ void *wld_start( void *stack, int *is_unix_thread )
     /* reserve memory that Wine needs */
     for (i = 0; preload_info[i].size; i++)
     {
+#ifdef __i386__ /* WINESKIN: an i386 range already in use is left out of the reservation. */
+        if (!map_region( &preload_info[i] ))
+        {
+            remove_preload_range( i );
+            i--;
+        }
+#else /* WINESKIN: the x86_64 reservation follows. */
         wld_mmap( preload_info[i].addr, preload_info[i].size, PROT_NONE,
                   MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0 );
+#endif /* WINESKIN: closes the __i386__ reservation above. */
     }
+#ifdef __i386__ /* WINESKIN: the free parts of the low memory area above 0x20000000. */
+    reserve_free_ranges( (char *)0x20000000, (char *)0x68000000 );
+#endif /* WINESKIN: closes the __i386__ guard above. */
 
     /* load the main binary */
     if (!(mod = pdlopen( argv[1], RTLD_NOW )))

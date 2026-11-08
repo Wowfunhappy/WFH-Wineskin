@@ -1042,12 +1042,33 @@ static const pixel_format *get_pixel_format(int format, BOOL allow_nondisplayabl
     return NULL;
 }
 
+/* WINESKIN: a Mac without an accelerated renderer for its main display, such as a virtual machine,
+   renders in software rather than not at all. */
+static BOOL software_only;
+
+static BOOL has_accelerated_renderer(void)
+{
+    CGLPixelFormatAttribute attribs[] =
+    {
+        kCGLPFADisplayMask, CGDisplayIDToOpenGLDisplayMask(CGMainDisplayID()), kCGLPFAAccelerated, 0,
+    };
+    CGLPixelFormatObj pix;
+    GLint screens;
+
+    if (CGLChoosePixelFormat(attribs, &pix, &screens) || !pix) return FALSE;
+    CGLReleasePixelFormat(pix);
+    return TRUE;
+}
+
 static CGLContextObj init_context(CGLOpenGLProfile profile)
 {
     CGLPixelFormatAttribute attribs[] =
     {
         kCGLPFADisplayMask, CGDisplayIDToOpenGLDisplayMask(CGMainDisplayID()),
-        kCGLPFAAccelerated, kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)profile, 0,
+        /* WINESKIN: without an accelerated renderer, the software renderer is probed. */
+        /* kCGLPFAAccelerated, kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)profile, 0, */
+        kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)profile,
+        software_only ? 0 : kCGLPFAAccelerated, 0,
     };
     CGLPixelFormatObj pix;
     CGLContextObj context;
@@ -2107,6 +2128,13 @@ UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, co
     LOAD_FUNCPTR(glGetString);
     LOAD_FUNCPTR(glReadPixels);
     LOAD_FUNCPTR(glCopyColorTable);
+
+    /* WINESKIN: see has_accelerated_renderer. */
+    if ((software_only = !has_accelerated_renderer()))
+    {
+        WARN("No accelerated OpenGL renderer; rendering in software.\n");
+        allow_software_rendering = true;
+    }
 
     if (!init_gl_info())
         goto failed;

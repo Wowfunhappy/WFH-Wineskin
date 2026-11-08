@@ -396,6 +396,10 @@ static inline BOOL stage_manager_enabled(void)
         if (window.closing)
             return;
 
+        /* WINESKIN: 10.9's AppKit replaces the contentsScale of a layer whose contents -updateLayer sets
+           with its own guess unless -updateLayer sets it too. */
+        layer.contentsScale = retina_on ? 2.0 : 1.0;
+
         imageRect = layer.bounds;
         imageRect.origin.x *= layer.contentsScale;
         imageRect.origin.y *= layer.contentsScale;
@@ -603,6 +607,23 @@ static inline BOOL stage_manager_enabled(void)
         [self layer].contentsScale = mode ? 2.0 : 1.0;
         [self layer].minificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
         [self layer].magnificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
+
+        /* WINESKIN: 10.13 and earlier filter a scaled-down layer with "nearest" whatever it asks for. */
+        /* On macOS 10.13 and earlier, the desired minificationFilter seems to be
+         * ignored and "nearest" filtering is used, which looks terrible.
+         * Enabling rasterization seems to work around this, only enable
+         * it when there may be down-scaling (retina mode enabled).
+         */
+        if (floor(NSAppKitVersionNumber) < 1671 /*NSAppKitVersionNumber10_14*/)
+        {
+            if (mode)
+            {
+                [self layer].shouldRasterize = YES;
+                [self layer].rasterizationScale = 2.0;
+            }
+            else
+                [self layer].shouldRasterize = NO;
+        }
     }
 
     - (void) setRetinaMode:(BOOL)mode

@@ -308,6 +308,9 @@ void macdrv_update_opengl_context(WineOpenGLContext *context)
                 [context clearDrawableLeavingSurfaceOnScreen];
                 context.view = view;
             }
+            /* WINESKIN: -[WineContentView viewWillDraw] updates its pending contexts on the main thread. */
+            else if ([NSThread isMainThread])
+                [context update];
             else OnMainThread(^{
                 [context update];
             });
