@@ -1838,6 +1838,7 @@ static inline BOOL stage_manager_enabled(void)
             fakingClose = FALSE;
             /* WINESKIN: closing takes the window out of its Space */
             wantsFullScreenSpace = ownsFullScreen = minimizedInFullScreenSpace = miniaturizeAfterFullScreen = FALSE;
+            [controller wine_updateHotCorners];
         }
         else
             [self orderOut:nil];
@@ -1993,6 +1994,13 @@ static inline BOOL stage_manager_enabled(void)
     {
         [self wine_restoreInFullScreenSpace];
         [self wine_updateFullScreenSpace];
+    }
+
+    /* In front in the full-screen Space winemac put it in. */
+    - (BOOL) wine_isInFullScreenSpace
+    {
+        return ownsFullScreen && wantsFullScreenSpace && !enteringFullScreen && !exitingFullScreen &&
+               ([self styleMask] & NSWindowStyleMaskFullScreen) && [self isVisible] && [self isOnActiveSpace];
     }
 
     - (void) setFrameAndWineFrame:(NSRect)frame
@@ -2987,6 +2995,7 @@ static inline BOOL stage_manager_enabled(void)
             [self updateFullscreen];
             if (!wantsFullScreenSpace)
                 [super toggleFullScreen:nil];
+            [[WineApplicationController sharedController] wine_updateHotCorners];
         }
     }
 
@@ -3166,6 +3175,7 @@ static inline BOOL stage_manager_enabled(void)
             fullScreenSpaceDeclined = TRUE;
         }
         exitingFullScreen = TRUE;
+        [[WineApplicationController sharedController] wine_updateHotCorners]; /* WINESKIN */
         [self postWindowFrameChanged:nonFullscreenFrame fullscreen:FALSE resizing:FALSE skipSizeMove:FALSE];
     }
 

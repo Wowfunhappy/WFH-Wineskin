@@ -26,6 +26,7 @@
 #import "cocoa_event.h"
 #import "cocoa_menu.h" /* WINESKIN */
 #import "cocoa_window.h"
+#include <dlfcn.h> /* WINESKIN */
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -112,6 +113,68 @@ static NSString* WineLocalizedString(unsigned int stringID)
     static void PerformRequest(void *info);
 
 @end
+
+
+/* WINESKIN: hot corners act even in a full-screen Space, and no presentation option stops them,
+ * so while a window of this app is in its full-screen Space in front, the Dock's hot corners
+ * that act without a modifier key are turned off with the Dock's own SPI, as System Preferences
+ * sets them, and turned back on when the window leaves the Space, the app is deactivated or the
+ * process exits normally. A corner the user sets differently in the meantime keeps their choice. */
+enum { HOT_CORNER_COUNT = 4, HOT_CORNER_ACTION_NONE = 1 };
+static int (*pCoreDockGetExposeCornerActionsWithModifiers)(int actions[HOT_CORNER_COUNT], int modifiers[HOT_CORNER_COUNT]);
+static int (*pCoreDockSetExposeCornerActionWithModifier)(int action, int corner, int modifier);
+static int saved_hot_corner_actions[HOT_CORNER_COUNT];
+static BOOL hot_corner_turned_off[HOT_CORNER_COUNT];
+static BOOL hot_corners_suppressed;
+static pthread_mutex_t hot_corners_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static BOOL load_hot_corner_spi(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        pCoreDockGetExposeCornerActionsWithModifiers = dlsym(RTLD_DEFAULT, "CoreDockGetExposeCornerActionsWithModifiers");
+        pCoreDockSetExposeCornerActionWithModifier = dlsym(RTLD_DEFAULT, "CoreDockSetExposeCornerActionWithModifier");
+    });
+    return pCoreDockGetExposeCornerActionsWithModifiers && pCoreDockSetExposeCornerActionWithModifier;
+}
+
+static void restore_hot_corners(void)
+{
+    int actions[HOT_CORNER_COUNT], modifiers[HOT_CORNER_COUNT], i;
+
+    pthread_mutex_lock(&hot_corners_lock);
+    if (hot_corners_suppressed && !pCoreDockGetExposeCornerActionsWithModifiers(actions, modifiers))
+    {
+        for (i = 0; i < HOT_CORNER_COUNT; i++)
+        {
+            if (hot_corner_turned_off[i] && actions[i] == HOT_CORNER_ACTION_NONE && !modifiers[i])
+                pCoreDockSetExposeCornerActionWithModifier(saved_hot_corner_actions[i], i, 0);
+            hot_corner_turned_off[i] = FALSE;
+        }
+    }
+    hot_corners_suppressed = FALSE;
+    pthread_mutex_unlock(&hot_corners_lock);
+}
+
+static void suppress_hot_corners(void)
+{
+    static BOOL registered;
+    int actions[HOT_CORNER_COUNT], modifiers[HOT_CORNER_COUNT], i;
+
+    pthread_mutex_lock(&hot_corners_lock);
+    if (!hot_corners_suppressed && !pCoreDockGetExposeCornerActionsWithModifiers(actions, modifiers))
+    {
+        if (!registered) registered = !atexit(restore_hot_corners);
+        for (i = 0; i < HOT_CORNER_COUNT; i++)
+        {
+            if (actions[i] == HOT_CORNER_ACTION_NONE || modifiers[i]) continue;
+            saved_hot_corner_actions[i] = actions[i];
+            hot_corner_turned_off[i] = !pCoreDockSetExposeCornerActionWithModifier(HOT_CORNER_ACTION_NONE, i, 0);
+        }
+        hot_corners_suppressed = TRUE;
+    }
+    pthread_mutex_unlock(&hot_corners_lock);
+}
 
 
 @implementation WineApplicationController
@@ -754,12 +817,36 @@ static NSString* WineLocalizedString(unsigned int stringID)
     /* WINESKIN: see -[WineWindow wine_updateFullScreenSpace]. */
     - (void) wine_updateFullScreenSpaces
     {
-        if (![NSApp isActive]) return;
-        for (NSWindow* window in [NSApp windows])
+        if ([NSApp isActive])
         {
-            if ([window isKindOfClass:[WineWindow class]])
-                [(WineWindow*)window wine_applicationDidBecomeActive];
+            for (NSWindow* window in [NSApp windows])
+            {
+                if ([window isKindOfClass:[WineWindow class]])
+                    [(WineWindow*)window wine_applicationDidBecomeActive];
+            }
         }
+        [self wine_updateHotCorners];
+    }
+
+    /* WINESKIN: see suppress_hot_corners. */
+    - (void) wine_updateHotCorners
+    {
+        BOOL inSpace = FALSE;
+
+        if (!load_hot_corner_spi()) return;
+        if ([NSApp isActive])
+        {
+            for (NSWindow* window in [NSApp windows])
+            {
+                if ([window isKindOfClass:[WineWindow class]] && [(WineWindow*)window wine_isInFullScreenSpace])
+                {
+                    inSpace = TRUE;
+                    break;
+                }
+            }
+        }
+        if (inSpace) suppress_hot_corners();
+        else restore_hot_corners();
     }
 
     - (void) sendDisplaysChanged:(BOOL)activating
@@ -2283,6 +2370,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
         macdrv_release_event(event);
 
         [self releaseMouseCapture];
+        [self wine_updateHotCorners]; /* WINESKIN */
     }
 
     - (void) applicationDidUnhide:(NSNotification*)aNotification

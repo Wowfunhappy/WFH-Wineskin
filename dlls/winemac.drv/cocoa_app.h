@@ -129,6 +129,7 @@ enum {
 
     - (WineWindow*) frontWineWindow;
     - (void) adjustWindowLevels;
+    - (void) wine_updateHotCorners; /* WINESKIN */
     - (void) updateFullscreenWindows;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;

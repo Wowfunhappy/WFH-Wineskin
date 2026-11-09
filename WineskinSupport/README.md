@@ -203,7 +203,12 @@ in a Space of its own, as with the green button (`-[WineWindow wine_updateFullSc
   stops covering the screen.
 - Its Win32 rect stays what the program set; frame changes Cocoa makes for the Space are not posted.
 - The menu bar and Dock stay hidden in the Space, even with the pointer at the top or bottom edge.
-  Hot corners still act there.
+- Hot corners act even in a full-screen Space, and no presentation option stops them, so while the
+  window is in front in its Space, the hot corners that need no modifier key are turned off with the
+  Dock's own SPI (`CoreDockSetExposeCornerActionWithModifier`, as System Preferences sets them) and
+  turned back on when it leaves the Space, the app is deactivated or the process exits normally
+  (`suppress_hot_corners` in `cocoa_app.m`). A corner the user sets in the meantime keeps their choice.
+  A process killed while its game is in front leaves the corners off.
 - The app's other windows, such as message boxes, appear on the game's Space above it.
 - Command-Tab leaves the Space where it is, as for a Mac app. A game Windows minimizes
   when it loses the foreground (Direct3D's fullscreen devices do) stays in its Space and is restored when
