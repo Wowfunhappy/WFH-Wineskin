@@ -253,6 +253,7 @@ static inline BOOL stage_manager_enabled(void)
     /* WINESKIN: see -wine_attachPendingGLContexts. */
     - (void) wine_attachPendingGLContexts;
     - (void) wine_attachPendingGLContextsOfTree;
+    - (void) wine_reattachGLContextsOfTree;
     - (void) wine_attachPendingGLContext:(WineOpenGLContext*)context;
 
     - (void) wine_getBackingSize:(int*)outBackingSize;
@@ -504,6 +505,21 @@ static inline BOOL stage_manager_enabled(void)
         {
             if ([subview isKindOfClass:[WineContentView class]])
                 [(WineContentView*)subview wine_attachPendingGLContextsOfTree];
+        }
+    }
+
+    /* WINESKIN: a context attached while its window was off the active Space or covered by another
+       app's full-screen window gets no drawable ("invalid drawable"), and a program that keeps the
+       context current never attaches it again. When the window becomes visible, its contexts
+       reattach at their next flush. */
+    - (void) wine_reattachGLContextsOfTree
+    {
+        [self updateGLContexts:YES];
+        [self wine_attachPendingGLContexts];
+        for (NSView* subview in [self subviews])
+        {
+            if ([subview isKindOfClass:[WineContentView class]])
+                [(WineContentView*)subview wine_reattachGLContextsOfTree];
         }
     }
 
@@ -2774,6 +2790,14 @@ static inline BOOL stage_manager_enabled(void)
         }
 
         [self windowDidResize:notification];
+    }
+
+    /* WINESKIN: see -[WineContentView wine_reattachGLContextsOfTree]. */
+    - (void) windowDidChangeOcclusionState:(NSNotification*)notification
+    {
+        if (([self occlusionState] & NSWindowOcclusionStateVisible) &&
+            [[self contentView] isKindOfClass:[WineContentView class]])
+            [(WineContentView*)[self contentView] wine_reattachGLContextsOfTree];
     }
 
     - (void) windowDidEndLiveResize:(NSNotification *)notification
