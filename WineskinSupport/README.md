@@ -211,8 +211,9 @@ plain `bin/wine` use the bundled plugins and never a system or home-folder GStre
 plugins in its own process to build the registry (`--gst-disable-registry-fork`), once per prefix and
 architecture.
 
-A 32-bit program that plays 4K video can run out of address space: Tempest 4000's 3840x2160 intro
-(`ATARI.mp4`) fails to allocate its frames, and the game skips to its title screen.
+The media session (`dlls/mf/session.c`) asks a transform's upstream node for one sample at a time,
+so decoded frames don't pile up ahead of the renderer; a 32-bit program playing 4K video, such as
+Tempest 4000's 3840x2160 intro, holds only the frames it is showing.
 
 ## TLS
 
