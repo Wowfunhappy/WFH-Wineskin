@@ -32,6 +32,16 @@ else
     echo "    already present, skipping"
 fi
 
+# The wrapper's launcher uses ARC, which for a 10.9 deployment target links Apple's libarclite. clang
+# looks for it beside its own lib directory; the Command Line Tools ship it.
+ARCLITE=/Library/Developer/CommandLineTools/usr/lib/arc/libarclite_macosx.a
+if [ -f "$ARCLITE" ]; then
+    mkdir -p "$CLANG_OUT/lib/arc"
+    ln -sf "$ARCLITE" "$CLANG_OUT/lib/arc/libarclite_macosx.a"
+else
+    echo "    no $ARCLITE: install the Command Line Tools to build the wrapper" >&2
+fi
+
 # The host compiler: the in-tree clang with ld64 as its Mach-O linker, as Apple's clang has it. lld's
 # Mach-O port has no i386 support and no segment placement options, which the Wine loader and preloader
 # need. The linker options go only on commands that link.

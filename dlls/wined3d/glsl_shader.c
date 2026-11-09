@@ -2336,8 +2336,10 @@ static void shader_glsl_declare_typed_vertex_attribute(struct wined3d_string_buf
             index, scalar_type, scalar_type, index);
 }
 
+/* WINESKIN: the shader, for its attribute locations (wined3d_vs_attrib_location). */
 static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_buffer *buffer,
-        const struct wined3d_gl_info *gl_info, const struct wined3d_shader_signature_element *e)
+        const struct wined3d_gl_info *gl_info, const struct wined3d_shader *shader,
+        const struct wined3d_shader_signature_element *e)
 {
     unsigned int index = e->register_idx;
     enum wined3d_component_type type;
@@ -2358,7 +2360,10 @@ static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_b
         FIXME("Unhandled sysval semantic %#x.\n", e->sysval_semantic);
 
     if (shader_glsl_use_explicit_attrib_location(gl_info))
-        shader_addline(buffer, "layout(location = %u) ", index);
+        /* WINESKIN: see wined3d_vs_attrib_location. */
+        // shader_addline(buffer, "layout(location = %u) ", index);
+        shader_addline(buffer, "layout(location = %u) ",
+                wined3d_vs_attrib_location(shader, gl_info->limits.vertex_attribs, index));
 
     type = e->component_type;
     if ((unsigned int)type >= ARRAY_SIZE(component_type_info))
@@ -2375,6 +2380,107 @@ static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_b
 }
 
 /** Generate the variable & register declarations for the GLSL output target */
+/* WINESKIN: macOS's OpenGL 4.1 lacks several GLSL extensions that shader model
+ * 4 and 5 instructions are translated to. Each missing built-in is declared in
+ * the shader, ahead of a macro that gives the declaration the built-in's name:
+ *
+ * - GLSL 1.50 mix() takes a boolean selector for floating-point operands only;
+ *   EXT_shader_integer_mix adds integer and boolean operands. Without it, "mix"
+ *   names an overload set holding the built-in floating-point forms and
+ *   component-wise selects for the integer and boolean forms.
+ * - Without ARB_derivative_control, coarse and fine derivatives are the
+ *   implementation's default derivatives.
+ * - Without ARB_shading_language_packing, packHalf2x16() and unpackHalf2x16()
+ *   convert with integer arithmetic. */
+static void shader_glsl_declare_missing_builtins(struct wined3d_string_buffer *buffer,
+        const struct wined3d_gl_info *gl_info)
+{
+    static const char *const float_types[] = {"float", "vec2", "vec3", "vec4"};
+    static const char *const select_types[][2] =
+    {
+        {"int", "bool"}, {"ivec2", "bvec2"}, {"ivec3", "bvec3"}, {"ivec4", "bvec4"},
+        {"uint", "bool"}, {"uvec2", "bvec2"}, {"uvec3", "bvec3"}, {"uvec4", "bvec4"},
+        {"bool", "bool"}, {"bvec2", "bvec2"}, {"bvec3", "bvec3"}, {"bvec4", "bvec4"},
+    };
+    static const char *const bool_types[] = {"bool", "bvec2", "bvec3", "bvec4"};
+    static const char components[] = "xyzw";
+    unsigned int i, j;
+
+    if (!gl_info->supported[ARB_DERIVATIVE_CONTROL])
+    {
+        shader_addline(buffer, "#define dFdxCoarse dFdx\n");
+        shader_addline(buffer, "#define dFdxFine dFdx\n");
+        shader_addline(buffer, "#define dFdyCoarse dFdy\n");
+        shader_addline(buffer, "#define dFdyFine dFdy\n");
+    }
+
+    if (!gl_info->supported[ARB_SHADING_LANGUAGE_PACKING] && gl_info->supported[ARB_SHADER_BIT_ENCODING])
+    {
+        shader_addline(buffer,
+                "uint wined3d_f32_to_f16(float f)\n"
+                "{\n"
+                "    uint x = floatBitsToUint(f), sign = (x >> 16) & 0x8000u, m = x & 0x7fffffu;\n"
+                "    int e = int((x >> 23) & 0xffu) - 112;\n"
+                "    uint h;\n"
+                "    if (e == 143) return sign | 0x7c00u | (m != 0u ? 0x200u : 0u);\n"
+                "    if (e >= 31) return sign | 0x7c00u;\n"
+                "    if (e <= 0)\n"
+                "    {\n"
+                "        if (e < -10) return sign;\n"
+                "        m |= 0x800000u;\n"
+                "        h = m >> uint(14 - e);\n"
+                "        if (((m >> uint(13 - e)) & 1u) != 0u) ++h;\n"
+                "        return sign | h;\n"
+                "    }\n"
+                "    h = (uint(e) << 10) | (m >> 13);\n"
+                "    if ((m & 0x1000u) != 0u && ((m & 0x2fffu) != 0u)) ++h;\n"
+                "    return sign | h;\n"
+                "}\n"
+                "float wined3d_f16_to_f32(uint h)\n"
+                "{\n"
+                "    uint sign = (h & 0x8000u) << 16, e = (h >> 10) & 0x1fu, m = h & 0x3ffu;\n"
+                "    if (e == 0u) return uintBitsToFloat(sign) + (sign != 0u ? -1.0 : 1.0) * float(m) * exp2(-24.0);\n"
+                "    if (e == 31u) return uintBitsToFloat(sign | 0x7f800000u | (m << 13));\n"
+                "    return uintBitsToFloat(sign | ((e + 112u) << 23) | (m << 13));\n"
+                "}\n"
+                "uint wined3d_packHalf2x16(vec2 v) { return wined3d_f32_to_f16(v.x) | (wined3d_f32_to_f16(v.y) << 16); }\n"
+                "vec2 wined3d_unpackHalf2x16(uint u) { return vec2(wined3d_f16_to_f32(u & 0xffffu), wined3d_f16_to_f32(u >> 16)); }\n"
+                "#define packHalf2x16 wined3d_packHalf2x16\n"
+                "#define unpackHalf2x16 wined3d_unpackHalf2x16\n");
+    }
+
+    if (gl_info->supported[EXT_SHADER_INTEGER_MIX])
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(float_types); ++i)
+    {
+        const char *t = float_types[i];
+
+        shader_addline(buffer, "%s wined3d_mix(%s x, %s y, %s a) { return mix(x, y, a); }\n", t, t, t, t);
+        if (i)
+            shader_addline(buffer, "%s wined3d_mix(%s x, %s y, float a) { return mix(x, y, a); }\n", t, t, t);
+        shader_addline(buffer, "%s wined3d_mix(%s x, %s y, %s a) { return mix(x, y, a); }\n",
+                t, t, t, bool_types[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(select_types); ++i)
+    {
+        const char *t = select_types[i][0], *b = select_types[i][1];
+        unsigned int size = (i % 4) + 1;
+
+        if (size == 1)
+        {
+            shader_addline(buffer, "%s wined3d_mix(%s x, %s y, %s a) { return a ? y : x; }\n", t, t, t, b);
+            continue;
+        }
+        shader_addline(buffer, "%s wined3d_mix(%s x, %s y, %s a) { return %s(", t, t, t, b, t);
+        for (j = 0; j < size; ++j)
+            shader_addline(buffer, "%sa.%c ? y.%c : x.%c", j ? ", " : "",
+                    components[j], components[j], components[j]);
+        shader_addline(buffer, "); }\n");
+    }
+    shader_addline(buffer, "#define mix wined3d_mix\n");
+}
+
 static void shader_generate_glsl_declarations(const struct wined3d_context_gl *context_gl,
         struct wined3d_string_buffer *buffer, const struct wined3d_shader *shader,
         const struct wined3d_shader_reg_maps *reg_maps, const struct shader_glsl_ctx_priv *ctx_priv)
@@ -2393,6 +2499,10 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
 
     if (wined3d_settings.strict_shader_math)
         shader_addline(buffer, "#pragma optionNV(fastmath off)\n");
+
+    /* WINESKIN: built-in functions macOS's GLSL lacks. */
+    if (version->major >= 4)
+        shader_glsl_declare_missing_builtins(buffer, gl_info);
 
     prefix = shader_glsl_get_prefix(version->type);
 
@@ -7313,7 +7423,11 @@ static void shader_glsl_setup_sm3_rasterizer_input(struct shader_glsl_priv *priv
         }
         else if (output->sysval_semantic == WINED3D_SV_CULL_DISTANCE)
         {
-            shader_glsl_generate_clip_or_cull_distances(buffer, output, reg_maps_out->cull_distance_mask);
+            /* WINESKIN: without ARB_cull_distance (macOS), primitives are
+             * drawn rather than culled; culling never changes what a
+             * primitive that is drawn looks like. */
+            if (gl_info->supported[ARB_CULL_DISTANCE])
+                shader_glsl_generate_clip_or_cull_distances(buffer, output, reg_maps_out->cull_distance_mask);
         }
         else if (output->sysval_semantic)
         {
@@ -8214,7 +8328,9 @@ static GLuint shader_glsl_generate_vertex_shader(const struct wined3d_context_gl
     shader_generate_glsl_declarations(context_gl, buffer, shader, reg_maps, &priv_ctx);
 
     for (i = 0; i < shader->input_signature.element_count; ++i)
-        shader_glsl_declare_generic_vertex_attribute(buffer, gl_info, &shader->input_signature.elements[i]);
+        /* WINESKIN: see wined3d_vs_attrib_location. */
+        shader_glsl_declare_generic_vertex_attribute(buffer, gl_info, shader, &shader->input_signature.elements[i]);
+        // shader_glsl_declare_generic_vertex_attribute(buffer, gl_info, &shader->input_signature.elements[i]);
 
     if (args->point_size && !shader->reg_maps.point_size && reg_maps->shader_version.major < 4)
     {
@@ -10579,6 +10695,7 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
         tmp_name = string_buffer_get(&priv->string_buffers);
         while (attribs_map)
         {
+            /* WINESKIN: see wined3d_vs_attrib_location.
             i = wined3d_bit_scan(&attribs_map);
             string_buffer_sprintf(tmp_name, "vs_in%u", i);
             GL_EXTCALL(glBindAttribLocation(program_id, i, tmp_name->buffer));
@@ -10588,6 +10705,20 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
                 GL_EXTCALL(glBindAttribLocation(program_id, i, tmp_name->buffer));
                 string_buffer_sprintf(tmp_name, "vs_in_int%u", i);
                 GL_EXTCALL(glBindAttribLocation(program_id, i, tmp_name->buffer));
+            }
+            (WINESKIN) */
+            unsigned int location;
+
+            i = wined3d_bit_scan(&attribs_map);
+            location = wined3d_vs_attrib_location(vshader, gl_info->limits.vertex_attribs, i);
+            string_buffer_sprintf(tmp_name, "vs_in%u", i);
+            GL_EXTCALL(glBindAttribLocation(program_id, location, tmp_name->buffer));
+            if (vshader && vshader->reg_maps.shader_version.major >= 4)
+            {
+                string_buffer_sprintf(tmp_name, "vs_in_uint%u", i);
+                GL_EXTCALL(glBindAttribLocation(program_id, location, tmp_name->buffer));
+                string_buffer_sprintf(tmp_name, "vs_in_int%u", i);
+                GL_EXTCALL(glBindAttribLocation(program_id, location, tmp_name->buffer));
             }
         }
         checkGLcall("glBindAttribLocation");
@@ -10804,6 +10935,10 @@ static void shader_glsl_precompile(void *shader_priv, struct wined3d_shader *sha
 
     if (shader->reg_maps.shader_version.type == WINED3D_SHADER_TYPE_COMPUTE)
     {
+        /* WINESKIN: without ARB_compute_shader a compute shader is never run
+         * (see shader_glsl_get_shader_model). */
+        if (!wined3d_adapter_gl_const(device->adapter)->gl_info.supported[ARB_COMPUTE_SHADER])
+            return;
         context = context_acquire(device, NULL, 0);
         shader_glsl_compile_compute_shader(shader_priv, wined3d_context_gl(context), shader);
         context_release(context);
@@ -11330,10 +11465,12 @@ static void shader_glsl_init_context_state(struct wined3d_context *context)
 
 static unsigned int shader_glsl_get_shader_model(const struct wined3d_gl_info *gl_info)
 {
+    /* WINESKIN: integer mix() is declared by the shaders themselves where
+     * EXT_shader_integer_mix is missing (shader_glsl_declare_missing_builtins). */
     BOOL shader_model_4 = gl_info->glsl_version >= MAKEDWORD_VERSION(1, 50)
             && gl_info->supported[ARB_SHADER_BIT_ENCODING]
-            && gl_info->supported[ARB_TEXTURE_SWIZZLE]
-            && gl_info->supported[EXT_SHADER_INTEGER_MIX];
+            && gl_info->supported[ARB_TEXTURE_SWIZZLE];
+            // && gl_info->supported[EXT_SHADER_INTEGER_MIX]; (WINESKIN)
 
     if (shader_model_4
             && gl_info->supported[ARB_COMPUTE_SHADER]
@@ -11344,6 +11481,19 @@ static unsigned int shader_glsl_get_shader_model(const struct wined3d_gl_info *g
             && gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE]
             && gl_info->supported[ARB_SHADER_IMAGE_SIZE]
             && gl_info->supported[ARB_SHADING_LANGUAGE_PACKING]
+            && gl_info->supported[ARB_TESSELLATION_SHADER]
+            && gl_info->supported[ARB_TEXTURE_GATHER]
+            && gl_info->supported[ARB_TRANSFORM_FEEDBACK3])
+        return 5;
+
+    /* WINESKIN: macOS's OpenGL 4.1 has the shader model 5 graphics pipeline
+     * (OpenGL 4.0) but no compute shaders, unordered access views or atomic
+     * counters. Shader model 5 vertex, hull, domain, geometry and pixel shaders
+     * that use none of those translate. Compute shaders can be created, and a
+     * dispatch without ARB_compute_shader does nothing
+     * (dispatch_compute in context_gl.c). */
+    if (shader_model_4
+            && gl_info->supported[ARB_GPU_SHADER5]
             && gl_info->supported[ARB_TESSELLATION_SHADER]
             && gl_info->supported[ARB_TEXTURE_GATHER]
             && gl_info->supported[ARB_TRANSFORM_FEEDBACK3])

@@ -4852,11 +4852,28 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     GLuint current_bo, bo;
     unsigned int i;
+    /* WINESKIN: the stream element loaded into each attribute location
+     * (wined3d_vs_attrib_location). */
+    unsigned int element_idx[MAX_ATTRIBS] = {0};
+    uint32_t location_map = 0, use_map = stream_info->use_map;
+
+    while (use_map)
+    {
+        unsigned int idx = wined3d_bit_scan(&use_map);
+        unsigned int location = wined3d_vs_attrib_location(vs, gl_info->limits.vertex_attribs, idx);
+
+        if (location >= gl_info->limits.vertex_attribs || (location_map & (1u << location)))
+            continue;
+        element_idx[location] = idx;
+        location_map |= 1u << location;
+    }
 
     /* Default to no instancing. */
     current_bo = gl_info->supported[ARB_VERTEX_BUFFER_OBJECT] ? ~0u : 0;
 
-    if (stream_info->use_map & ~wined3d_mask_from_size(gl_info->limits.vertex_attribs))
+    /* WINESKIN: attribute locations, not registers, are limited. */
+    // if (stream_info->use_map & ~wined3d_mask_from_size(gl_info->limits.vertex_attribs))
+    if (wined3d_popcount(stream_info->use_map) > wined3d_popcount(location_map))
     {
         static unsigned int once;
 
@@ -4866,11 +4883,15 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
 
     for (i = 0; i < gl_info->limits.vertex_attribs; ++i)
     {
-        const struct wined3d_stream_info_element *element = &stream_info->elements[i];
+        /* WINESKIN: see element_idx. */
+        // const struct wined3d_stream_info_element *element = &stream_info->elements[i];
+        const struct wined3d_stream_info_element *element = &stream_info->elements[element_idx[i]];
         const struct wined3d_stream_state *stream;
         const struct wined3d_format_gl *format_gl;
 
-        if (!(stream_info->use_map & (1u << i)))
+        /* WINESKIN: see element_idx. */
+        // if (!(stream_info->use_map & (1u << i)))
+        if (!(location_map & (1u << i)))
         {
             if (context->numbered_array_mask & (1u << i))
                 wined3d_context_gl_unload_numbered_array(context_gl, i);

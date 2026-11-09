@@ -4597,7 +4597,10 @@ MINMAXINFO get_min_max_info( HWND hwnd )
         adjusted_style = style;
 
     get_client_rect( NtUserGetAncestor( hwnd, GA_PARENT ), &rc, get_thread_dpi() );
-    adjust_window_rect( &rc, adjusted_style, (style & WS_POPUP) && get_menu( hwnd ), exstyle, get_system_dpi() );
+    // adjust_window_rect( &rc, adjusted_style, (style & WS_POPUP) && get_menu( hwnd ), exstyle, get_system_dpi() );
+    /* WINESKIN: a menu bar the user driver shows takes no part in the window's frame */
+    adjust_window_rect( &rc, adjusted_style, (style & WS_POPUP) && get_menu( hwnd ) && !is_driver_menu( hwnd ),
+                        exstyle, get_system_dpi() );
 
     xinc = -rc.left;
     yinc = -rc.top;
@@ -6073,6 +6076,9 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     else NtUserSetWindowLongPtr( hwnd, GWLP_ID, (ULONG_PTR)cs.hMenu, FALSE );
 
     release_win_ptr( win );
+
+    /* WINESKIN: before the first WM_NCCALCSIZE, so the frame leaves out a menu bar the user driver shows */
+    if (cs.hMenu) update_driver_menu( hwnd );
 
     win_dpi = get_dpi_for_window( hwnd );
     if (parent) map_dpi_create_struct( &cs, win_dpi );

@@ -32,6 +32,7 @@
 #include "shellapi.h"
 #include "shresdef.h"
 #include "shellfolder.h"
+#include "wine/wineskin_file_panel.h" /* WINESKIN */
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
@@ -1197,6 +1198,151 @@ LPITEMIDLIST WINAPI SHBrowseForFolderA (LPBROWSEINFOA lpbi)
 }
 
 
+/* WINESKIN: SHBrowseForFolder through the Mac driver's native file panel
+   (include/wine/wineskin_file_panel.h). A callback talks to a message-only window that takes
+   the selection and the OK button's label the callback sets as it initializes. */
+
+struct native_browse
+{
+    WCHAR *selection;
+    WCHAR *ok_text;
+};
+
+static WCHAR *native_browse_path(WPARAM is_path, LPARAM lparam, BOOL unicode)
+{
+    WCHAR *ret = NULL;
+
+    if (!lparam) return NULL;
+    if (!is_path)
+    {
+        ret = malloc(MAX_PATH * sizeof(WCHAR));
+        if (!SHGetPathFromIDListW((LPCITEMIDLIST)lparam, ret))
+        {
+            free(ret);
+            ret = NULL;
+        }
+    }
+    else if (unicode) ret = wcsdup((const WCHAR *)lparam);
+    else
+    {
+        int len = MultiByteToWideChar(CP_ACP, 0, (const char *)lparam, -1, NULL, 0);
+        ret = malloc(len * sizeof(WCHAR));
+        MultiByteToWideChar(CP_ACP, 0, (const char *)lparam, -1, ret, len);
+    }
+    return ret;
+}
+
+static LRESULT CALLBACK native_browse_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    struct native_browse *nb = (struct native_browse *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    WCHAR *path;
+
+    switch (msg)
+    {
+    case BFFM_SETSELECTIONA:
+    case BFFM_SETSELECTIONW:
+    case BFFM_SETEXPANDED:
+        if (!nb || !(path = native_browse_path(wparam, lparam, msg != BFFM_SETSELECTIONA))) return FALSE;
+        free(nb->selection);
+        nb->selection = path;
+        return TRUE;
+    case BFFM_SETOKTEXT:
+        if (!nb || !lparam) return FALSE;
+        free(nb->ok_text);
+        nb->ok_text = wcsdup((const WCHAR *)lparam);
+        return TRUE;
+    case BFFM_ENABLEOK:
+    case BFFM_SETSTATUSTEXTA:
+    case BFFM_SETSTATUSTEXTW:
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/* Returns FALSE when the Win32 dialog has to show instead; otherwise *ret is the result. */
+static BOOL native_browse_for_folder(BROWSEINFOW *lpbi, LPITEMIDLIST *ret)
+{
+    static const WCHAR class_name[] = L"WineskinNativeBrowseForFolder";
+    struct wineskin_file_panel panel = { 0 };
+    struct native_browse nb = { 0 };
+    wineskin_file_panel_func func = NULL;
+    WNDCLASSW wc = { 0 };
+    WCHAR *root = NULL;
+    HMODULE module;
+    HWND hwnd = 0;
+    HRESULT hr;
+
+    if (lpbi->ulFlags & (BIF_BROWSEFORCOMPUTER | BIF_BROWSEFORPRINTER | BIF_BROWSEINCLUDEFILES |
+                         BIF_BROWSEINCLUDEURLS))
+        return FALSE;
+
+    if (!(module = GetModuleHandleW(L"winemac.drv")))
+    {
+        /* A display DC loads the display driver. */
+        ReleaseDC(0, GetDC(0));
+        module = GetModuleHandleW(L"winemac.drv");
+    }
+    if (module) func = (wineskin_file_panel_func)GetProcAddress(module, "wineskin_file_panel");
+    if (!func) return FALSE;
+
+    if (lpbi->pidlRoot)
+    {
+        root = malloc(MAX_PATH * sizeof(WCHAR));
+        if (IS_INTRESOURCE(lpbi->pidlRoot) ?
+            SHGetFolderPathW(NULL, LOWORD(lpbi->pidlRoot), NULL, 0, root) != S_OK :
+            !SHGetPathFromIDListW(lpbi->pidlRoot, root))
+        {
+            free(root);
+            root = NULL;
+        }
+    }
+
+    if (lpbi->lpfn)
+    {
+        wc.lpfnWndProc = native_browse_proc;
+        wc.hInstance = shell32_hInstance;
+        wc.lpszClassName = class_name;
+        RegisterClassW(&wc);
+        if ((hwnd = CreateWindowW(class_name, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, shell32_hInstance, NULL)))
+        {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)&nb);
+            lpbi->lpfn(hwnd, BFFM_INITIALIZED, 0, lpbi->lParam);
+        }
+    }
+
+    panel.owner = lpbi->hwndOwner;
+    panel.flags = WINESKIN_FILE_PANEL_FOLDERS;
+    panel.title = lpbi->lpszTitle;
+    panel.prompt = nb.ok_text;
+    panel.directory = nb.selection ? nb.selection : root;
+
+    hr = func(&panel);
+    TRACE("panel returned %#lx\n", hr);
+
+    if (hr == S_OK)
+    {
+        *ret = ILCreateFromPathW(panel.results);
+        if (*ret && lpbi->pszDisplayName)
+        {
+            SHFILEINFOW info;
+
+            if (SHGetFileInfoW((const WCHAR *)*ret, 0, &info, sizeof(info), SHGFI_PIDL | SHGFI_DISPLAYNAME))
+                lstrcpynW(lpbi->pszDisplayName, info.szDisplayName, MAX_PATH);
+            else
+                lstrcpynW(lpbi->pszDisplayName, PathFindFileNameW(panel.results), MAX_PATH);
+        }
+        if (*ret && hwnd) lpbi->lpfn(hwnd, BFFM_SELCHANGED, (LPARAM)*ret, lpbi->lParam);
+    }
+    else *ret = NULL;
+
+    if (hwnd) DestroyWindow(hwnd);
+    HeapFree(GetProcessHeap(), 0, panel.results);
+    free(nb.selection);
+    free(nb.ok_text);
+    free(root);
+    return SUCCEEDED(hr);
+}
+
 /*************************************************************************
  * SHBrowseForFolderW [SHELL32.@]
  *
@@ -1210,6 +1356,10 @@ LPITEMIDLIST WINAPI SHBrowseForFolderW (LPBROWSEINFOW lpbi)
     HRESULT hr;
     const WCHAR * templateName;
     INITCOMMONCONTROLSEX icex;
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (native_browse_for_folder(lpbi, &info.pidlRet))
+        return info.pidlRet;
 
     info.hWnd = 0;
     info.pidlRet = NULL;

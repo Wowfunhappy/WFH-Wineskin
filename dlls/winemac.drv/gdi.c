@@ -281,6 +281,7 @@ static const struct user_driver_funcs macdrv_funcs =
     .pWindowMessage = macdrv_WindowMessage,
     .pWindowPosChanged = macdrv_WindowPosChanged,
     .pWindowPosChanging = macdrv_WindowPosChanging,
+    .pSetWindowMenu = macdrv_SetWindowMenu, /* WINESKIN */
     .pGetWindowStyleMasks = macdrv_GetWindowStyleMasks,
     .pCreateClientSurface = macdrv_CreateClientSurface,
     .pCreateWindowSurface = macdrv_CreateWindowSurface,

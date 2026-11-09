@@ -23,6 +23,9 @@ enum macdrv_funcs
 {
     unix_init,
     unix_quit_result,
+    unix_file_panel_begin,      /* WINESKIN */
+    unix_file_panel_poll,       /* WINESKIN */
+    unix_file_panel_release,    /* WINESKIN */
     unix_funcs_count
 };
 
@@ -47,6 +50,35 @@ struct init_params
 struct quit_result_params
 {
     int result;
+};
+
+/* WINESKIN: macdrv_file_panel_begin params */
+struct file_panel_begin_params
+{
+    UINT64 title;           /* const WCHAR *, or 0 */
+    UINT64 prompt;          /* const WCHAR *, or 0 */
+    UINT64 directory;       /* const char *, a Unix path, or 0 */
+    UINT64 file_name;       /* const WCHAR *, or 0 */
+    UINT64 filters;         /* const WCHAR *: each filter's name and spec, each null-terminated */
+    UINT32 owner;           /* HWND */
+    UINT32 flags;           /* WINESKIN_FILE_PANEL_* */
+    UINT32 filter_count;
+    UINT32 filter_index;
+    UINT64 panel;           /* out: the panel, for macdrv_file_panel_poll and _release */
+};
+
+/* WINESKIN: macdrv_file_panel_poll and macdrv_file_panel_release params */
+struct file_panel_poll_params
+{
+    UINT64 panel;
+    UINT64 buffer;          /* char *, or 0: receives the chosen Unix paths, each null-terminated,
+                               then a null, once the panel is done */
+    UINT32 size;            /* of the buffer */
+    UINT32 done;            /* out: the user dismissed the panel */
+    UINT32 chosen;          /* out: the user chose */
+    UINT32 needed;          /* out: the size the paths need */
+    UINT32 filter_index;    /* out: the filter selected at the end */
+    UINT32 copied;          /* out: the paths are in the buffer */
 };
 
 /* macdrv_app_icon result */

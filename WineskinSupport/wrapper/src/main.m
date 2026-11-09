@@ -26,6 +26,14 @@ static NSString *const kArgumentsKey = @"Arguments";
 static NSString *const kDebugLogKey = @"DebugLog";
 static NSString *const kOptionAsAltKey = @"OptionAsAlt";
 static NSString *const kRetinaModeKey = @"RetinaMode";
+/* On unless set off: the Command keys act as Control, as a Mac user's shortcuts expect (Command-C copies,
+   Command-S saves), and the app menu has the Mac's own Command-H and Command-Q. */
+static NSString *const kCommandAsControlKey = @"CommandAsControl";
+
+static BOOL CommandAsControl(NSDictionary *config)
+{
+    return config[kCommandAsControlKey] ? [config[kCommandAsControlKey] boolValue] : YES;
+}
 static NSString *const kWineDebugKey = @"WineDebug";
 
 static NSString *const kBundleIdentifierBase = @"com.wowfunhappy.wfhwineskin";
@@ -162,9 +170,10 @@ static BOOL Relaunch(BOOL configure)
     env[@"WINESKIN_APP_PID"] = [NSString stringWithFormat:@"%d", getpid()];
     env[@"PATH"] = [NSString stringWithFormat:@"%@:/usr/bin:/bin:/usr/sbin:/sbin", [self binPath]];
     env[@"DYLD_FALLBACK_LIBRARY_PATH"] = [NSString stringWithFormat:@"%@:/usr/lib", lib];
-    /* The wrapper is offline-first: no prompts to download Mono or Gecko. winemenubuilder is off: a
-       wrapper exports no menu entries or file associations to the Mac. */
-    env[@"WINEDLLOVERRIDES"] = @"mscoree,mshtml=;winemenubuilder.exe=d";
+    /* The wrapper is offline-first: Mono ships in the engine, and Gecko is off, so Wine never offers to
+       download either. winemenubuilder is off: a wrapper exports no menu entries or file associations
+       to the Mac. */
+    env[@"WINEDLLOVERRIDES"] = @"mshtml=;winemenubuilder.exe=d";
     /* A WINEDEBUG already in the environment (from a command line) is kept. */
     NSString *debug = self.config[kWineDebugKey];
     if (!env[@"WINEDEBUG"])
@@ -231,10 +240,13 @@ static void ApplyRegistryOptions(Wrapper *w)
 {
     NSString *reg = [NSString stringWithFormat:
         @"REGEDIT4\n\n[HKEY_CURRENT_USER\\Software\\Wine\\Mac Driver]\n"
-        @"\"LeftOptionIsAlt\"=\"%@\"\n\"RightOptionIsAlt\"=\"%@\"\n\"RetinaMode\"=\"%@\"\n",
+        @"\"LeftOptionIsAlt\"=\"%@\"\n\"RightOptionIsAlt\"=\"%@\"\n\"RetinaMode\"=\"%@\"\n"
+        @"\"LeftCommandIsCtrl\"=\"%@\"\n\"RightCommandIsCtrl\"=\"%@\"\n",
         [w.config[kOptionAsAltKey] boolValue] ? @"y" : @"n",
         [w.config[kOptionAsAltKey] boolValue] ? @"y" : @"n",
-        [w.config[kRetinaModeKey] boolValue] ? @"y" : @"n"];
+        [w.config[kRetinaModeKey] boolValue] ? @"y" : @"n",
+        CommandAsControl(w.config) ? @"y" : @"n",
+        CommandAsControl(w.config) ? @"y" : @"n"];
     NSString *file = [NSTemporaryDirectory() stringByAppendingPathComponent:
                       [NSString stringWithFormat:@"wineskin-%d.reg", getpid()]];
     [reg writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
@@ -282,6 +294,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 @property (strong) NSButton *debugLogBox;
 @property (strong) NSButton *optionAltBox;
 @property (strong) NSButton *retinaBox;
+@property (strong) NSButton *commandCtrlBox;
 @property (strong) NSTextField *status;
 @property (strong) NSProgressIndicator *spinner;
 @property (strong) NSMutableArray *busyControls;
@@ -378,7 +391,9 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     self.optionAltBox = [self checkbox:@"Option keys act as Alt" key:kOptionAsAltKey frame:NSMakeRect(20, y, 250, 20)];
     self.retinaBox = [self checkbox:@"Retina mode" key:kRetinaModeKey frame:NSMakeRect(290, y, 250, 20)];
     y -= 24;
-    self.debugLogBox = [self checkbox:@"Write a debug log of each run" key:kDebugLogKey frame:NSMakeRect(20, y, 300, 20)];
+    self.commandCtrlBox = [self checkbox:@"Command keys act as Control" key:kCommandAsControlKey frame:NSMakeRect(20, y, 250, 20)];
+    self.commandCtrlBox.state = CommandAsControl(self.wrapper.config) ? NSOnState : NSOffState;
+    self.debugLogBox = [self checkbox:@"Write a debug log of each run" key:kDebugLogKey frame:NSMakeRect(290, y, 250, 20)];
 
     self.spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 18, 16, 16)];
     self.spinner.style = NSProgressIndicatorSpinningStyle;
@@ -621,9 +636,11 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     c[kArgumentsKey] = self.argumentsField.stringValue ?: @"";
     c[kDebugLogKey] = @(self.debugLogBox.state == NSOnState);
     BOOL registryChanged = [c[kOptionAsAltKey] boolValue] != (self.optionAltBox.state == NSOnState) ||
-                           [c[kRetinaModeKey] boolValue] != (self.retinaBox.state == NSOnState);
+                           [c[kRetinaModeKey] boolValue] != (self.retinaBox.state == NSOnState) ||
+                           CommandAsControl(c) != (self.commandCtrlBox.state == NSOnState);
     c[kOptionAsAltKey] = @(self.optionAltBox.state == NSOnState);
     c[kRetinaModeKey] = @(self.retinaBox.state == NSOnState);
+    c[kCommandAsControlKey] = @(self.commandCtrlBox.state == NSOnState);
     [self.wrapper save];
     return registryChanged && [self.wrapper prefixExists];
 }

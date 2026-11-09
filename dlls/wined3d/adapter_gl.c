@@ -1249,14 +1249,26 @@ static enum wined3d_feature_level feature_level_from_caps(const struct wined3d_g
     shader_model = min(shader_model, max(shader_caps->hs_version, 4));
     shader_model = min(shader_model, max(shader_caps->ds_version, 4));
 
+    /* WINESKIN: macOS has no polygon offset clamp; depth bias clamping is
+     * ignored there (depth_bias in ffp_gl.c) rather than capping the feature
+     * level at 9_3. */
     if (gl_info->supported[WINED3D_GL_VERSION_3_2]
-            && gl_info->supported[ARB_POLYGON_OFFSET_CLAMP]
+            // && gl_info->supported[ARB_POLYGON_OFFSET_CLAMP] (WINESKIN)
             && gl_info->supported[ARB_SAMPLER_OBJECTS])
     {
         if (shader_model >= 5
                 && gl_info->supported[ARB_DRAW_INDIRECT]
                 && gl_info->supported[ARB_TEXTURE_COMPRESSION_BPTC])
             return WINED3D_FEATURE_LEVEL_11_1;
+
+        /* WINESKIN: macOS has no BPTC texture compression, and no
+         * ARB_base_instance, without which indirect draws are disabled
+         * (wined3d_adapter_init_gl_caps). BC6H and BC7 are unsupported formats
+         * there and an indirect draw does nothing, like a compute dispatch
+         * (see shader_glsl_get_shader_model), which leaves the rest of
+         * feature level 11_0 to the programs that need it. */
+        if (shader_model >= 5)
+            return WINED3D_FEATURE_LEVEL_11;
 
         if (shader_model >= 4)
         {

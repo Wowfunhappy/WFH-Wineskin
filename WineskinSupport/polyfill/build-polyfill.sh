@@ -2,7 +2,7 @@
 # Build the polyfill layer into polyfill/build:
 #   libwineskin_polyfill.a  every src/*.c and src/objc/*.m, for i386 and x86_64, hidden visibility: an
 #                           image that links a member holds a private copy and exports nothing
-#   include/                SDK headers regenerated with the declarations a later SDK gives them
+#   include/                system framework headers regenerated with the declarations a later SDK gives them
 #   Frameworks/             stub frameworks for libraries 10.9 does not have, to link weakly against
 #   link-<arch>.rsp         the linker arguments every Wine host link takes (a clang response file)
 # include/ (committed) is the hand-written header overlay; both include directories are on every Wine
@@ -25,11 +25,11 @@ update() {  # <new> <file>: <new> becomes <file> if their bytes differ, else <fi
     if cmp -s "$1" "$2"; then rm -f "$1"; else mv -f "$1" "$2"; fi
 }
 
-echo "### polyfill: SDK headers"
+echo "### polyfill: framework headers"
 # The 10.11 SDK declares Foundation's collection classes with lightweight generics, and later SDKs give
 # some AppKit accessors the types they return. These are annotations for the compiler; the classes and
 # methods are 10.9's.
-FRAMEWORKS="$WS_SDK/System/Library/Frameworks"
+FRAMEWORKS="$WS_SYSROOT/System/Library/Frameworks"
 GEN="$OUT/include.next"
 rm -rf "$GEN"
 mkdir -p "$GEN/Foundation" "$GEN/AppKit"

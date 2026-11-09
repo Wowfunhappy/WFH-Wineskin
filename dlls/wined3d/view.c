@@ -1093,8 +1093,13 @@ static void wined3d_shader_resource_view_gl_cs_init(void *object)
 
         context = context_acquire(resource->device, NULL, 0);
         create_buffer_view(&view_gl->gl_view, context, desc, buffer, view_format);
-        view_gl->bo_user.valid = true;
-        list_add_head(&buffer->buffer_object->users, &view_gl->bo_user.entry);
+        /* WINESKIN: without buffer textures the view has no GL objects, and the buffer may have
+         * no buffer object yet. */
+        if (buffer->buffer_object)
+        {
+            view_gl->bo_user.valid = true;
+            list_add_head(&buffer->buffer_object->users, &view_gl->bo_user.entry);
+        }
         context_release(context);
     }
     else
@@ -1810,6 +1815,11 @@ static void wined3d_unordered_access_view_gl_cs_init(void *object)
     TRACE("view_gl %p.\n", view_gl);
 
     gl_info = &wined3d_adapter_gl(resource->device->adapter)->gl_info;
+
+    /* WINESKIN: without ARB_shader_image_load_store (macOS) no shader reads or
+     * writes an unordered access view, so a view has no GL objects. */
+    if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+        return;
 
     if (resource->type == WINED3D_RTYPE_BUFFER)
     {

@@ -24,6 +24,7 @@
 #import "cocoa_app.h"
 #import "cocoa_cursorclipping.h"
 #import "cocoa_event.h"
+#import "cocoa_menu.h" /* WINESKIN */
 #import "cocoa_window.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
@@ -223,7 +224,11 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) transformProcessToForeground:(BOOL)activateIfTransformed
     {
-        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+        /* WINESKIN: The process a wrapper launches is a regular application from the start; it
+           gets its main menu the first time it shows a window. */
+        static BOOL mainMenuBuilt;
+        // if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular || !mainMenuBuilt)
         {
             NSMenu* mainMenu;
             NSMenu* submenu;
@@ -253,6 +258,11 @@ static NSString* WineLocalizedString(unsigned int stringID)
             else
                 title = WineLocalizedString(STRING_MENU_ITEM_HIDE);
             item = [submenu addItemWithTitle:title action:@selector(hide:) keyEquivalent:@""];
+            /* WINESKIN: with Command as Control, programs receive Command-key shortcuts as
+               Control shortcuts, and the application menu takes the Mac's own: Command-H
+               hides and Command-Q quits. */
+            if (left_command_is_ctrl || right_command_is_ctrl)
+                [item setKeyEquivalent:@"h"];
 
             item = [submenu addItemWithTitle:WineLocalizedString(STRING_MENU_ITEM_HIDE_OTHERS)
                                       action:@selector(hideOtherApplications:)
@@ -270,7 +280,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
             else
                 title = WineLocalizedString(STRING_MENU_ITEM_QUIT);
             item = [submenu addItemWithTitle:title action:@selector(terminate:) keyEquivalent:@"q"];
-            [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            /* WINESKIN: see Hide. */
+            // [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+            if (!left_command_is_ctrl && !right_command_is_ctrl)
+                [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             item = [[[NSMenuItem alloc] init] autorelease];
             [item setTitle:WineLocalizedString(STRING_MENU_WINE)];
             [item setSubmenu:submenu];
@@ -301,6 +314,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             [NSApp setMainMenu:mainMenu];
             [NSApp setWindowsMenu:submenu];
+            mainMenuBuilt = YES; /* WINESKIN */
+            [[WineMenuBarController sharedController] mainMenuDidChange]; /* WINESKIN */
 
             [NSApp setApplicationIconImage:self.applicationIcon];
         }
@@ -1813,6 +1828,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 [anEvent.window sendEvent:anEvent];
                 ret = TRUE;
             }
+            /* WINESKIN: a Command key equivalent of the key window's menu bar, before the
+               window can take the key down as a key press */
+            else if ([[WineMenuBarController sharedController] handleKeyEquivalent:anEvent])
+                ret = TRUE;
         }
         else if (type == NSEventTypeKeyUp)
         {

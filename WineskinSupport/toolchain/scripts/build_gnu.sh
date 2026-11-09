@@ -12,7 +12,7 @@ NAME="$1" VERSION="$2" URL="$3"; shift 3
 SRC="$WS_TOOLCHAIN/src"
 mkdir -p "$SRC"
 TARBALL="$SRC/$(basename "$URL")"
-[ -f "$TARBALL" ] || curl -fsSL -o "$TARBALL.part" "$URL" && mv -f "$TARBALL.part" "$TARBALL" 2>/dev/null || true
+[ -f "$TARBALL" ] || curl -fsSL --retry 5 --connect-timeout 30 --speed-time 60 --speed-limit 1000 -o "$TARBALL.part" "$URL" && mv -f "$TARBALL.part" "$TARBALL" 2>/dev/null || true
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/$NAME-build.XXXXXX")"
 trap 'rc=$?; rm -rf "$WORK"; build_log_report $rc' EXIT
 echo "### building $NAME $VERSION"

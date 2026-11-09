@@ -15,7 +15,14 @@ UNIX_LIBS    = \
 
 VER_FILEDESCRIPTION_STR = "Wine Mac driver"
 
+# WINESKIN: cocoa_menu.m and menu.c show a window's Win32 menu bar in the Mac menu bar.
+# WINESKIN: cocoa_file_panel.m shows NSOpenPanel and NSSavePanel for the common file dialogs,
+# through wineskin_file_panel() in winemac.drv.spec.
 SOURCES = \
+	cocoa_file_panel.m \
+	winemac.drv.spec \
+	cocoa_menu.m \
+	menu.c \
 	clipboard.c \
 	cocoa_app.m \
 	cocoa_clipboard.m \

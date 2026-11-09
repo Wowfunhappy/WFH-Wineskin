@@ -53,6 +53,8 @@ bool use_precise_scrolling = true;
 int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
 bool retina_enabled = false;
 bool enable_app_nap = false;
+bool native_menu_bar = true; /* WINESKIN */
+bool native_file_dialogs = true; /* WINESKIN */
 
 pthread_key_t macdrv_thread_data_key = 0;
 UINT64 app_icon_callback = 0;
@@ -361,6 +363,14 @@ static void setup_options(void)
     if (!get_config_key(hkey, appkey, "EnableAppNap", buffer, sizeof(buffer)))
         enable_app_nap = IS_OPTION_TRUE(buffer[0]);
 
+    /* WINESKIN: show a window's menu bar in the Mac menu bar */
+    if (!get_config_key(hkey, appkey, "NativeMenuBar", buffer, sizeof(buffer)))
+        native_menu_bar = IS_OPTION_TRUE(buffer[0]);
+
+    /* WINESKIN: show NSOpenPanel and NSSavePanel for the common file dialogs */
+    if (!get_config_key(hkey, appkey, "NativeFileDialogs", buffer, sizeof(buffer)))
+        native_file_dialogs = IS_OPTION_TRUE(buffer[0]);
+
     /* Don't use appkey.  The DPI and monitor sizes should be consistent for all
        processes in the prefix. */
     if (!get_config_key(hkey, NULL, "RetinaMode", buffer, sizeof(buffer)))
@@ -598,6 +608,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     macdrv_init,
     macdrv_quit_result,
+    macdrv_file_panel_begin,    /* WINESKIN */
+    macdrv_file_panel_poll,     /* WINESKIN */
+    macdrv_file_panel_release,  /* WINESKIN */
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
@@ -624,6 +637,10 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
 {
     wow64_init,
     macdrv_quit_result,
+    /* WINESKIN: their params have the same layout for 32-bit callers */
+    macdrv_file_panel_begin,
+    macdrv_file_panel_poll,
+    macdrv_file_panel_release,
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );

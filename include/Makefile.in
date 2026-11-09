@@ -1,4 +1,6 @@
+# WINESKIN: wine/wineskin_file_panel.h is the native file panel interface of winemac.drv.
 SOURCES = \
+	wine/wineskin_file_panel.h \
 	accctrl.h \
 	access.idl \
 	aclapi.h \

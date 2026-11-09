@@ -868,6 +868,12 @@ static BOOL nulldrv_WindowPosChanging( HWND hwnd, UINT swp_flags, BOOL shaped, c
     return TRUE;
 }
 
+/* WINESKIN */
+static BOOL nulldrv_SetWindowMenu( HWND hwnd, HMENU menu )
+{
+    return FALSE;
+}
+
 static BOOL nulldrv_GetWindowStyleMasks( HWND hwnd, UINT style, UINT ex_style, UINT *style_mask, UINT *ex_style_mask )
 {
     return FALSE;
@@ -1263,6 +1269,12 @@ static UINT loaderdrv_VulkanInit( UINT version, void *vulkan_handle, const struc
     return load_driver()->pVulkanInit( version, vulkan_handle, driver_funcs );
 }
 
+/* WINESKIN */
+static BOOL loaderdrv_SetWindowMenu( HWND hwnd, HMENU menu )
+{
+    return load_driver()->pSetWindowMenu( hwnd, menu );
+}
+
 static UINT loaderdrv_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs )
 {
     return load_driver()->pOpenGLInit( version, opengl_funcs, driver_funcs );
@@ -1335,6 +1347,7 @@ static const struct user_driver_funcs lazy_load_driver =
     nulldrv_CreateWindowSurface,
     nulldrv_MoveWindowBits,
     nulldrv_WindowPosChanged,
+    loaderdrv_SetWindowMenu, /* WINESKIN */
     /* system parameters */
     nulldrv_SystemParametersInfo,
     /* wintab support */
@@ -1435,6 +1448,7 @@ void __wine_set_user_driver( const struct user_driver_funcs *funcs, UINT version
     SET_USER_FUNC(CreateWindowSurface);
     SET_USER_FUNC(MoveWindowBits);
     SET_USER_FUNC(WindowPosChanged);
+    SET_USER_FUNC(SetWindowMenu); /* WINESKIN */
     SET_USER_FUNC(SystemParametersInfo);
     SET_USER_FUNC(WintabProc);
     SET_USER_FUNC(VulkanInit);

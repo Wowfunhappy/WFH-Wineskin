@@ -1125,6 +1125,44 @@ static const struct wined3d_query_ops timestamp_query_ops =
     wined3d_timestamp_query_ops_destroy,
 };
 
+/* WINESKIN: macOS's OpenGL has no timestamp counter (GL_TIMESTAMP has no
+ * counter bits). A timestamp query reads the CPU clock, in nanoseconds, when it
+ * is issued; its timestamp disjoint query reports a 1 GHz frequency. */
+static BOOL wined3d_timestamp_query_cpu_ops_poll(struct wined3d_query *query, uint32_t flags)
+{
+    TRACE("query %p, flags %#x.\n", query, flags);
+
+    return TRUE;
+}
+
+static BOOL wined3d_timestamp_query_cpu_ops_issue(struct wined3d_query *query, uint32_t flags)
+{
+    struct wined3d_timestamp_query *tq = wined3d_timestamp_query_from_query(query);
+    LARGE_INTEGER counter, frequency;
+
+    TRACE("query %p, flags %#x.\n", query, flags);
+
+    if (!(flags & WINED3DISSUE_END))
+        return FALSE;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    tq->timestamp = (counter.QuadPart / frequency.QuadPart) * 1000000000
+            + (counter.QuadPart % frequency.QuadPart) * 1000000000 / frequency.QuadPart;
+    return TRUE;
+}
+
+static void wined3d_timestamp_query_cpu_ops_destroy(struct wined3d_query *query)
+{
+    free(wined3d_timestamp_query_from_query(query));
+}
+
+static const struct wined3d_query_ops timestamp_query_cpu_ops =
+{
+    wined3d_timestamp_query_cpu_ops_poll,
+    wined3d_timestamp_query_cpu_ops_issue,
+    wined3d_timestamp_query_cpu_ops_destroy,
+};
+
 static HRESULT wined3d_timestamp_query_create(struct wined3d_device *device,
         enum wined3d_query_type type, void *parent, const struct wined3d_parent_ops *parent_ops,
         struct wined3d_query **query)
@@ -1135,17 +1173,23 @@ static HRESULT wined3d_timestamp_query_create(struct wined3d_device *device,
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
 
+    /* WINESKIN: see wined3d_timestamp_query_cpu_ops_issue.
     if (!gl_info->supported[ARB_TIMER_QUERY])
     {
         WARN("Unsupported in local OpenGL implementation: ARB_TIMER_QUERY.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
+    (WINESKIN) */
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    wined3d_query_init(&object->query, device, type, &object->timestamp,
-            sizeof(object->timestamp), &timestamp_query_ops, parent, parent_ops);
+    /* WINESKIN: see wined3d_timestamp_query_cpu_ops_issue. */
+    wined3d_query_init(&object->query, device, type, &object->timestamp, sizeof(object->timestamp),
+            gl_info->supported[ARB_TIMER_QUERY] ? &timestamp_query_ops : &timestamp_query_cpu_ops,
+            parent, parent_ops);
+    /* wined3d_query_init(&object->query, device, type, &object->timestamp,
+            sizeof(object->timestamp), &timestamp_query_ops, parent, parent_ops); */
 
     TRACE("Created query %p.\n", object);
     *query = &object->query;
@@ -1169,17 +1213,20 @@ static HRESULT wined3d_timestamp_disjoint_query_create(struct wined3d_device *de
         enum wined3d_query_type type, void *parent, const struct wined3d_parent_ops *parent_ops,
         struct wined3d_query **query)
 {
-    const struct wined3d_gl_info *gl_info = &wined3d_adapter_gl(device->adapter)->gl_info;
+    /* WINESKIN: see wined3d_timestamp_query_cpu_ops_issue. */
+    // const struct wined3d_gl_info *gl_info = &wined3d_adapter_gl(device->adapter)->gl_info;
     struct wined3d_query *object;
 
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
 
+    /* WINESKIN: see wined3d_timestamp_query_cpu_ops_issue.
     if (!gl_info->supported[ARB_TIMER_QUERY])
     {
         WARN("Unsupported in local OpenGL implementation: ARB_TIMER_QUERY.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
+    (WINESKIN) */
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
@@ -1278,6 +1325,35 @@ static const struct wined3d_query_ops pipeline_query_ops =
     wined3d_pipeline_query_ops_destroy,
 };
 
+/* WINESKIN: macOS's OpenGL has no pipeline statistics queries, which Direct3D
+ * 10 and later always provide. A query there completes when it ends, counting
+ * nothing. */
+static BOOL wined3d_pipeline_query_empty_ops_poll(struct wined3d_query *query, uint32_t flags)
+{
+    TRACE("query %p, flags %#x.\n", query, flags);
+
+    return TRUE;
+}
+
+static BOOL wined3d_pipeline_query_empty_ops_issue(struct wined3d_query *query, uint32_t flags)
+{
+    TRACE("query %p, flags %#x.\n", query, flags);
+
+    return !!(flags & WINED3DISSUE_END);
+}
+
+static void wined3d_pipeline_query_empty_ops_destroy(struct wined3d_query *query)
+{
+    free(wined3d_pipeline_statistics_query_from_query(query));
+}
+
+static const struct wined3d_query_ops pipeline_query_empty_ops =
+{
+    wined3d_pipeline_query_empty_ops_poll,
+    wined3d_pipeline_query_empty_ops_issue,
+    wined3d_pipeline_query_empty_ops_destroy,
+};
+
 static HRESULT wined3d_pipeline_query_create(struct wined3d_device *device,
         enum wined3d_query_type type, void *parent, const struct wined3d_parent_ops *parent_ops,
         struct wined3d_query **query)
@@ -1288,17 +1364,23 @@ static HRESULT wined3d_pipeline_query_create(struct wined3d_device *device,
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
 
+    /* WINESKIN: see wined3d_pipeline_query_empty_ops_issue.
     if (!gl_info->supported[ARB_PIPELINE_STATISTICS_QUERY])
     {
         WARN("OpenGL implementation does not support pipeline statistics queries.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
+    (WINESKIN) */
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    wined3d_query_init(&object->query, device, type, &object->statistics,
-            sizeof(object->statistics), &pipeline_query_ops, parent, parent_ops);
+    /* WINESKIN: see wined3d_pipeline_query_empty_ops_issue. */
+    wined3d_query_init(&object->query, device, type, &object->statistics, sizeof(object->statistics),
+            gl_info->supported[ARB_PIPELINE_STATISTICS_QUERY] ? &pipeline_query_ops : &pipeline_query_empty_ops,
+            parent, parent_ops);
+    /* wined3d_query_init(&object->query, device, type, &object->statistics,
+            sizeof(object->statistics), &pipeline_query_ops, parent, parent_ops); */
 
     TRACE("Created query %p.\n", object);
     *query = &object->query;

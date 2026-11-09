@@ -127,10 +127,12 @@ extern UINT get_menu_state( HMENU handle, UINT item_id, UINT flags );
 extern HMENU get_window_sys_sub_menu( HWND hwnd );
 extern BOOL is_menu( HMENU handle );
 extern HWND is_menu_active(void);
+extern BOOL is_driver_menu( HWND hwnd ); /* WINESKIN */
 extern LRESULT popup_menu_window_proc( HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, BOOL ansi );
 extern BOOL set_window_menu( HWND hwnd, HMENU handle );
 extern void track_keyboard_menu_bar( HWND hwnd, UINT wparam, WCHAR ch );
 extern void track_mouse_menu_bar( HWND hwnd, INT ht, int x, int y );
+extern BOOL update_driver_menu( HWND hwnd ); /* WINESKIN */
 
 /* message.c */
 extern NTSTATUS server_send_hardware_message( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam );

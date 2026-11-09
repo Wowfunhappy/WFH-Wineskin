@@ -145,9 +145,15 @@ GLenum wined3d_buffer_gl_binding_from_bind_flags(const struct wined3d_gl_info *g
     if (bind_flags & WINED3D_BIND_INDEX_BUFFER)
         return GL_ELEMENT_ARRAY_BUFFER;
 
+    /* WINESKIN: macOS OpenGL (the implementation with APPLE_rgb_422) can return
+     * from glBindBuffer(GL_TEXTURE_BUFFER, ...) still holding an internal
+     * lock, and the next texture call on the thread waits for it forever.
+     * Buffer views there are created and updated through GL_ARRAY_BUFFER;
+     * glTexBuffer() needs only the buffer's name. */
     if (bind_flags & (WINED3D_BIND_SHADER_RESOURCE | WINED3D_BIND_UNORDERED_ACCESS)
             && gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
-        return GL_TEXTURE_BUFFER;
+        return gl_info->supported[APPLE_RGB_422] ? GL_ARRAY_BUFFER : GL_TEXTURE_BUFFER;
+        // return GL_TEXTURE_BUFFER; (WINESKIN)
 
     if (bind_flags & WINED3D_BIND_CONSTANT_BUFFER)
         return GL_UNIFORM_BUFFER;

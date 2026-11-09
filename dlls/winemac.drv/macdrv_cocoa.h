@@ -305,6 +305,8 @@ enum {
     WINDOW_MINIMIZE_REQUESTED,
     WINDOW_RESIZE_ENDED,
     WINDOW_RESTORE_REQUESTED,
+    WINDOW_MENU_COMMAND,        /* WINESKIN */
+    WINDOW_MENU_LOOP,           /* WINESKIN */
     NUM_EVENT_TYPES
 };
 
@@ -399,8 +401,29 @@ typedef struct macdrv_event {
             bool    keep_frame;
             CGRect  frame;
         }                                           window_restore_requested;
+        /* WINESKIN: an item of the window's menu bar, chosen in the Mac menu bar or by its
+           key equivalent */
+        struct {
+            void           *menu;           /* HMENU holding the item */
+            void           *menu_parent;    /* HMENU holding that menu, or NULL */
+            unsigned int    menu_position;  /* position of that menu in its parent */
+            unsigned int    position;       /* position of the item in its menu */
+            unsigned int    command_id;
+            bool            key_equivalent;
+        }                                           window_menu_command;
+        /* WINESKIN */
+        struct {
+            int             kind;           /* MENU_LOOP_* */
+            void           *menu;           /* HMENU of the popup that closed */
+        }                                           window_menu_loop;
     };
 } macdrv_event;
+
+/* WINESKIN */
+enum {
+    MENU_LOOP_POPUP_CLOSED,
+    MENU_LOOP_END,
+};
 
 enum {
     QUERY_DRAG_DROP_ENTER,
@@ -411,7 +434,44 @@ enum {
     QUERY_RESIZE_SIZE,
     QUERY_RESIZE_START,
     QUERY_MIN_MAX_INFO,
+    QUERY_MENU_POPUP,           /* WINESKIN */
     NUM_QUERY_TYPES
+};
+
+/* WINESKIN: a snapshot of a Win32 menu, as the Mac menu bar shows it */
+enum {
+    MACDRV_MENU_ITEM_SEPARATOR  = 1 << 0,
+    MACDRV_MENU_ITEM_DISABLED   = 1 << 1,
+    MACDRV_MENU_ITEM_CHECKED    = 1 << 2,
+    MACDRV_MENU_ITEM_RADIO      = 1 << 3,
+    MACDRV_MENU_ITEM_DEFAULT    = 1 << 4,
+};
+
+enum {
+    MACDRV_KEY_EQUIVALENT_COMMAND   = 1 << 0,
+    MACDRV_KEY_EQUIVALENT_SHIFT     = 1 << 1,
+    MACDRV_KEY_EQUIVALENT_OPTION    = 1 << 2,
+};
+
+struct macdrv_menu;
+
+struct macdrv_menu_item {
+    CFStringRef             title;          /* NULL for a separator */
+    unsigned int            flags;          /* MACDRV_MENU_ITEM_* */
+    unsigned int            position;       /* position in the Win32 menu */
+    unsigned int            command_id;
+    UniChar                 key_equivalent; /* 0 for none */
+    unsigned int            key_modifiers;  /* MACDRV_KEY_EQUIVALENT_* */
+    struct macdrv_menu     *submenu;
+};
+
+struct macdrv_menu {
+    void                       *handle;     /* HMENU */
+    void                       *parent;     /* HMENU holding this menu, or NULL for a menu bar */
+    unsigned int                position;   /* position in the parent */
+    unsigned int                count;
+    uint32_t                    hash;       /* of the whole snapshot */
+    struct macdrv_menu_item    *items;
 };
 
 typedef struct macdrv_query {
@@ -435,6 +495,14 @@ typedef struct macdrv_query {
             unsigned int    from_left : 1;
             unsigned int    from_top : 1;
         }                                           resize_size;
+        /* WINESKIN: a popup of the window's menu bar is about to open */
+        struct {
+            void                   *menu;       /* HMENU of the popup */
+            void                   *parent;     /* HMENU holding the popup */
+            unsigned int            position;   /* position of the popup in its parent */
+            bool                    begin;      /* first popup of a menu loop */
+            struct macdrv_menu     *result;     /* the popup's snapshot, set by the reply */
+        }                                           menu_popup;
     };
 } macdrv_query;
 
@@ -517,6 +585,8 @@ extern void macdrv_set_view_frame(WineContentView *view, CGRect rect);
 extern void macdrv_set_view_superview(WineContentView *view, WineContentView *parent, WineWindow *window, WineContentView *prev, WineContentView *next);
 extern void macdrv_set_view_hidden(WineContentView *view, bool hidden);
 extern void macdrv_add_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
+/* WINESKIN: see -[WineContentView wine_attachPendingGLContexts]. */
+extern void macdrv_attach_pending_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
 extern void macdrv_remove_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
 extern MTLDevice_id macdrv_create_metal_device(void);
 extern void macdrv_release_metal_device(MTLDevice_id device);
@@ -566,6 +636,15 @@ extern void macdrv_dispose_opengl_context(WineOpenGLContext *context);
 extern void macdrv_make_context_current(WineOpenGLContext *context, WineContentView *view, CGRect r);
 extern void macdrv_update_opengl_context(WineOpenGLContext *context);
 extern void macdrv_flush_opengl_context(WineOpenGLContext *context);
+
+
+/* file panels (WINESKIN) */
+extern void macdrv_end_file_panel_sheet(WineWindow *window);
+
+
+/* menu bar (WINESKIN) */
+extern void macdrv_free_menu(struct macdrv_menu *menu);
+extern void macdrv_set_cocoa_window_menu(WineWindow *window, struct macdrv_menu *menu);
 
 
 /* systray / status item */

@@ -7,7 +7,9 @@ DELAYIMPORTS = ole32 winspool
 VER_FILEDESCRIPTION_STR = "Common Dialog Boxes"
 VER_PRODUCTVERSION      = 6,0,2900,5512
 
+# WINESKIN: nativedlg.c shows the Mac driver's native file panel for the file dialogs.
 SOURCES = \
+	nativedlg.c \
 	cdlg32.c \
 	colordlg.c \
 	comdlg32.rc \

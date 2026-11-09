@@ -31,6 +31,7 @@
 #include "commdlg.h"
 #include "cdlg.h"
 #include "filedlgbrowser.h"
+#include "wine/wineskin_file_panel.h" /* WINESKIN */
 
 #include "wine/debug.h"
 #include "wine/list.h"
@@ -2524,12 +2525,175 @@ static ULONG WINAPI IFileDialog2_fnRelease(IFileDialog2 *iface)
     return ref;
 }
 
+/* WINESKIN: the Mac driver's native file panel (nativedlg.c) */
+
+/* The file system path of a shell item, or NULL for a virtual folder such as the desktop root. */
+static WCHAR *native_item_path(IShellItem *psi)
+{
+    LPITEMIDLIST pidl;
+    WCHAR *path = NULL, *ret;
+    BOOL root;
+
+    if (!psi || FAILED(SHGetIDListFromObject((IUnknown *)psi, &pidl))) return NULL;
+    root = ILIsEmpty(pidl);
+    ILFree(pidl);
+    if (root || FAILED(IShellItem_GetDisplayName(psi, SIGDN_FILESYSPATH, &path))) return NULL;
+    ret = StrDupW(path);
+    CoTaskMemFree(path);
+    return ret;
+}
+
+/***********************************************************************
+ *      show_native_panel
+ *
+ * Show the native file panel for Show(). Returns FALSE when the Win32 dialog has to show
+ * instead: for custom controls, or without a native panel. Event sinks hear OnFileOk only.
+ */
+static BOOL show_native_panel(FileDialogImpl *This, HWND owner, HRESULT *ret)
+{
+    struct wineskin_file_panel panel = { 0 };
+    struct wineskin_file_panel_filter *filters = NULL;
+    WCHAR save_label[16], *dir, *chosen = NULL;
+    const WCHAR *title = This->custom_title, *prompt = This->custom_okbutton;
+    BOOL save = This->dlg_type == ITEMDLG_TYPE_SAVE, shown = FALSE;
+    HRESULT hr;
+    UINT i;
+
+    if (!list_empty(&This->cctrls) || This->hmenu_opendropdown) return FALSE;
+    if (save && (This->options & FOS_PICKFOLDERS)) return FALSE;
+
+    /* The Win32 dialog's default title and label for saving give way to the Mac defaults. */
+    LoadStringW(COMDLG32_hInstance, IDS_SAVE, save_label, ARRAY_SIZE(save_label));
+    if (title && !lstrcmpW(title, save_label)) title = NULL;
+    if (prompt && !lstrcmpW(prompt, save_label)) prompt = NULL;
+
+    if (This->filterspec_count)
+    {
+        filters = calloc(This->filterspec_count, sizeof(*filters));
+        for (i = 0; i < This->filterspec_count; i++)
+        {
+            filters[i].name = This->filterspecs[i].pszName;
+            filters[i].spec = This->filterspecs[i].pszSpec;
+        }
+    }
+
+    dir = native_item_path(This->psi_setfolder ? This->psi_setfolder : This->psi_defaultfolder);
+
+    panel.owner = owner;
+    if (save) panel.flags |= WINESKIN_FILE_PANEL_SAVE;
+    if (!save && (This->options & FOS_ALLOWMULTISELECT)) panel.flags |= WINESKIN_FILE_PANEL_MULTISELECT;
+    if (This->options & FOS_PICKFOLDERS) panel.flags |= WINESKIN_FILE_PANEL_FOLDERS;
+    if (This->options & FOS_FORCESHOWHIDDEN) panel.flags |= WINESKIN_FILE_PANEL_SHOW_HIDDEN;
+    panel.title = title;
+    panel.prompt = prompt;
+    panel.directory = dir;
+    panel.file_name = This->set_filename;
+    panel.filters = filters;
+    panel.filter_count = This->filterspec_count;
+    panel.filter_index = This->filetypeindex;
+
+    for (;;)
+    {
+        LPITEMIDLIST *pidls;
+        IShellFolder *psf_desktop;
+        const WCHAR *path;
+        WCHAR *folder;
+        UINT count = 0;
+
+        hr = COMDLG32_ShowFilePanel(&panel);
+        TRACE("panel returned 0x%08lx\n", hr);
+        if (FAILED(hr) && !shown) break;
+        shown = TRUE;
+        if (hr != S_OK) break;
+
+        for (path = panel.results; *path; path += lstrlenW(path) + 1) count++;
+        free(chosen);
+        chosen = malloc(((path - panel.results) + MAX_PATH + 2) * sizeof(WCHAR));
+        memcpy(chosen, panel.results, (path - panel.results + 1) * sizeof(WCHAR));
+
+        if (This->filterspec_count)
+        {
+            This->filetypeindex = min(panel.filter_index, This->filterspec_count - 1);
+            set_current_filter(This, This->filterspecs[This->filetypeindex].pszSpec);
+        }
+
+        /* A save without an extension takes the filter's, or else the default, as the Win32
+           dialog does; the panel adds the filter's extension itself when it knows it. */
+        if (save && !*PathFindExtensionW(chosen) && This->default_ext)
+        {
+            WCHAR *filter_ext = This->current_filter ? COMDLG32_FirstExtFromSpec(This->current_filter) : NULL;
+            const WCHAR *new_ext = filter_ext ? filter_ext : This->default_ext;
+
+            if (*new_ext && lstrlenW(new_ext) < MAX_PATH)
+            {
+                lstrcatW(chosen, L".");
+                lstrcatW(chosen, new_ext);
+                chosen[lstrlenW(chosen) + 1] = 0;
+            }
+            free(filter_ext);
+        }
+
+        pidls = calloc(count, sizeof(*pidls));
+        for (i = 0, path = chosen; i < count; i++, path += lstrlenW(path) + 1)
+            pidls[i] = SHSimpleIDListFromPath(path);
+
+        if (This->psia_results)
+        {
+            IShellItemArray_Release(This->psia_results);
+            This->psia_results = NULL;
+        }
+        if (SUCCEEDED(hr = SHGetDesktopFolder(&psf_desktop)))
+        {
+            hr = SHCreateShellItemArray(NULL, psf_desktop, count, (PCUITEMID_CHILD_ARRAY)pidls,
+                                        &This->psia_results);
+            IShellFolder_Release(psf_desktop);
+        }
+        for (i = 0; i < count; i++) ILFree(pidls[i]);
+        free(pidls);
+        if (FAILED(hr)) break;
+
+        set_file_name(This, PathFindFileNameW(chosen));
+        folder = StrDupW(chosen);
+        PathRemoveFileSpecW(folder);
+        if (This->psi_folder) IShellItem_Release(This->psi_folder);
+        This->psi_folder = NULL;
+        SHCreateItemFromParsingName(folder, NULL, &IID_IShellItem, (void **)&This->psi_folder);
+        if (!(This->options & FOS_NOCHANGEDIR)) SetCurrentDirectoryW(folder);
+        LocalFree(folder);
+
+        if (events_OnFileOk(This) == S_OK) break;
+
+        /* An event sink refused the choice: ask again. */
+        IShellItemArray_Release(This->psia_results);
+        This->psia_results = NULL;
+        HeapFree(GetProcessHeap(), 0, panel.results);
+        panel.results = NULL;
+        panel.filter_index = This->filetypeindex;
+    }
+
+    if (hr == S_FALSE)
+        *ret = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    else
+        *ret = hr;
+
+    HeapFree(GetProcessHeap(), 0, panel.results);
+    free(chosen);
+    free(filters);
+    LocalFree(dir);
+    return shown;
+}
+
 static HRESULT WINAPI IFileDialog2_fnShow(IFileDialog2 *iface, HWND hwndOwner)
 {
     FileDialogImpl *This = impl_from_IFileDialog2(iface);
+    HRESULT hr; /* WINESKIN */
     TRACE("%p (%p)\n", iface, hwndOwner);
 
     This->opendropdown_has_selection = FALSE;
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (show_native_panel(This, hwndOwner, &hr))
+        return hr;
 
     return create_dialog(This, hwndOwner);
 }

@@ -179,6 +179,14 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
 int COMDLG32_SplitFileNames(LPWSTR lpstrEdit, UINT nStrLen, LPWSTR *lpstrFileList, UINT *sizeUsed);
 void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText);
 
+/* WINESKIN: the Mac driver's native file panel (nativedlg.c) */
+struct wineskin_file_panel;
+HRESULT COMDLG32_ShowFilePanel(struct wineskin_file_panel *panel);
+WCHAR *COMDLG32_FirstExtFromSpec(const WCHAR *spec);
+BOOL COMDLG32_GetNativeFileName(OPENFILENAMEW *ofn, BOOL unicode, BOOL save, BOOL *ret);
+void COMDLG32_MRU_load_filename(WCHAR *stored_path);
+void COMDLG32_MRU_save_filename(const WCHAR *filename);
+
 extern BOOL GetFileName31A( OPENFILENAMEA *lpofn, UINT dlgType );
 extern BOOL GetFileName31W( OPENFILENAMEW *lpofn, UINT dlgType );
 

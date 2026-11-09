@@ -1,0 +1,10 @@
+# WINESKIN: the Aqua visual style; generate.py writes aqua.rc and the bitmaps.
+MODULE = aqua.msstyles
+
+EXTRADLLFLAGS = -Wb,--data-only
+
+VER_FILEDESCRIPTION_STR = "Aqua Theme"
+VER_PRODUCTVERSION      = 1,0,0,1
+
+SOURCES = \
+	aqua.rc

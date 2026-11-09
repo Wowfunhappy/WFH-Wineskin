@@ -68,7 +68,9 @@ static BOOL has_static_outer_frame( UINT ex_style )
 
 static BOOL has_menu( HWND hwnd, UINT style )
 {
-    return (style & (WS_CHILD | WS_POPUP)) != WS_CHILD && get_menu( hwnd );
+    // return (style & (WS_CHILD | WS_POPUP)) != WS_CHILD && get_menu( hwnd );
+    /* WINESKIN: a menu bar the user driver shows takes no part in the window's frame */
+    return (style & (WS_CHILD | WS_POPUP)) != WS_CHILD && get_menu( hwnd ) && !is_driver_menu( hwnd );
 }
 
 void fill_rect( HDC dc, const RECT *rect, HBRUSH hbrush )

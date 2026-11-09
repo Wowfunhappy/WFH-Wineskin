@@ -14,7 +14,7 @@ mkdir -p "$SRC" "$OUT/lib" "$OUT/include"
 
 fetch() {  # <url>
     local t="$SRC/$(basename "$1")"
-    [ -f "$t" ] || { curl -fsSL -o "$t.part" "$1" && mv "$t.part" "$t"; }
+    [ -f "$t" ] || { curl -fsSL --retry 5 --connect-timeout 30 --speed-time 60 --speed-limit 1000 -o "$t.part" "$1" && mv "$t.part" "$t"; }
     echo "$t"
 }
 
@@ -47,5 +47,11 @@ build_autotools freetype 2.13.3 https://download.savannah.gnu.org/releases/freet
 # Wine reads FreeType's headers through pkg-config; one .pc file serves both architectures.
 mkdir -p "$OUT/lib/pkgconfig"
 sed "s|$WORK/x86_64/prefix|$OUT|g" "$WORK/x86_64/prefix/lib/pkgconfig/freetype2.pc" > "$OUT/lib/pkgconfig/freetype2.pc"
+
+# wine-mono, which mscoree finds unpacked under the engine's share/wine/mono (stage-engine.sh): .NET
+# programs run without Wine offering to download it. The version is the one dlls/mscoree expects.
+MONO_VERSION="$(sed -n 's/^#define WINE_MONO_VERSION "\(.*\)"$/\1/p' "$WS_REPO/dlls/mscoree/mscoree_private.h")"
+fetch "https://dl.winehq.org/wine/wine-mono/$MONO_VERSION/wine-mono-$MONO_VERSION-x86.tar.xz" >/dev/null
+echo "### wine-mono $MONO_VERSION present"
 
 echo "### deps ready under $OUT"

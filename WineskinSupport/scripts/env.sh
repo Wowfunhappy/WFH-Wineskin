@@ -1,6 +1,6 @@
 #!/bin/bash
 # env.sh -- SOURCED. The build environment every script here shares: the in-tree toolchain first on
-# PATH, the 10.9 SDK, and the 10.9 deployment target.
+# PATH, the system's own headers and libraries as the sysroot, and the 10.9 deployment target.
 
 WS_SUPPORT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WS_REPO="$(cd "$WS_SUPPORT/.." && pwd)"
@@ -9,13 +9,15 @@ WS_CLANG="$WS_TOOLCHAIN/clang/bin/clang"
 # The host (Mach-O) compiler: WS_CLANG linking with ld64 (toolchain/bootstrap.sh).
 WS_HOST_CC="$WS_TOOLCHAIN/host/bin/clang"
 WS_DEPS="$WS_SUPPORT/deps/build"
-WS_SDK="${WINESKIN_SDK:-/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.9.sdk}"
+# The host side builds against the running 10.9 system: /usr/include from the Command Line Tools, and
+# the framework headers and libraries under /System. WINESKIN_SYSROOT names another root, such as an SDK.
+WS_SYSROOT="${WINESKIN_SYSROOT:-/}"
 # The install root Wine is configured for; staging installs under it with DESTDIR.
 WS_APP_ROOT=/Wineskin.app
 WS_JOBS="${WS_JOBS:-$(sysctl -n hw.ncpu)}"
 
-if [ ! -d "$WS_SDK" ]; then
-    echo "env.sh: FATAL: no macOS 10.9 SDK at $WS_SDK (set WINESKIN_SDK)." >&2
+if [ ! -f "$WS_SYSROOT/usr/include/stdio.h" ]; then
+    echo "env.sh: FATAL: no C headers under $WS_SYSROOT/usr/include (install the Command Line Tools, or set WINESKIN_SYSROOT)." >&2
     exit 1
 fi
 
@@ -34,7 +36,7 @@ unset SDKROOT CPATH LIBRARY_PATH C_INCLUDE_PATH OBJC_INCLUDE_PATH
 
 # The Mach-O compiler driver flags for one host architecture, for WS_HOST_CC.
 ws_host_cflags() {   # <i386|x86_64>
-    echo "--no-default-config -arch $1 -isysroot $WS_SDK -mmacosx-version-min=10.9"
+    echo "--no-default-config -arch $1 -isysroot $WS_SYSROOT -mmacosx-version-min=10.9"
 }
 ws_host_ldflags() {  # <i386|x86_64>
     ws_host_cflags "$1"

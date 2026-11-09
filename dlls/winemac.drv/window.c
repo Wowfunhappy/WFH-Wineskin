@@ -491,6 +491,8 @@ static void create_cocoa_window(struct macdrv_win_data *data)
     if (!NtUserGetLayeredWindowAttributes(data->hwnd, &key, &alpha, &layered_flags)) layered_flags = 0;
     sync_window_opacity(data, alpha, FALSE, layered_flags);
 
+    macdrv_sync_window_menu(data); /* WINESKIN */
+
 done:
     if (win_rgn) NtGdiDeleteObjectApp(win_rgn);
 }

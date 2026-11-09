@@ -234,6 +234,10 @@ void macdrv_make_context_current(WineOpenGLContext *context, WineContentView *vi
     {
         if (view == (WineContentView *)[context view] || view == (WineContentView *)[context latentView])
         {
+            /* WINESKIN: a context still waiting for its view to come on screen attaches once the
+               view is there (macdrv_attach_pending_view_opengl_context). */
+            if (view == (WineContentView *)[context latentView] && !context.needsUpdate)
+                macdrv_attach_pending_view_opengl_context(view, context);
             [context wine_updateBackingSize:&r.size];
             macdrv_update_opengl_context(context);
         }

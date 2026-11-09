@@ -725,6 +725,10 @@ void macdrv_release_query(macdrv_query *query)
                 if (query->pasteboard_data.type)
                     CFRelease(query->pasteboard_data.type);
                 break;
+            case QUERY_MENU_POPUP: /* WINESKIN */
+                if (query->menu_popup.result)
+                    macdrv_free_menu(query->menu_popup.result);
+                break;
         }
         [query->window release];
         free(query);

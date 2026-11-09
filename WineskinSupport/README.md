@@ -4,7 +4,9 @@
 and that packages it as a **WFH Wineskin wrapper**: a single app that holds a Wine engine, a Windows environment and the program it
 runs. A blank wrapper is copied once per program; there is no separate wrapper-creation app.
 
-The build runs on a 10.9 host with the in-tree clang 22 against the **10.9 SDK**, deployment target 10.9.
+The build runs on a 10.9 host with the in-tree clang 22 against the **running system's own headers and
+libraries** (the Command Line Tools' `/usr/include` and the frameworks under `/System`), deployment target 10.9.
+No Xcode or SDK is needed.
 Wine is built as a classic WoW64 pair: an x86_64 host tree with x86_64 PE modules, and an i386 host tree
 (10.9 runs i386 processes natively) with i386 PE modules. `wine` runs either kind of program and switches
 to the other loader as needed.
@@ -12,7 +14,9 @@ to the other loader as needed.
 ## The one rule: source vs. artifact
 
 If a script can regenerate it, it is an artifact: it lives in a gitignored `build/` (or `deps/work/`) and
-is never committed. Everything else is committed.
+is never committed. Everything else is committed. Wine's own tree is the exception: its build reads some
+generated files from the source tree, so those are committed beside their generators, as upstream commits
+`aero.msstyles`' bitmaps (`dlls/aqua.msstyles/*.bmp` and `aqua.rc`, from `generate.py`).
 
 ## Layout
 
@@ -25,10 +29,11 @@ WineskinSupport/
 │   │                       GNU make, pkgconf and nasm from source
 │   ├── vendor/clang/       COMMITTED: clang 22 + lld (bzip2), llvm-ar, resource headers, compiler-rt
 │   └── scripts/            build_gnu.sh (one GNU-style tool from a release tarball)
-├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType), universal i386 + x86_64
+├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType), universal i386 + x86_64,
+│                           and the wine-mono tarball
 ├── polyfill/               the 10.9 gap layer: libwineskin_polyfill.a + a header overlay (see below)
 ├── scripts/
-│   ├── env.sh              (sourced) toolchain PATH, SDK, deployment target, per-arch host flags
+│   ├── env.sh              (sourced) toolchain PATH, sysroot, deployment target, per-arch host flags
 │   ├── build-log.sh        (sourced) the one build log, /tmp/wineskin_build.log
 │   ├── configure-wine.sh   configure one tree
 │   ├── track-polyfill.sh   make one tree depend on the polyfill layer (its GNUmakefile)
@@ -41,9 +46,11 @@ WineskinSupport/
 
 ## Building
 
-1. Install Xcode with the 10.9 SDK (or set `WINESKIN_SDK` to a `MacOSX10.9.sdk`).
+1. Install the Command Line Tools (`xcode-select --install`), which put the C headers in `/usr/include`.
+   `WINESKIN_SYSROOT` names another root, such as a `MacOSX10.9.sdk`.
 2. `WineskinSupport/toolchain/bootstrap.sh`
-3. `WineskinSupport/deps/build_deps.sh`
+3. `WineskinSupport/deps/build_deps.sh` — FreeType, and the wine-mono release `dlls/mscoree` expects, which
+   staging unpacks into the engine's `share/wine/mono` so .NET programs run offline.
 4. `WineskinSupport/build.sh` — wait for `REBUILD DONE (rc=0)` in `/tmp/wineskin_build.log`. It builds the
    polyfill layer first, on every run.
 5. `WineskinSupport/wrapper/build-wrapper.sh` — produces `build/WFH Wineskin.app`, a blank wrapper.
@@ -53,7 +60,7 @@ WineskinSupport/
 - Host (Mach-O) code: `toolchain/build/host/bin/clang`, the in-tree clang with ld64 as its linker (Apple's
   clang has it so): a link gets `-fuse-ld=/usr/bin/ld -mlinker-version=241.9`, a compile nothing extra.
   lld's Mach-O port has no i386, and the Wine loader and preloader rely on ld64's segment options.
-  Compiles use `--no-default-config -isysroot <10.9 SDK> -mmacosx-version-min=10.9`.
+  Compiles use `--no-default-config -isysroot / -mmacosx-version-min=10.9`.
 - PE code: the in-tree clang as Wine's cross compiler (`-target <arch>-windows`), linked by lld-link.
 - Every compile goes through ccache (`build/ccache`). A configure starts a fresh build tree; unchanged
   objects come back from the cache.
@@ -77,7 +84,7 @@ is no segment of any image; the preloader reserves its free parts at startup.
 family, `clock_gettime`, `getattrlistat`, `os_unfair_lock`, …), compiled for both architectures with
 hidden visibility into `polyfill/build/libwineskin_polyfill.a`. Every host link takes the archive, so an
 image that calls a gap function holds a private copy. `polyfill/include/` is on every host compile's
-system include path ahead of the SDK: wrapper headers that `#include_next` the SDK's header and add the
+system include path ahead of the system's: wrapper headers that `#include_next` the system header and add the
 declarations later SDKs carry. Configure sees both, so Wine detects the functions as present.
 
 A polyfill honors the real API's contract. Most of `src/` comes from macports-legacy-support by way of
@@ -112,6 +119,46 @@ winemac probes OpenGL with accelerated renderers only, as upstream does. A Mac w
 renderer, such as a virtual machine, falls back to the software renderer automatically
 (`opengl.c: has_accelerated_renderer`), so no machine-specific setting lives in a wrapper's prefix.
 Don't set `AllowSoftwareRendering` in a prefix that will be copied to a Mac with a GPU.
+
+### Direct3D 10 and 11 on OpenGL 4.1
+
+macOS 10.9 stops at OpenGL 4.1: no compute shaders, image load/store, atomic counters, cull distances,
+derivative control, half-float packing, integer `mix()`, polygon offset clamp, base instance, timestamp
+counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature level 11_0 there:
+
+- Shader model 4 and 5 graphics shaders translate; the GLSL they need and 10.9 lacks (integer `mix()`,
+  `packHalf2x16()`, coarse/fine derivatives) is declared in each shader
+  (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
+- Compute shaders can be created; a dispatch, like an indirect draw, does nothing. Unordered access views
+  have no GL objects. BC6H/BC7 are unsupported formats.
+- Vertex shaders whose input registers run past 10.9's 16 attributes have their inputs packed into
+  consecutive locations (`wined3d_vs_attrib_location`).
+- Timestamp queries read the CPU clock; pipeline statistics queries count nothing.
+- Buffers for shader resource and unordered access views are bound to `GL_ARRAY_BUFFER`: 10.9's driver can
+  return from `glBindBuffer(GL_TEXTURE_BUFFER, …)` holding an internal lock.
+
+An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
+which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
+time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).
+
+## Native look and feel
+
+- **Menu bar.** A top-level window's Win32 menu bar is shown in the Mac menu bar, between the app menu and
+  the Window menu, instead of inside the window (`winemac.drv/menu.c`, `cocoa_menu.m`; win32u reserves no
+  menu bar space when the driver hosts it). Menus are refreshed with `WM_INITMENUPOPUP` as they open, and
+  `Ctrl` accelerators become Command key equivalents. `HKCU\Software\Wine\Mac Driver\NativeMenuBar`
+  = `n` turns it off.
+- **Aqua theme.** `dlls/aqua.msstyles`, the default theme, draws common controls as OS X 10.9 draws them,
+  with Lucida Grande for menus, captions, message boxes and status bars. `generate.py` in that directory
+  draws every bitmap.
+- **Open and Save panels.** GetOpenFileName/GetSaveFileName, IFileOpenDialog/IFileSaveDialog and
+  SHBrowseForFolder show NSOpenPanel or NSSavePanel, as a sheet on the owner window where there is one
+  (`comdlg32/nativedlg.c`, `winemac.drv/cocoa_file_panel.m`, reached through winemac.drv's
+  `wineskin_file_panel` export). A dialog with a hook, a custom template or custom controls keeps Wine's
+  own. `HKCU\Software\Wine\Mac Driver\NativeFileDialogs` = `n` turns it off.
+- **Command keys.** A wrapper maps both Command keys to Control (`CommandAsControl` in `Wineskin.plist`, on
+  unless set off), so Command-C copies and Command-S saves; the app menu then takes Command-H and
+  Command-Q.
 
 ## The wrapper
 

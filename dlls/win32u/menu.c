@@ -725,6 +725,30 @@ BOOL set_window_menu( HWND hwnd, HMENU handle )
     return TRUE;
 }
 
+/* WINESKIN: The user driver may show a top-level window's menu bar outside the window (in the
+   Mac menu bar). The window then reserves no non-client space for it, draws nothing for it and
+   never tracks it. */
+BOOL is_driver_menu( HWND hwnd )
+{
+    return (win_get_flags( hwnd ) & WIN_DRIVER_MENU) != 0;
+}
+
+/* WINESKIN: Hand the window's current menu bar to the user driver. Returns whether the driver
+   shows it. Must not be called with the user lock held. */
+BOOL update_driver_menu( HWND hwnd )
+{
+    HMENU handle;
+    BOOL hosted;
+
+    if (is_win_menu_disallowed( hwnd )) return FALSE;
+
+    handle = get_menu( hwnd );
+    hosted = user_driver->pSetWindowMenu( hwnd, handle ) && handle;
+    if (hosted) win_set_flags( hwnd, WIN_DRIVER_MENU, 0 );
+    else win_set_flags( hwnd, 0, WIN_DRIVER_MENU );
+    return hosted;
+}
+
 /**********************************************************************
  *           NtUserSetMenu    (win32u.@)
  */
@@ -732,6 +756,8 @@ BOOL WINAPI NtUserSetMenu( HWND hwnd, HMENU menu )
 {
     if (!set_window_menu( hwnd, menu ))
         return FALSE;
+
+    update_driver_menu( hwnd ); /* WINESKIN */
 
     NtUserSetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE |
                         SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED );
@@ -824,6 +850,12 @@ BOOL WINAPI NtUserDrawMenuBar( HWND hwnd )
             menu->hwndOwner = hwnd;
             release_menu_ptr( menu );
         }
+    }
+
+    /* WINESKIN: a menu bar the user driver already showed has nothing to redraw in the frame */
+    {
+        BOOL was_driver_menu = is_driver_menu( hwnd );
+        if (update_driver_menu( hwnd ) && was_driver_menu) return TRUE;
     }
 
     return NtUserSetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE |
@@ -2244,6 +2276,8 @@ UINT get_menu_bar_height( HWND hwnd, UINT width, INT org_x, INT org_y )
     HDC hdc;
 
     TRACE( "hwnd %p, width %d, at (%d, %d).\n", hwnd, width, org_x, org_y );
+
+    if (is_driver_menu( hwnd )) return 0; /* WINESKIN */
 
     hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_WINDOW );
     height = NtUserDrawMenuBarTemp( hwnd, hdc, &rect, 0, 0 );
@@ -3748,7 +3782,10 @@ static LRESULT do_next_menu( MTRACKER *pmt, UINT vk, UINT flags )
             if (IS_SYSTEM_MENU( menu ))
             {
                 /* switch to the menu bar */
-                if ((style & WS_CHILD) || !(new_menu = get_menu( new_hwnd ))) return FALSE;
+                // if ((style & WS_CHILD) || !(new_menu = get_menu( new_hwnd ))) return FALSE;
+                /* WINESKIN: a menu bar the user driver shows is never tracked */
+                if ((style & WS_CHILD) || is_driver_menu( new_hwnd ) ||
+                    !(new_menu = get_menu( new_hwnd ))) return FALSE;
 
                 if (vk == VK_LEFT)
                 {
@@ -4480,7 +4517,9 @@ void track_keyboard_menu_bar( HWND hwnd, UINT wparam, WCHAR ch )
 
     /* check if we have to track a system menu */
     menu = get_menu( hwnd );
-    if (!menu || is_iconic( hwnd ) || ch == ' ')
+    // if (!menu || is_iconic( hwnd ) || ch == ' ')
+    /* WINESKIN: a menu bar the user driver shows is never tracked */
+    if (!menu || is_driver_menu( hwnd ) || is_iconic( hwnd ) || ch == ' ')
     {
         if (!(get_window_long( hwnd, GWL_STYLE ) & WS_SYSMENU)) return;
         menu = get_win_sys_menu( hwnd );

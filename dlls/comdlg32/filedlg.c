@@ -2461,6 +2461,18 @@ static void FILEDLG95_MRU_load_filename(LPWSTR stored_path)
     TRACE("got MRU path: %s\n", wine_dbgstr_w(stored_path));
 }
 
+/* WINESKIN: the MRU path, for the native file panel (nativedlg.c) */
+void COMDLG32_MRU_load_filename(WCHAR *stored_path)
+{
+    FILEDLG95_MRU_load_filename(stored_path);
+}
+
+/* WINESKIN */
+void COMDLG32_MRU_save_filename(const WCHAR *filename)
+{
+    FILEDLG95_MRU_save_filename(filename);
+}
+
 void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText)
 {
   WCHAR strMsgTitle[MAX_PATH];
@@ -4160,6 +4172,8 @@ static inline BOOL is_win16_looks(DWORD flags)
  */
 BOOL WINAPI GetOpenFileNameA(OPENFILENAMEA *ofn)
 {
+    BOOL ret; /* WINESKIN */
+
     TRACE("flags 0x%08lx\n", ofn->Flags);
 
     if (!valid_struct_size( ofn->lStructSize ))
@@ -4171,6 +4185,10 @@ BOOL WINAPI GetOpenFileNameA(OPENFILENAMEA *ofn)
     /* OFN_FILEMUSTEXIST implies OFN_PATHMUSTEXIST */
     if (ofn->Flags & OFN_FILEMUSTEXIST)
         ofn->Flags |= OFN_PATHMUSTEXIST;
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (COMDLG32_GetNativeFileName((OPENFILENAMEW *)ofn, FALSE, FALSE, &ret))
+        return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31A(ofn, OPEN_DIALOG);
@@ -4195,6 +4213,8 @@ BOOL WINAPI GetOpenFileNameA(OPENFILENAMEA *ofn)
  */
 BOOL WINAPI GetOpenFileNameW(OPENFILENAMEW *ofn)
 {
+    BOOL ret; /* WINESKIN */
+
     TRACE("flags 0x%08lx\n", ofn->Flags);
 
     if (!valid_struct_size( ofn->lStructSize ))
@@ -4206,6 +4226,10 @@ BOOL WINAPI GetOpenFileNameW(OPENFILENAMEW *ofn)
     /* OFN_FILEMUSTEXIST implies OFN_PATHMUSTEXIST */
     if (ofn->Flags & OFN_FILEMUSTEXIST)
         ofn->Flags |= OFN_PATHMUSTEXIST;
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (COMDLG32_GetNativeFileName((OPENFILENAMEW *)ofn, TRUE, FALSE, &ret))
+        return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31W(ofn, OPEN_DIALOG);
@@ -4231,11 +4255,17 @@ BOOL WINAPI GetOpenFileNameW(OPENFILENAMEW *ofn)
  */
 BOOL WINAPI GetSaveFileNameA(OPENFILENAMEA *ofn)
 {
+    BOOL ret; /* WINESKIN */
+
     if (!valid_struct_size( ofn->lStructSize ))
     {
         COMDLG32_SetCommDlgExtendedError( CDERR_STRUCTSIZE );
         return FALSE;
     }
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (COMDLG32_GetNativeFileName((OPENFILENAMEW *)ofn, FALSE, TRUE, &ret))
+        return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31A(ofn, SAVE_DIALOG);
@@ -4261,11 +4291,17 @@ BOOL WINAPI GetSaveFileNameA(OPENFILENAMEA *ofn)
 BOOL WINAPI GetSaveFileNameW(
 	LPOPENFILENAMEW ofn) /* [in/out] address of init structure */
 {
+    BOOL ret; /* WINESKIN */
+
     if (!valid_struct_size( ofn->lStructSize ))
     {
         COMDLG32_SetCommDlgExtendedError( CDERR_STRUCTSIZE );
         return FALSE;
     }
+
+    /* WINESKIN: the Mac driver's native file panel, when it can show this dialog */
+    if (COMDLG32_GetNativeFileName((OPENFILENAMEW *)ofn, TRUE, TRUE, &ret))
+        return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31W(ofn, SAVE_DIALOG);

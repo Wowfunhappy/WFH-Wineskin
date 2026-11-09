@@ -4745,6 +4745,24 @@ static inline uint32_t wined3d_mask_from_size(unsigned int size)
     return size < 32 ? (1u << size) - 1 : ~0u;
 }
 
+/* WINESKIN: Direct3D 10 and later vertex shaders read up to 32 input
+ * registers; macOS's OpenGL has 16 vertex attributes. A shader model 4+ vertex
+ * shader whose input registers go past the attribute limit has its inputs
+ * packed into consecutive attribute locations, in register order. Otherwise an
+ * input register is its own attribute location. */
+static inline unsigned int wined3d_vs_attrib_location(const struct wined3d_shader *vs,
+        unsigned int attrib_count, unsigned int register_idx)
+{
+    uint32_t inputs;
+
+    if (!vs || vs->reg_maps.shader_version.major < 4)
+        return register_idx;
+    inputs = vs->reg_maps.input_registers;
+    if (!(inputs & ~wined3d_mask_from_size(attrib_count)))
+        return register_idx;
+    return wined3d_popcount(inputs & wined3d_mask_from_size(register_idx));
+}
+
 static inline DWORD wined3d_extract_bits(const uint32_t *bitstream,
         unsigned int offset, unsigned int count)
 {

@@ -27,6 +27,7 @@
 #include "shellapi.h"
 #include "unixlib.h"
 #include "wine/debug.h"
+#include "wine/wineskin_file_panel.h" /* WINESKIN */
 
 WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
 
@@ -366,6 +367,176 @@ cleanup:
     FreeResource(res_data);
 
     return NtCallbackReturn(entries, count * sizeof(entries[0]), 0);
+}
+
+
+/* WINESKIN: the native file panel (include/wine/wineskin_file_panel.h) */
+
+/***********************************************************************
+ *              file_panel_paths
+ *
+ * Convert the panel's null-separated Unix paths to Windows paths.
+ */
+static WCHAR *file_panel_paths(const char *unix_paths)
+{
+    const char *path;
+    WCHAR *ret, *p;
+    SIZE_T size = 1, used = 0;
+
+    if (!(ret = HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR)))) return NULL;
+
+    for (path = unix_paths; *path; path += strlen(path) + 1)
+    {
+        WCHAR *dos_path = wine_get_dos_file_name(path);
+        SIZE_T len;
+
+        if (!dos_path)
+        {
+            WARN("no Windows path for %s\n", debugstr_a(path));
+            continue;
+        }
+        len = lstrlenW(dos_path) + 1;
+        if (!(p = HeapReAlloc(GetProcessHeap(), 0, ret, (size + len) * sizeof(WCHAR))))
+        {
+            HeapFree(GetProcessHeap(), 0, dos_path);
+            HeapFree(GetProcessHeap(), 0, ret);
+            return NULL;
+        }
+        ret = p;
+        memcpy(ret + used, dos_path, len * sizeof(WCHAR));
+        used += len;
+        size += len;
+        HeapFree(GetProcessHeap(), 0, dos_path);
+    }
+
+    ret[used] = 0;
+    return ret;
+}
+
+
+/***********************************************************************
+ *              wineskin_file_panel   (MACDRV.@)
+ *
+ * Show an NSOpenPanel or NSSavePanel and wait for the user, processing this thread's messages
+ * as a modal dialog's message loop does. The owner's top-level window is disabled meanwhile.
+ */
+HRESULT CDECL wineskin_file_panel(struct wineskin_file_panel *panel)
+{
+    struct file_panel_begin_params begin = { 0 };
+    struct file_panel_poll_params poll = { 0 };
+    WCHAR *filters = NULL, *p;
+    char *unix_dir = NULL, *paths = NULL;
+    HWND root = NULL;
+    BOOL reenable = FALSE, quit = FALSE;
+    WPARAM quit_code = 0;
+    SIZE_T size = 1;
+    HRESULT hr = E_FAIL;
+    UINT i;
+    MSG msg;
+
+    TRACE("owner %p flags 0x%x title %s directory %s name %s filters %u index %u\n", panel->owner,
+          panel->flags, debugstr_w(panel->title), debugstr_w(panel->directory),
+          debugstr_w(panel->file_name), panel->filter_count, panel->filter_index);
+
+    panel->results = NULL;
+
+    for (i = 0; i < panel->filter_count; i++)
+        size += lstrlenW(panel->filters[i].name) + lstrlenW(panel->filters[i].spec) + 2;
+    if (!(filters = HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR)))) return E_OUTOFMEMORY;
+    for (i = 0, p = filters; i < panel->filter_count; i++)
+    {
+        lstrcpyW(p, panel->filters[i].name);
+        p += lstrlenW(p) + 1;
+        lstrcpyW(p, panel->filters[i].spec);
+        p += lstrlenW(p) + 1;
+    }
+    *p = 0;
+
+    if (panel->directory && panel->directory[0])
+        unix_dir = wine_get_unix_file_name(panel->directory);
+
+    if (panel->owner) root = GetAncestor(panel->owner, GA_ROOT);
+
+    begin.title = (UINT_PTR)panel->title;
+    begin.prompt = (UINT_PTR)panel->prompt;
+    begin.directory = (UINT_PTR)unix_dir;
+    begin.file_name = (UINT_PTR)panel->file_name;
+    begin.filters = (UINT_PTR)filters;
+    begin.owner = HandleToUlong(root);
+    begin.flags = panel->flags;
+    begin.filter_count = panel->filter_count;
+    begin.filter_index = panel->filter_index;
+
+    if (GetCapture()) ReleaseCapture();
+
+    if (MACDRV_CALL(file_panel_begin, &begin))
+    {
+        TRACE("no native panel\n");
+        hr = E_NOTIMPL;
+        goto done;
+    }
+    poll.panel = begin.panel;
+
+    if (root && IsWindowEnabled(root))
+    {
+        EnableWindow(root, FALSE);
+        reenable = TRUE;
+    }
+
+    for (;;)
+    {
+        MACDRV_CALL(file_panel_poll, &poll);
+        if (poll.done || quit) break;
+
+        /* The main thread signals the event queue when the panel ends; the timeout covers a
+           signal this thread's driver events consumed just before the wait. */
+        MsgWaitForMultipleObjectsEx(0, NULL, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        while (PeekMessageW(&msg, 0, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT)
+            {
+                quit = TRUE;
+                quit_code = msg.wParam;
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (poll.done && poll.chosen)
+    {
+        if ((paths = HeapAlloc(GetProcessHeap(), 0, poll.needed)))
+        {
+            poll.buffer = (UINT_PTR)paths;
+            poll.size = poll.needed;
+            MACDRV_CALL(file_panel_poll, &poll);
+        }
+        if (poll.copied && (panel->results = file_panel_paths(paths)) && panel->results[0])
+            hr = S_OK;
+        else
+        {
+            HeapFree(GetProcessHeap(), 0, panel->results);
+            panel->results = NULL;
+            hr = E_FAIL;
+        }
+    }
+    else
+        hr = S_FALSE;
+
+    if (poll.done) panel->filter_index = poll.filter_index;
+    MACDRV_CALL(file_panel_release, &poll);
+
+    if (reenable) EnableWindow(root, TRUE);
+    if (root && IsWindow(root)) SetForegroundWindow(root);
+    if (quit) PostQuitMessage(quit_code);
+
+done:
+    HeapFree(GetProcessHeap(), 0, paths);
+    HeapFree(GetProcessHeap(), 0, unix_dir);
+    HeapFree(GetProcessHeap(), 0, filters);
+    TRACE("returning 0x%08lx\n", hr);
+    return hr;
 }
 
 

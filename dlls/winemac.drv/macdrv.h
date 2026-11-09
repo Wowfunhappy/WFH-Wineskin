@@ -81,6 +81,8 @@
 extern bool allow_vsync;
 extern bool allow_set_gamma;
 extern bool allow_software_rendering;
+extern bool native_menu_bar; /* WINESKIN */
+extern bool native_file_dialogs; /* WINESKIN */
 
 extern UINT64 app_icon_callback;
 extern UINT64 app_quit_request_callback;
@@ -199,6 +201,7 @@ extern struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_fo
 extern BOOL macdrv_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect, struct window_surface **surface);
 extern void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                                     const struct window_rects *new_rects, struct window_surface *surface);
+extern BOOL macdrv_SetWindowMenu(HWND hwnd, HMENU menu); /* WINESKIN */
 extern void macdrv_DestroyCursorIcon(HCURSOR cursor);
 extern BOOL macdrv_GetCursorPos(LPPOINT pos);
 extern void macdrv_SetCapture(HWND hwnd, UINT flags, HWND previous);
@@ -283,6 +286,17 @@ extern void macdrv_reassert_window_position(HWND hwnd);
 extern bool query_resize_size(HWND hwnd, macdrv_query *query);
 extern bool query_resize_start(HWND hwnd);
 extern bool query_min_max_info(HWND hwnd);
+
+/* cocoa_file_panel.m (WINESKIN) */
+extern NTSTATUS macdrv_file_panel_begin(void *arg);
+extern NTSTATUS macdrv_file_panel_poll(void *arg);
+extern NTSTATUS macdrv_file_panel_release(void *arg);
+
+/* menu.c (WINESKIN) */
+extern void macdrv_sync_window_menu(struct macdrv_win_data *data);
+extern bool query_menu_popup(HWND hwnd, macdrv_query *query);
+extern void macdrv_window_menu_command(HWND hwnd, const macdrv_event *event);
+extern void macdrv_window_menu_loop(HWND hwnd, const macdrv_event *event);
 
 extern void macdrv_mouse_button(HWND hwnd, const macdrv_event *event);
 extern void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event);

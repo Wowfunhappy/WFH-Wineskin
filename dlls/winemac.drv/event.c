@@ -67,6 +67,8 @@ static const char *dbgstr_event(int type)
         "WINDOW_MINIMIZE_REQUESTED",
         "WINDOW_RESIZE_ENDED",
         "WINDOW_RESTORE_REQUESTED",
+        "WINDOW_MENU_COMMAND",      /* WINESKIN */
+        "WINDOW_MENU_LOOP",         /* WINESKIN */
     };
     C_ASSERT(ARRAYSIZE(event_names) == NUM_EVENT_TYPES);
 
@@ -119,6 +121,8 @@ static macdrv_event_mask get_event_mask(DWORD mask)
         event_mask |= event_mask_for_type(WINDOW_FRAME_CHANGED);
         event_mask |= event_mask_for_type(WINDOW_GOT_FOCUS);
         event_mask |= event_mask_for_type(WINDOW_LOST_FOCUS);
+        event_mask |= event_mask_for_type(WINDOW_MENU_COMMAND); /* WINESKIN */
+        event_mask |= event_mask_for_type(WINDOW_MENU_LOOP);    /* WINESKIN */
     }
 
     if (mask & QS_SENDMESSAGE)
@@ -291,6 +295,10 @@ static void macdrv_query_event(HWND hwnd, const macdrv_event *event)
             TRACE("QUERY_MIN_MAX_INFO\n");
             success = query_min_max_info(hwnd);
             break;
+        case QUERY_MENU_POPUP: /* WINESKIN */
+            TRACE("QUERY_MENU_POPUP\n");
+            success = query_menu_popup(hwnd, query);
+            break;
         default:
             FIXME("unrecognized query type %d\n", query->type);
             break;
@@ -408,6 +416,12 @@ void macdrv_handle_event(const macdrv_event *event)
         break;
     case WINDOW_RESTORE_REQUESTED:
         macdrv_window_restore_requested(hwnd, event);
+        break;
+    case WINDOW_MENU_COMMAND: /* WINESKIN */
+        macdrv_window_menu_command(hwnd, event);
+        break;
+    case WINDOW_MENU_LOOP: /* WINESKIN */
+        macdrv_window_menu_loop(hwnd, event);
         break;
     default:
         TRACE("    ignoring\n");

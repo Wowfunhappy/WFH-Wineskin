@@ -250,6 +250,10 @@ static inline BOOL stage_manager_enabled(void)
     - (void) addGLContext:(WineOpenGLContext*)context;
     - (void) removeGLContext:(WineOpenGLContext*)context;
     - (void) updateGLContexts;
+    /* WINESKIN: see -wine_attachPendingGLContexts. */
+    - (void) wine_attachPendingGLContexts;
+    - (void) wine_attachPendingGLContextsOfTree;
+    - (void) wine_attachPendingGLContext:(WineOpenGLContext*)context;
 
     - (void) wine_getBackingSize:(int*)outBackingSize;
     - (void) wine_setBackingSize:(const int*)newBackingSize;
@@ -464,6 +468,45 @@ static inline BOOL stage_manager_enabled(void)
         [pendingGlContexts removeAllObjects];
     }
 
+    /* WINESKIN: an OpenGL context added while its view was off screen waits in pendingGlContexts
+       for the view's next -viewWillDraw. On 10.9 a layer-backed view that shows only OpenGL may never
+       get one, so the context also attaches when the view, or its window, comes on screen. */
+    - (void) wine_attachPendingGLContexts
+    {
+        if (![pendingGlContexts count] || [[self window] windowNumber] <= 0 ||
+            ![[self window] isVisible] || [self isHiddenOrHasHiddenAncestor])
+            return;
+
+        for (WineOpenGLContext* context in pendingGlContexts)
+        {
+            context.needsUpdate = TRUE;
+            macdrv_update_opengl_context(context);
+        }
+        [glContexts addObjectsFromArray:pendingGlContexts];
+        [pendingGlContexts removeAllObjects];
+    }
+
+    - (void) wine_attachPendingGLContext:(WineOpenGLContext*)context
+    {
+        if (![pendingGlContexts containsObject:context] || [[self window] windowNumber] <= 0 ||
+            ![[self window] isVisible] || [self isHiddenOrHasHiddenAncestor])
+            return;
+
+        context.needsUpdate = TRUE;
+        [glContexts addObject:context];
+        [pendingGlContexts removeObjectIdenticalTo:context];
+    }
+
+    - (void) wine_attachPendingGLContextsOfTree
+    {
+        [self wine_attachPendingGLContexts];
+        for (NSView* subview in [self subviews])
+        {
+            if ([subview isKindOfClass:[WineContentView class]])
+                [(WineContentView*)subview wine_attachPendingGLContextsOfTree];
+        }
+    }
+
     - (void) addGLContext:(WineOpenGLContext*)context
     {
         BOOL hadContext = _everHadGLContext;
@@ -675,6 +718,8 @@ static inline BOOL stage_manager_enabled(void)
     - (void) viewDidUnhide
     {
         [super viewDidUnhide];
+        /* WINESKIN: see -wine_attachPendingGLContexts. */
+        [self wine_attachPendingGLContexts];
         [self updateGLContexts:YES];
         [self invalidateHasGLDescendant];
     }
@@ -1713,6 +1758,10 @@ static inline BOOL stage_manager_enabled(void)
                Generate a frame-changed event just in case.  The back end will ignore
                it if nothing actually changed. */
             [self windowDidResize:nil skipSizeMove:TRUE];
+
+            /* WINESKIN: see -[WineContentView wine_attachPendingGLContexts]. */
+            if ([[self contentView] isKindOfClass:[WineContentView class]])
+                [(WineContentView*)[self contentView] wine_attachPendingGLContextsOfTree];
 
             if (![self isExcludedFromWindowsMenu])
                 [NSApp addWindowsItem:self title:[self title] filename:NO];
@@ -3135,6 +3184,7 @@ void macdrv_destroy_cocoa_window(WineWindow *window)
 @autoreleasepool
 {
     OnMainThread(^{
+        macdrv_end_file_panel_sheet(window); /* WINESKIN */
         window.closing = TRUE;
         [window doOrderOut];
         [window close];
@@ -3593,6 +3643,21 @@ void macdrv_add_view_opengl_context(WineContentView *view, WineOpenGLContext *co
 {
     OnMainThread(^{
         [view addGLContext:context];
+    });
+}
+}
+
+/***********************************************************************
+ *              macdrv_attach_pending_view_opengl_context
+ *
+ * WINESKIN: see -[WineContentView wine_attachPendingGLContexts].
+ */
+void macdrv_attach_pending_view_opengl_context(WineContentView *view, WineOpenGLContext *context)
+{
+@autoreleasepool
+{
+    OnMainThread(^{
+        [view wine_attachPendingGLContext:context];
     });
 }
 }
