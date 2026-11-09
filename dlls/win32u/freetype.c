@@ -42,22 +42,6 @@
 
 #ifdef __APPLE__
 #include <CoreText/CoreText.h>
-#include <CoreFoundation/CFPreferences.h> /* WINESKIN */
-
-/* WINESKIN: whether the Mac draws text with LCD (subpixel) smoothing: the default, and any
-   AppleFontSmoothing level but 0, which "Use LCD font smoothing when available" off sets. */
-int wineskin_mac_lcd_font_smoothing(void)
-{
-    CFPropertyListRef value = CFPreferencesCopyAppValue( CFSTR("AppleFontSmoothing"), kCFPreferencesAnyApplication );
-    int level = 2;
-
-    if (value)
-    {
-        if (CFGetTypeID( value ) == CFNumberGetTypeID()) CFNumberGetValue( value, kCFNumberIntType, &level );
-        CFRelease( value );
-    }
-    return level != 0;
-}
 #endif /* __APPLE__ */
 
 #ifdef HAVE_FT2BUILD_H
