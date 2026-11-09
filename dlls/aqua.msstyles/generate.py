@@ -121,6 +121,18 @@ ACCENTS = {
         'fill': stops((0.00, C(166, 212, 240)), (0.18, C(124, 190, 233)), (0.49, C(36, 165, 229)),
                       (0.50, C(0, 148, 228)), (0.80, C(0, 172, 234)), (1.00, C(126, 208, 238))),
         'border': stops((0.00, C(38, 78, 158)), (0.30, C(52, 86, 146)), (1.00, C(34, 50, 98))),
+        # The default push button (the middle of its pulse) and the pressed one, as HIThemeDrawButton
+        # draws them on OS X 10.9.
+        'button': stops((0.00, C(216, 238, 249)), (0.055, C(200, 224, 249)), (0.11, C(192, 216, 245)),
+                        (0.52, C(152, 198, 245)), (0.53, C(124, 186, 245)), (0.78, C(158, 208, 249)),
+                        (1.00, C(200, 236, 249))),
+        'button_border': stops((0.00, C(64, 71, 166, 0.86)), (0.50, C(60, 65, 133, 0.86)),
+                               (1.00, C(56, 59, 95, 0.86))),
+        'button_pressed': stops((0.00, C(188, 214, 239)), (0.055, C(163, 193, 239)), (0.11, C(152, 184, 233)),
+                                (0.52, C(103, 161, 233)), (0.53, C(70, 147, 233)), (0.78, C(111, 174, 238)),
+                                (1.00, C(171, 212, 239))),
+        'button_pressed_border': stops((0.00, C(52, 60, 162, 0.86)), (0.50, C(48, 52, 130, 0.86)),
+                                       (1.00, C(42, 45, 95, 0.86))),
         'highlight': (56, 117, 215),
         'menu_highlight': (64, 128, 236),
         'hot_tracking': (36, 104, 210),
@@ -461,9 +473,9 @@ def gen_button(accent, dpi):
     inset = ipx(1 * s)
     bh = h - inset - ipx(1 * s)
     r = 4 * s
-    blue_fill, blue_border = accent['fill'], accent['border']
-    pressed_fill = shade(blue_fill, 0.88)
-    pressed_border = shade(blue_border, 0.85)
+    blue_fill, blue_border = accent.get('button', accent['fill']), accent.get('button_border', accent['border'])
+    pressed_fill = accent.get('button_pressed') or shade(blue_fill, 0.88)
+    pressed_border = accent.get('button_pressed_border') or shade(blue_border, 0.85)
     # PBS_NORMAL, PBS_HOT, PBS_PRESSED, PBS_DISABLED, PBS_DEFAULTED, PBS_DEFAULTED_ANIMATING
     looks = [(LIGHT, LIGHT_BORDER, 1.0), (LIGHT, LIGHT_BORDER, 1.0), (pressed_fill, pressed_border, 1.0),
              (LIGHT, LIGHT_BORDER, 0.5), (blue_fill, blue_border, 1.0), (blue_fill, blue_border, 1.0)]
