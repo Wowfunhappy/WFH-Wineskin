@@ -173,6 +173,55 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
   unless set off), so Command-C copies and Command-S saves; the app menu then takes Command-H and
   Command-Q.
 
+## Full screen and display modes
+
+A program's display mode changes are emulated: `ChangeDisplaySettings`, DirectDraw's `SetDisplayMode` and
+Direct3D's fullscreen modes succeed and Windows reports the new mode, but the display keeps its own. Each
+display offers its current mode, read from the display at run time (in pixels in Retina mode), as its
+largest and default mode, and win32u's usual list of smaller sizes below it (`get_virtual_modes`); the
+native mode draws 1:1. When a display is reconfigured or replaced while Wine runs, its mode follows,
+unless a program set a mode the display still holds. Windows' coordinates in a smaller mode map to the
+display's (win32u's monitor scaling, as for DPI), centered and scaled to fit, so a window that covers the
+emulated screen covers the display, with black beside a 4:3 picture on a 16:9 display, and the pointer,
+cursor clipping and window rects all stay in the program's coordinates. winemac gives a window's OpenGL
+surface the window's size in Windows' coordinates and the window server scales it to the window
+(`kCGLCPSurfaceBackingSize`), so OpenGL, Direct3D 8 to 11 and DirectDraw, which draw through it, need
+no framebuffer copy. Emulation is `HKCU\Software\Wine\Mac Driver\EmulateModeset` (on unless set `n`;
+`win32u/sysparams.c`); gamma ramps do nothing while it is on.
+
+A visible top-level window whose content covers a screen, as a fullscreen game's does, goes full screen
+in a Space of its own, as with the green button (`-[WineWindow wine_updateFullScreenSpace]`,
+`HKCU\Software\Wine\Mac Driver\FullScreenSpace`, on unless set `n`):
+
+- It enters once it has covered the screen for 0.4 seconds, since engines resize and recreate their
+  windows while they start, and only while the app is active on that screen's Space. It leaves when
+  Windows makes it stop covering the screen (the game switches to windowed), when it is hidden, or when
+  it gains an owner window it moves with. A window the user takes out of its Space stays out until it
+  stops covering the screen.
+- Its Win32 rect stays what the program set; frame changes Cocoa makes for the Space are not posted.
+- The menu bar and Dock stay hidden in the Space, even with the pointer at the top or bottom edge.
+  Hot corners still act there.
+- The app's other windows, such as message boxes, appear on the game's Space above it.
+- Command-Tab leaves the Space where it is, as for a Mac app. A game Windows minimizes
+  when it loses the foreground (Direct3D's fullscreen devices do) stays in its Space and is restored when
+  the user comes back; minimized while it is in front, it leaves the Space for the Dock.
+
+The wrapper's "Full screen in its own Space" (on by default) sets both values; off, a covering window is
+raised over the current Space and display mode changes are real, as in upstream winemac. They go
+together because real mode changes resize every Space and move the desktop's windows around a game's
+Space, and a mode left behind by a game that quits or crashes is the user's to fix.
+
+### Retina mode
+
+In Retina mode (the wrapper's "Retina mode", `RetinaMode`), Windows sees two pixels per point each way on
+a display in the mode it had when Wine started: a Retina display's real pixels, and on a 1x display
+twice its pixels, which the window server draws at half size. Each display's DPI is
+96 per pixel per point, 192 for those (`display_dpi` in `winemac.drv/display.c`), so DPI-aware programs
+draw at 200% and win32u scales DPI-unaware windows up, as on Windows at 200%. The wrapper sets the system
+DPI (`HKCU\Control Panel\Desktop\LogPixels`) to 192 when Retina mode is turned on and 96 when it is
+turned off. Out of Retina mode, displays are in points at the system DPI. A game's native mode in Retina
+mode is the display's pixel size.
+
 ## Audio
 
 Devices offer no spatial audio client (`ISpatialAudioClient`), as on Windows without spatial sound:
@@ -278,4 +327,5 @@ turning Documents off links the Mac's Documents again, leaving what the program 
 
 Opening a wrapper with no program, or with Option held, shows the configuration window: install
 software, choose the program and its arguments, Wine's tools (configuration, registry, command prompt,
-task manager), and the Mac driver options.
+task manager), and the Mac driver options, among them "Full screen in its own Space" (see "Full screen
+and display modes").

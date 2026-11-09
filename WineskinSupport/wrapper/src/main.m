@@ -36,6 +36,17 @@ static BOOL CommandAsControl(NSDictionary *config)
 }
 static NSString *const kWineDebugKey = @"WineDebug";
 
+/* On unless set off: a fullscreen program's window goes full screen in a Space of its own, and its
+   display mode changes are emulated, so the display keeps its own mode (winemac's FullScreenSpace and
+   win32u's EmulateModeset). Off, the window covers the screen in the current Space and display mode
+   changes are real. */
+static NSString *const kFullScreenSpaceKey = @"FullScreenSpace";
+
+static BOOL FullScreenSpace(NSDictionary *config)
+{
+    return config[kFullScreenSpaceKey] ? [config[kFullScreenSpaceKey] boolValue] : YES;
+}
+
 /* The program's AppData (on unless set off) and Documents (off unless set on) folders can live in the
    wrapper's own folder in ~/Library/Application Support, named by kDataFolderKey, where they outlast
    the wrapper. With Documents off, Documents is the Mac's, as Wine links it. */
@@ -247,18 +258,26 @@ static void KillWine(Wrapper *w)
     [task waitUntilExit];
 }
 
-/* Mac driver options live in the prefix's registry. */
-static void ApplyRegistryOptions(Wrapper *w)
+/* Mac driver options live in the prefix's registry. In Retina mode, Windows has two pixels per point
+   each way, so the system DPI (LogPixels) is 192, as on Windows scaled to 200%; it is set when Retina
+   mode is turned on or off (setDPI), leaving a DPI chosen in Wine's configuration alone otherwise. */
+static void ApplyRegistryOptions(Wrapper *w, BOOL setDPI)
 {
     NSString *reg = [NSString stringWithFormat:
         @"REGEDIT4\n\n[HKEY_CURRENT_USER\\Software\\Wine\\Mac Driver]\n"
         @"\"LeftOptionIsAlt\"=\"%@\"\n\"RightOptionIsAlt\"=\"%@\"\n\"RetinaMode\"=\"%@\"\n"
-        @"\"LeftCommandIsCtrl\"=\"%@\"\n\"RightCommandIsCtrl\"=\"%@\"\n",
+        @"\"LeftCommandIsCtrl\"=\"%@\"\n\"RightCommandIsCtrl\"=\"%@\"\n"
+        @"\"FullScreenSpace\"=\"%@\"\n\"EmulateModeset\"=\"%@\"\n",
         [w.config[kOptionAsAltKey] boolValue] ? @"y" : @"n",
         [w.config[kOptionAsAltKey] boolValue] ? @"y" : @"n",
         [w.config[kRetinaModeKey] boolValue] ? @"y" : @"n",
         CommandAsControl(w.config) ? @"y" : @"n",
-        CommandAsControl(w.config) ? @"y" : @"n"];
+        CommandAsControl(w.config) ? @"y" : @"n",
+        FullScreenSpace(w.config) ? @"y" : @"n",
+        FullScreenSpace(w.config) ? @"y" : @"n"];
+    if (setDPI)
+        reg = [reg stringByAppendingFormat:@"\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\n\"LogPixels\"=dword:%08x\n",
+               [w.config[kRetinaModeKey] boolValue] ? 192 : 96];
     NSString *file = [NSTemporaryDirectory() stringByAppendingPathComponent:
                       [NSString stringWithFormat:@"wineskin-%d.reg", getpid()]];
     [reg writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
@@ -463,6 +482,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 @property (strong) NSButton *commandCtrlBox;
 @property (strong) NSButton *appDataBox;
 @property (strong) NSButton *documentsBox;
+@property (strong) NSButton *fullScreenSpaceBox;
 @property (strong) NSTextField *status;
 @property (strong) NSProgressIndicator *spinner;
 @property (strong) NSMutableArray *busyControls;
@@ -511,14 +531,14 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 - (void)show
 {
     self.busyControls = [NSMutableArray array];
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 454)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 478)
                                               styleMask:NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask
                                                 backing:NSBackingStoreBuffered defer:NO];
     self.window.title = [NSString stringWithFormat:@"%@ — WFH Wineskin", [self.wrapper name]];
     self.window.delegate = self;
     [self.window center];
 
-    CGFloat y = 414;
+    CGFloat y = 438;
     [self label:@"Program" frame:NSMakeRect(20, y, 520, 20) bold:YES];
     y -= 28;
     self.programField = [[NSTextField alloc] initWithFrame:NSMakeRect(20, y, 410, 22)];
@@ -568,6 +588,11 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     self.appDataBox.toolTip = @"Keep the program's settings and saved games in ~/Library/Application Support, where they outlast this app.";
     self.documentsBox = [self checkbox:@"Documents in Application Support" key:kDocumentsInSupportKey frame:NSMakeRect(290, y, 250, 20)];
     self.documentsBox.toolTip = @"Keep what the program saves to Documents in ~/Library/Application Support instead of your Documents folder.";
+    y -= 24;
+    self.fullScreenSpaceBox = [self checkbox:@"Full screen in its own Space" key:kFullScreenSpaceKey frame:NSMakeRect(20, y, 250, 20)];
+    self.fullScreenSpaceBox.state = FullScreenSpace(self.wrapper.config) ? NSOnState : NSOffState;
+    self.fullScreenSpaceBox.toolTip = @"A fullscreen program goes full screen in a Space of its own, as with the green button, "
+        @"and its resolution changes are scaled to the screen instead of changing your display's resolution.";
 
     self.spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 18, 16, 16)];
     self.spinner.style = NSProgressIndicatorSpinningStyle;
@@ -637,7 +662,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
         }
         KeepDesktopInPrefix(self.wrapper);
         ApplyDataFolders(self.wrapper);
-        ApplyRegistryOptions(self.wrapper);
+        ApplyRegistryOptions(self.wrapper, [self.wrapper.config[kRetinaModeKey] boolValue]);
         self.status.stringValue = @"Ready.";
     }];
 }
@@ -805,18 +830,22 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     if ([panel runModal] == NSFileHandlingPanelOKButton) [self setProgram:panel.URL.path];
 }
 
-/* Saves the window's options; YES when the Mac driver options in the registry need applying. */
-- (BOOL)saveOptions
+/* Saves the window's options; YES when the Mac driver options in the registry need applying, and
+   *retinaChanged YES when Retina mode was turned on or off. */
+- (BOOL)saveOptions:(BOOL *)retinaChanged
 {
     NSMutableDictionary *c = self.wrapper.config;
     c[kArgumentsKey] = self.argumentsField.stringValue ?: @"";
     c[kDebugLogKey] = @(self.debugLogBox.state == NSOnState);
+    *retinaChanged = [c[kRetinaModeKey] boolValue] != (self.retinaBox.state == NSOnState);
     BOOL registryChanged = [c[kOptionAsAltKey] boolValue] != (self.optionAltBox.state == NSOnState) ||
-                           [c[kRetinaModeKey] boolValue] != (self.retinaBox.state == NSOnState) ||
-                           CommandAsControl(c) != (self.commandCtrlBox.state == NSOnState);
+                           *retinaChanged ||
+                           CommandAsControl(c) != (self.commandCtrlBox.state == NSOnState) ||
+                           FullScreenSpace(c) != (self.fullScreenSpaceBox.state == NSOnState);
     c[kOptionAsAltKey] = @(self.optionAltBox.state == NSOnState);
     c[kRetinaModeKey] = @(self.retinaBox.state == NSOnState);
     c[kCommandAsControlKey] = @(self.commandCtrlBox.state == NSOnState);
+    c[kFullScreenSpaceKey] = @(self.fullScreenSpaceBox.state == NSOnState);
     BOOL foldersChanged = AppDataInSupport(c) != (self.appDataBox.state == NSOnState) ||
                           [c[kDocumentsInSupportKey] boolValue] != (self.documentsBox.state == NSOnState);
     c[kAppDataInSupportKey] = @(self.appDataBox.state == NSOnState);
@@ -828,16 +857,18 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 
 - (void)optionChanged:(id)sender
 {
-    if ([self saveOptions]) {
+    BOOL retinaChanged;
+    if ([self saveOptions:&retinaChanged]) {
         Wrapper *w = self.wrapper;
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ ApplyRegistryOptions(w); });
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ ApplyRegistryOptions(w, retinaChanged); });
     }
 }
 
 /* The program runs as this process, as when the wrapper is opened, so it keeps the wrapper's Dock icon. */
 - (void)runProgram:(id)sender
 {
-    if ([self saveOptions]) ApplyRegistryOptions(self.wrapper);
+    BOOL retinaChanged;
+    if ([self saveOptions:&retinaChanged]) ApplyRegistryOptions(self.wrapper, retinaChanged);
     if (![self.wrapper programUnixPath]) { [self chooseProgram:nil]; return; }
     ExecProgram(self.wrapper, @[]);
 }
