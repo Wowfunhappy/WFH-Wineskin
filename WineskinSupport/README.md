@@ -133,8 +133,10 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
 - Shader model 4 and 5 graphics shaders translate; the GLSL they need and 10.9 lacks (integer `mix()`,
   `packHalf2x16()`, coarse/fine derivatives) is declared in each shader
   (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
-- Compute shaders can be created; a dispatch, like an indirect draw, does nothing. Unordered access views
-  have no GL objects. BC6H/BC7 are unsupported formats.
+- Compute shaders run on OpenCL 1.2 (see below). Pixel shaders that use unordered access views, and
+  indirect draws, do nothing. BC6H/BC7 are unsupported formats.
+- Constant (stride 0) vertex attributes of any format of 8, 16 or 32-bit components are set from their
+  element (`wined3d_context_gl_load_stride0_attrib`).
 - Vertex shaders whose input registers run past 10.9's 16 attributes have the inputs they read packed into
   consecutive locations; inputs they declare but never read, and vertex/instance IDs, take no attribute
   (`wined3d_vs_attrib_location`).
@@ -145,6 +147,38 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   buffer change while that texture is bound, leaving an internal lock held so the next GL call hangs.
   The dummy buffer texture keeps its buffer, and units holding a buffer texture get the dummy before any
   buffer is deleted (`wined3d_context_gl_unbind_buffer_textures`).
+
+#### Compute shaders on OpenCL
+
+Where OpenGL lacks `ARB_compute_shader`, a dispatch runs the compute shader as an OpenCL 1.2 kernel on the
+GPU, on an OpenCL context that shares the current OpenGL context's share group
+(`CL_CONTEXT_PROPERTY_USE_CGL_SHAREGROUP_APPLE`), so kernels read and write wined3d's buffers and textures
+in place.
+
+- `dlls/wined3d/glsl_cl.h` (included by `glsl_shader.c`) generates the kernel with the GLSL backend in an
+  OpenCL C dialect: the arithmetic and control-flow handlers emit their GLSL unchanged, and a prelude of
+  typedefs, constructor macros and overloaded functions makes it OpenCL C (`vec4` is `float4`, `bvec4` an
+  `int4` of 1s and 0s, `mix()` with a boolean selects, and so on). Resources, thread group shared memory
+  (`__local` arrays), atomics, UAV counters and barriers have handlers of their own. A kernel is generated
+  per combination of OpenCL image kinds bound to the shader's texture views.
+- Kernel arguments: constant buffers and buffer views are OpenGL buffers with a byte offset (typed buffer
+  views decode their format in the kernel); texture views are images of the view's first level, with
+  out-of-bounds reads returning 0 and writes dropped; samplers take the view's address mode and filter.
+  A texture UAV the shader reads is bound twice, as a write-only and a read-only image.
+- `dlls/wined3d/cl_compute.c` loads the bound resources into their OpenGL locations, describes each
+  argument, reads indirect arguments back, and dispatches. It also clears unordered access views (10.9 has
+  neither `ARB_clear_texture` nor `ARB_clear_buffer_object`). Formats OpenCL can't share (R11G11B10F,
+  RGB10A2, sRGB, SNORM, 24-bit depth, compressed) get a shadow texture of a shareable format, blitted on
+  the GPU (or copied through a pixel buffer) before a dispatch and back after one that writes it.
+- `dlls/wined3d/cl.c` (`wined3d.so`) builds the kernels, keeps an OpenCL memory object per OpenGL buffer
+  and texture level until wined3d deletes the OpenGL object, acquires them, runs the NDRange and flushes;
+  the share group orders the OpenCL work with the OpenGL commands around it.
+- Uncompressed, non-sRGB color formats report unordered access support.
+- OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
+  view's first level only; cube textures are read one face at a time; subroutines (`call`) don't
+  translate, and the shader's dispatches then do nothing.
+- `HKCU\Software\Wine\Direct3D\OpenCLCompute` = `n` (or `WINE_D3D_CONFIG=OpenCLCompute=n`) turns it off;
+  dispatches then do nothing. `WINEDEBUG=+d3d_cl` logs each kernel's source and build log.
 
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next

@@ -10951,8 +10951,8 @@ static void shader_glsl_precompile(void *shader_priv, struct wined3d_shader *sha
 
     if (shader->reg_maps.shader_version.type == WINED3D_SHADER_TYPE_COMPUTE)
     {
-        /* WINESKIN: without ARB_compute_shader a compute shader is never run
-         * (see shader_glsl_get_shader_model). */
+        /* WINESKIN: without ARB_compute_shader a compute shader runs on
+         * OpenCL, with kernels built at its first dispatch (glsl_cl.h). */
         if (!wined3d_adapter_gl_const(device->adapter)->gl_info.supported[ARB_COMPUTE_SHADER])
             return;
         context = context_acquire(device, NULL, 0);
@@ -11520,9 +11520,8 @@ static unsigned int shader_glsl_get_shader_model(const struct wined3d_gl_info *g
     /* WINESKIN: macOS's OpenGL 4.1 has the shader model 5 graphics pipeline
      * (OpenGL 4.0) but no compute shaders, unordered access views or atomic
      * counters. Shader model 5 vertex, hull, domain, geometry and pixel shaders
-     * that use none of those translate. Compute shaders can be created, and a
-     * dispatch without ARB_compute_shader does nothing
-     * (dispatch_compute in context_gl.c). */
+     * that use none of those translate. Compute shaders run on OpenCL
+     * (cl_compute.c, glsl_cl.h). */
     if (shader_model_4
             && gl_info->supported[ARB_GPU_SHADER5]
             && gl_info->supported[ARB_TESSELLATION_SHADER]

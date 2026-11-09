@@ -205,6 +205,7 @@ struct cl_shadow
     unsigned int level, width, height, depth;
     GLenum internal, format, type, upload_format;
     unsigned int texel_size;
+    bool blit; /* copied with glBlitFramebuffer, on the GPU */
 };
 
 static struct list cl_shadows = LIST_INIT(cl_shadows);
@@ -295,6 +296,22 @@ static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, st
         shadow->texel_size = 8;
     }
 
+    /* Renderable formats are blitted; others go through a pixel buffer,
+     * which macOS converts on the CPU. */
+    switch (wined3d_gl_get_internal_format(&texture_gl->t.resource, wined3d_format_gl(format), false))
+    {
+        case GL_R11F_G11F_B10F:
+        case GL_RGB10_A2:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGB565:
+        case GL_RGB5_A1:
+        case GL_RGBA4:
+            shadow->blit = texture_gl->target != GL_TEXTURE_1D && texture_gl->target != GL_TEXTURE_1D_ARRAY;
+            break;
+        default:
+            break;
+    }
+
     TRACE("Creating a %ux%ux%u shadow (internal format %#x) of level %u of texture %u (%s).\n",
             width, height, depth, shadow->internal, level, source, debug_d3dformat(format->id));
 
@@ -369,6 +386,48 @@ static void cl_shadow_copy(struct wined3d_context_gl *context_gl, struct cl_shad
         dst_format = shadow->format;
         if (dst_format == GL_DEPTH_COMPONENT)
             return;
+    }
+
+    if (shadow->blit)
+    {
+        unsigned int layer, layers = shadow->target == GL_TEXTURE_2D ? 1 : shadow->depth;
+        GLuint fbo[2];
+
+        gl_info->fbo_ops.glGenFramebuffers(2, fbo);
+        gl_info->fbo_ops.glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+        gl_info->fbo_ops.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+        gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+        context_invalidate_state(&context_gl->c, STATE_RASTERIZER);
+        gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        context_invalidate_state(&context_gl->c, STATE_BLEND);
+        if (gl_info->supported[ARB_FRAMEBUFFER_SRGB])
+        {
+            gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
+            context_invalidate_state(&context_gl->c, STATE_SHADER(WINED3D_SHADER_TYPE_PIXEL));
+        }
+        for (layer = 0; layer < layers; ++layer)
+        {
+            if (layers == 1 && src_target != GL_TEXTURE_2D_ARRAY && src_target != GL_TEXTURE_3D)
+                gl_info->fbo_ops.glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        src_image_target, src, src_level);
+            else
+                gl_info->fbo_ops.glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        src, src_level, layer);
+            if (layers == 1 && dst_target != GL_TEXTURE_2D_ARRAY && dst_target != GL_TEXTURE_3D)
+                gl_info->fbo_ops.glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        dst_image_target, dst, dst_level);
+            else
+                gl_info->fbo_ops.glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        dst, dst_level, layer);
+            gl_info->fbo_ops.glBlitFramebuffer(0, 0, shadow->width, shadow->height,
+                    0, 0, shadow->width, shadow->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        gl_info->fbo_ops.glBindFramebuffer(GL_READ_FRAMEBUFFER, context_gl->fbo_read_binding);
+        gl_info->fbo_ops.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_gl->fbo_draw_binding);
+        gl_info->fbo_ops.glDeleteFramebuffers(2, fbo);
+        context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+        checkGLcall("shadow texture blit");
+        return;
     }
 
     wined3d_context_gl_bind_texture(context_gl, src_target, src);
@@ -871,7 +930,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     params.group_size[0] = group_size->x;
     params.group_size[1] = group_size->y;
     params.group_size[2] = group_size->z;
-    params.sync = 1;
+    params.sync = 0;
     if ((status = WINE_UNIX_CALL(unix_cl_dispatch, &params)))
     {
         for (i = 0; i < kernel->binding_count; ++i)
@@ -1091,7 +1150,7 @@ bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, cons
         if (!params.group_count[i])
             return true;
     }
-    params.sync = 1;
+    params.sync = 0;
     if ((status = WINE_UNIX_CALL(unix_cl_dispatch, &params)))
         ERR("Failed to clear unordered access view %p, status %#lx.\n", view, status);
     if (shadow)
