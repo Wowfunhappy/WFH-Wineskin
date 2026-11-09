@@ -3054,6 +3054,39 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
     }
 }
 
+/* WINESKIN: macOS OpenGL (the implementation with APPLE_rgb_422) leaves a buffer texture without
+ * storage when its buffer is deleted, and GLEngine then reads through a NULL buffer on the next
+ * buffer change while that texture is bound to a unit. Units holding a buffer texture get the
+ * dummy buffer texture before a buffer goes away; shader resources are bound again at the next
+ * draw or dispatch. */
+void wined3d_context_gl_unbind_buffer_textures(struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_dummy_textures *textures = &wined3d_device_gl(context_gl->c.device)->dummy_textures;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    unsigned int unit, active = context_gl->active_texture;
+    bool rebound = false;
+
+    if (!gl_info->supported[APPLE_RGB_422] || !gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
+        return;
+
+    for (unit = 0; unit < gl_info->limits.combined_samplers; ++unit)
+    {
+        if (context_gl->texture_type[unit] != GL_TEXTURE_BUFFER)
+            continue;
+        wined3d_context_gl_active_texture(context_gl, gl_info, unit);
+        gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_BUFFER, textures->tex_buffer);
+        context_gl->texture_type[unit] = GL_NONE;
+        rebound = true;
+    }
+    if (!rebound)
+        return;
+
+    wined3d_context_gl_active_texture(context_gl, gl_info, active);
+    checkGLcall("unbind buffer textures");
+    context_invalidate_compute_state(&context_gl->c, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
+    context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
+}
+
 void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct wined3d_bo_gl *bo)
 {
     struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
@@ -3091,6 +3124,7 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
 
     TRACE("Destroying GL buffer %u.\n", bo->id);
 
+    wined3d_context_gl_unbind_buffer_textures(context_gl); /* WINESKIN */
     GL_EXTCALL(glDeleteBuffers(1, &bo->id));
     checkGLcall("buffer object destruction");
     bo->id = 0;

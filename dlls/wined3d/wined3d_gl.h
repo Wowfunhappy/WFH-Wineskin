@@ -727,6 +727,7 @@ void context_gl_resource_released(struct wined3d_device *device, GLuint name, BO
 
 struct wined3d_context *wined3d_context_gl_acquire(const struct wined3d_device *device,
         struct wined3d_texture *texture, unsigned int sub_resource_idx);
+void wined3d_context_gl_unbind_buffer_textures(struct wined3d_context_gl *context_gl); /* WINESKIN */
 void wined3d_context_gl_active_texture(struct wined3d_context_gl *context_gl,
         const struct wined3d_gl_info *gl_info, unsigned int unit);
 void wined3d_context_gl_alloc_fence(struct wined3d_context_gl *context_gl, struct wined3d_fence *fence);
@@ -855,6 +856,7 @@ struct wined3d_dummy_textures
     GLuint tex_1d_array;
     GLuint tex_2d_array;
     GLuint tex_buffer;
+    GLuint tex_buffer_storage; /* WINESKIN: the buffer behind tex_buffer. */
     GLuint tex_2d_ms;
     GLuint tex_2d_ms_array;
 };

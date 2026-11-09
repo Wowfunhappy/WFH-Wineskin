@@ -655,6 +655,9 @@ static void wined3d_device_gl_create_dummy_textures(struct wined3d_device_gl *de
 
     if (gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
     {
+        /* WINESKIN: the buffer lives as long as the texture. Deleting it while attached leaves the
+         * texture without storage in macOS OpenGL, and GLEngine then reads through a NULL buffer when
+         * any buffer changes while the dummy is bound to a unit. */
         GLuint buffer;
 
         GL_EXTCALL(glGenBuffers(1, &buffer));
@@ -666,7 +669,8 @@ static void wined3d_device_gl_create_dummy_textures(struct wined3d_device_gl *de
         TRACE("Dummy buffer texture given name %u.\n", textures->tex_buffer);
         gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_BUFFER, textures->tex_buffer);
         GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, buffer));
-        GL_EXTCALL(glDeleteBuffers(1, &buffer));
+        /* GL_EXTCALL(glDeleteBuffers(1, &buffer)); (WINESKIN) */
+        textures->tex_buffer_storage = buffer; /* WINESKIN */
     }
 
     if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE])
@@ -712,6 +716,9 @@ static void wined3d_device_gl_destroy_dummy_textures(struct wined3d_device_gl *d
 
     if (gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
         gl_info->gl_ops.gl.p_glDeleteTextures(1, &dummy_textures->tex_buffer);
+    /* WINESKIN: the buffer behind the dummy buffer texture goes with it. */
+    if (gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
+        GL_EXTCALL(glDeleteBuffers(1, &dummy_textures->tex_buffer_storage));
 
     if (gl_info->supported[EXT_TEXTURE_ARRAY])
     {
@@ -1228,6 +1235,7 @@ static void wined3d_allocator_gl_destroy_chunk(struct wined3d_allocator_chunk *c
     wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_UNPACK_BUFFER, chunk_gl->gl_buffer);
     if (chunk_gl->c.map_ptr)
         GL_EXTCALL(glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER));
+    wined3d_context_gl_unbind_buffer_textures(context_gl); /* WINESKIN */
     GL_EXTCALL(glDeleteBuffers(1, &chunk_gl->gl_buffer));
     TRACE("Freed buffer %u.\n", chunk_gl->gl_buffer);
     wined3d_allocator_chunk_cleanup(&chunk_gl->c);
