@@ -125,6 +125,5 @@
     /* WINESKIN: a top-level window that covers a screen goes full screen in a Space of its own. */
     - (void) wine_updateFullScreenSpace;
     - (void) wine_applicationDidBecomeActive;
-    - (BOOL) wine_isInFullScreenSpace;
 
 @end
