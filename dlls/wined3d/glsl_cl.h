@@ -1615,7 +1615,7 @@ static void shader_cl_dump_source(const char *source)
     {
         if (!(end = strchr(line, '\n')))
             end = line + strlen(line);
-        TRACE_(d3d_cl)("    %.*s\n", (int)(end - line), line);
+        TRACE_(d3d_cl)("    %.*s\n", (int)min(end - line, 400), line);
         line = *end ? end + 1 : end;
     }
 }

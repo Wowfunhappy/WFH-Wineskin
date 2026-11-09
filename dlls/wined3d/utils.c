@@ -2971,6 +2971,15 @@ static void query_internal_format(struct wined3d_adapter *adapter,
         if (!gl_info->limits.samplers[WINED3D_SHADER_TYPE_VERTEX])
             format_clear_caps(&format->f, WINED3D_FORMAT_CAP_VTF);
 
+        /* WINESKIN: without image load/store, compute shaders on OpenCL
+         * (cl_compute.c) read and write uncompressed color formats. */
+        if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE] && wined3d_settings.opencl_compute
+                && !srgb_format && !format->f.depth_size && !format->f.stencil_size
+                && !(format->f.attrs & (WINED3D_FORMAT_ATTR_BLOCKS | WINED3D_FORMAT_ATTR_COMPRESSED))
+                && (format->f.attrs & (WINED3D_FORMAT_ATTR_FLOAT | WINED3D_FORMAT_ATTR_INTEGER
+                | WINED3D_FORMAT_ATTR_NORMALISED)))
+            format_set_caps(&format->f, WINED3D_FORMAT_CAP_UNORDERED_ACCESS);
+
         if (!(gl_info->quirks & WINED3D_QUIRK_LIMITED_TEX_FILTERING))
             format_set_caps(&format->f, WINED3D_FORMAT_CAP_FILTERING);
         else if (format->f.id != WINED3DFMT_R32G32B32A32_FLOAT && format->f.id != WINED3DFMT_R32_FLOAT)

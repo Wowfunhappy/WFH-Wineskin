@@ -242,9 +242,23 @@ static NTSTATUS cl_build(void *args)
         clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         log[log_size] = 0;
         if (err)
-            ERR("Failed to build an OpenCL kernel, error %d:\n%s\n", err, log);
-        else
-            TRACE("OpenCL build log:\n%s\n", log);
+            ERR("Failed to build an OpenCL kernel, error %d:\n", err);
+        if (err || TRACE_ON(d3d_cl))
+        {
+            char *line = log, *end;
+
+            /* A line at a time: Wine's debug output takes a few hundred bytes per call. */
+            while (*line)
+            {
+                if (!(end = strchr(line, '\n')))
+                    end = line + strlen(line);
+                if (err)
+                    ERR("    %.*s\n", (int)min(end - line, 400), line);
+                else
+                    TRACE("    %.*s\n", (int)min(end - line, 400), line);
+                line = *end ? end + 1 : end;
+            }
+        }
         free(log);
     }
     else if (err)
