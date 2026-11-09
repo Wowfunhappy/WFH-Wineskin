@@ -1091,7 +1091,12 @@ static inline BOOL stage_manager_enabled(void)
     {
         NSUInteger style = [self styleMask];
 
-        if (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
+        if ((wantsFullScreenSpace || ownsFullScreen) && !self.parentWindow) /* WINESKIN */
+        {
+            behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+        }
+        else if (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
             style & NSWindowStyleMaskResizable && !(style & NSWindowStyleMaskUtilityWindow) && !maximized &&
             !(self.parentWindow || self.latentParentWindow))
         {
@@ -1102,7 +1107,9 @@ static inline BOOL stage_manager_enabled(void)
         {
             behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
             behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary;
-            if (style & NSWindowStyleMaskFullScreen)
+            wantsFullScreenSpace = FALSE; /* WINESKIN */
+            if (style & NSWindowStyleMaskFullScreen && !exitingFullScreen) /* WINESKIN: not twice */
+            // if (style & NSWindowStyleMaskFullScreen)
                 [super toggleFullScreen:nil];
         }
 
@@ -1273,12 +1280,19 @@ static inline BOOL stage_manager_enabled(void)
         {
             macdrv_event_mask discard = event_mask_for_type(WINDOW_DID_UNMINIMIZE);
 
+            /* WINESKIN */
+            minimizedForWine = state->minimized;
+            if (!state->minimized)
+                minimizedInFullScreenSpace = miniaturizeAfterFullScreen = FALSE;
+
             pendingMinimize = FALSE;
             if (state->minimized && ![self isMiniaturized])
             {
                 if ([self wouldBeVisible])
                 {
-                    if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
+                    if (ownsFullScreen) /* WINESKIN */
+                        [self wine_minimizeInFullScreenSpace];
+                    else if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
                     {
                         [self postDidUnminimizeEvent];
                         discard &= ~event_mask_for_type(WINDOW_DID_UNMINIMIZE);
@@ -1792,6 +1806,7 @@ static inline BOOL stage_manager_enabled(void)
 
         [self endWindowDragging];
         [controller windowWillOrderOut:self];
+        [self wine_cancelFullScreenSpace]; /* WINESKIN */
 
         if (enteringFullScreen || exitingFullScreen)
         {
@@ -1821,6 +1836,8 @@ static inline BOOL stage_manager_enabled(void)
             fakingClose = TRUE;
             [self close];
             fakingClose = FALSE;
+            /* WINESKIN: closing takes the window out of its Space */
+            wantsFullScreenSpace = ownsFullScreen = minimizedInFullScreenSpace = miniaturizeAfterFullScreen = FALSE;
         }
         else
             [self orderOut:nil];
@@ -1857,6 +1874,125 @@ static inline BOOL stage_manager_enabled(void)
 
             [controller adjustWindowLevels];
         }
+
+        [self wine_updateFullScreenSpace]; /* WINESKIN */
+    }
+
+    /* WINESKIN: a visible top-level window whose content covers a screen, as a fullscreen game's does,
+       goes full screen in a Space of its own (FullScreenSpace, on unless set off), as a Mac app's
+       window does with the green button: the menu bar and Dock stay hidden there, and other apps
+       are a Command-Tab or a swipe away. It enters once it has covered the screen for
+       FULL_SCREEN_SPACE_DELAY seconds, since engines resize and recreate their windows as they
+       start, and leaves when Windows makes it stop covering the screen. Its Win32 rect stays what
+       the program set: frame changes during the Space are kept in nonFullscreenFrame, not posted. */
+#define FULL_SCREEN_SPACE_DELAY 0.4
+
+    - (BOOL) wine_coversScreenInFrame:(NSRect)frame
+    {
+        NSUInteger style = [self styleMask] & ~NSWindowStyleMaskFullScreen;
+        NSRect contentRect = [[self class] contentRectForFrameRect:frame styleMask:style];
+        return screen_covered_by_rect(contentRect, [NSScreen screens]) != nil;
+    }
+
+    - (BOOL) wine_canUseFullScreenSpace
+    {
+        return full_screen_space && !closing && [self isVisible] && ![self isMiniaturized] &&
+               (!minimizedForWine || minimizedInFullScreenSpace) && !miniaturizeAfterFullScreen && !self.parentWindow &&
+               ![self needsTransparency] && [self alphaValue] >= 1.0;
+    }
+
+    - (void) wine_cancelFullScreenSpace
+    {
+        if (!fullScreenSpacePending) return;
+        fullScreenSpacePending = FALSE;
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(wine_enterFullScreenSpace) object:nil];
+    }
+
+    - (void) wine_enterFullScreenSpace
+    {
+        fullScreenSpacePending = FALSE;
+        if (ownsFullScreen || ([self styleMask] & NSWindowStyleMaskFullScreen) || enteringFullScreen || exitingFullScreen)
+            return;
+        if (fullScreenSpaceDeclined || ![self wine_canUseFullScreenSpace] || ![NSApp isActive] ||
+            ![self isOnActiveSpace] || ![self wine_coversScreenInFrame:self.wine_fractionalFrame])
+            return;
+
+        wantsFullScreenSpace = ownsFullScreen = TRUE;
+        [self adjustFullScreenBehavior:[self collectionBehavior]];
+        [super toggleFullScreen:nil];
+    }
+
+    - (void) wine_leaveFullScreenSpace
+    {
+        wantsFullScreenSpace = FALSE;
+        /* While it enters, -windowDidEnterFullScreen: takes it out. */
+        if (ownsFullScreen && ([self styleMask] & NSWindowStyleMaskFullScreen) && !enteringFullScreen && !exitingFullScreen)
+            [super toggleFullScreen:nil];
+    }
+
+    - (void) wine_updateFullScreenSpace
+    {
+        if (!full_screen_space) return;
+
+        if (ownsFullScreen)
+        {
+            if (wantsFullScreenSpace &&
+                (![self wine_canUseFullScreenSpace] || ![self wine_coversScreenInFrame:nonFullscreenFrame]))
+                [self wine_leaveFullScreenSpace];
+            return;
+        }
+
+        if (([self styleMask] & NSWindowStyleMaskFullScreen) || enteringFullScreen || exitingFullScreen)
+        {
+            [self wine_cancelFullScreenSpace];
+            return;
+        }
+
+        if (![self wine_coversScreenInFrame:self.wine_fractionalFrame])
+        {
+            fullScreenSpaceDeclined = FALSE;
+            [self wine_cancelFullScreenSpace];
+        }
+        else if (!fullScreenSpaceDeclined && [self wine_canUseFullScreenSpace] && [NSApp isActive] &&
+                 [self isOnActiveSpace])
+        {
+            if (!fullScreenSpacePending)
+            {
+                fullScreenSpacePending = TRUE;
+                [self performSelector:@selector(wine_enterFullScreenSpace) withObject:nil
+                           afterDelay:FULL_SCREEN_SPACE_DELAY inModes:@[NSRunLoopCommonModes]];
+            }
+        }
+        else
+            [self wine_cancelFullScreenSpace];
+    }
+
+    /* Windows minimizes a fullscreen game when it loses the foreground, as when the user switches
+       to another app. Its Space is already in the background then, so the window stays in it, as a
+       Mac app's does, and is restored when the user comes back. Minimized in the foreground, it
+       leaves the Space for the Dock. */
+    - (void) wine_minimizeInFullScreenSpace
+    {
+        if (![NSApp isActive] || ![self isOnActiveSpace])
+            minimizedInFullScreenSpace = TRUE;
+        else
+        {
+            miniaturizeAfterFullScreen = TRUE;
+            [self wine_leaveFullScreenSpace];
+        }
+    }
+
+    - (void) wine_restoreInFullScreenSpace
+    {
+        /* minimizedInFullScreenSpace stays set until Windows restores the window. */
+        if (!minimizedInFullScreenSpace || ![NSApp isActive] || ![self isOnActiveSpace]) return;
+        [self postDidUnminimizeEvent];
+    }
+
+    - (void) wine_applicationDidBecomeActive
+    {
+        [self wine_restoreInFullScreenSpace];
+        [self wine_updateFullScreenSpace];
     }
 
     - (void) setFrameAndWineFrame:(NSRect)frame
@@ -1896,6 +2032,15 @@ static inline BOOL stage_manager_enabled(void)
            in the queue. */
         [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_FRAME_CHANGED)
                                forWindow:self];
+
+        /* WINESKIN: see -wine_updateFullScreenSpace. */
+        if (ownsFullScreen && !NSIsEmptyRect(contentRect))
+        {
+            NSUInteger style = [self styleMask] & ~NSWindowStyleMaskFullScreen;
+            nonFullscreenFrame = [[self class] frameRectForContentRect:contentRect styleMask:style];
+            [self wine_updateFullScreenSpace];
+            return;
+        }
 
         if (!NSIsEmptyRect(contentRect))
         {
@@ -1979,6 +2124,7 @@ static inline BOOL stage_manager_enabled(void)
             if ([parent addChildWineWindow:self])
                 [[WineApplicationController sharedController] adjustWindowLevels];
             [self adjustFullScreenBehavior:[self collectionBehavior]];
+            [self wine_updateFullScreenSpace]; /* WINESKIN */
         }
     }
 
@@ -2761,6 +2907,14 @@ static inline BOOL stage_manager_enabled(void)
         return size;
     }
 
+    /* WINESKIN: see -wine_updateFullScreenSpace. */
+    - (NSApplicationPresentationOptions) window:(NSWindow*)window willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposedOptions
+    {
+        if (!ownsFullScreen) return proposedOptions;
+        return NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock |
+               NSApplicationPresentationHideMenuBar;
+    }
+
     - (void)windowDidBecomeKey:(NSNotification *)notification
     {
         WineApplicationController* controller = [WineApplicationController sharedController];
@@ -2769,6 +2923,8 @@ static inline BOOL stage_manager_enabled(void)
             [self flagsChanged:event];
 
         if (causing_becomeKeyWindow == self) return;
+
+        [self wine_restoreInFullScreenSpace]; /* WINESKIN */
 
         [controller windowGotFocus:self];
     }
@@ -2825,21 +2981,51 @@ static inline BOOL stage_manager_enabled(void)
         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
         if (pendingOrderOut)
             [self doOrderOut];
+        /* WINESKIN: see -wine_updateFullScreenSpace. */
+        else if (ownsFullScreen)
+        {
+            [self updateFullscreen];
+            if (!wantsFullScreenSpace)
+                [super toggleFullScreen:nil];
+        }
     }
 
     - (void) windowDidExitFullScreen:(NSNotification*)notification
     {
+        BOOL owned = ownsFullScreen; /* WINESKIN */
+
         exitingFullScreen = FALSE;
+        /* WINESKIN: see -wine_updateFullScreenSpace. */
+        ownsFullScreen = wantsFullScreenSpace = FALSE;
+        if (owned)
+            [self adjustFullScreenBehavior:[self collectionBehavior]];
         [self setFrameAndWineFrame:nonFullscreenFrame];
         [self windowDidResize:nil];
         if (pendingOrderOut)
             [self doOrderOut];
+        /* WINESKIN */
+        else if (miniaturizeAfterFullScreen)
+        {
+            miniaturizeAfterFullScreen = FALSE;
+            if (minimizedForWine && [self isVisible])
+            {
+                [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+                [super miniaturize:nil];
+            }
+        }
     }
 
     - (void) windowDidFailToEnterFullScreen:(NSWindow*)window
     {
         enteringFullScreen = FALSE;
         enteredFullScreenTime = 0;
+        /* WINESKIN: see -wine_updateFullScreenSpace. */
+        if (ownsFullScreen)
+        {
+            ownsFullScreen = wantsFullScreenSpace = FALSE;
+            fullScreenSpaceDeclined = TRUE;
+            [self adjustFullScreenBehavior:[self collectionBehavior]];
+        }
         if (pendingOrderOut)
             [self doOrderOut];
     }
@@ -2893,6 +3079,8 @@ static inline BOOL stage_manager_enabled(void)
         }
 
         if (ignore_windowResize || exitingFullScreen) return;
+        /* WINESKIN: see -wine_updateFullScreenSpace. */
+        if (ownsFullScreen && (enteringFullScreen || ([self styleMask] & NSWindowStyleMaskFullScreen))) return;
 
         if ([self preventResizing])
         {
@@ -2966,10 +3154,17 @@ static inline BOOL stage_manager_enabled(void)
     {
         enteringFullScreen = TRUE;
         nonFullscreenFrame = self.wine_fractionalFrame;
+        [self wine_cancelFullScreenSpace]; /* WINESKIN */
     }
 
     - (void) windowWillExitFullScreen:(NSNotification*)notification
     {
+        /* WINESKIN: the user takes the window out of the Space winemac put it in */
+        if (ownsFullScreen && wantsFullScreenSpace)
+        {
+            wantsFullScreenSpace = FALSE;
+            fullScreenSpaceDeclined = TRUE;
+        }
         exitingFullScreen = TRUE;
         [self postWindowFrameChanged:nonFullscreenFrame fullscreen:FALSE resizing:FALSE skipSizeMove:FALSE];
     }

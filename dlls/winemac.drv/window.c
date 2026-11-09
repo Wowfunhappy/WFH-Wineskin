@@ -1456,8 +1456,12 @@ UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
     if (!thread_data->current_event || thread_data->current_event->window != data->cocoa_window)
         goto done;
 
-    if (thread_data->current_event->type != WINDOW_FRAME_CHANGED &&
-        thread_data->current_event->type != WINDOW_DID_UNMINIMIZE)
+    /* WINESKIN: a window restored from minimized goes back to its Win32 normal rect, which is in
+     * Windows' coordinates; the Cocoa frame is in the display's, which differ from them in an
+     * emulated display mode or a scaled DPI. */
+    if (thread_data->current_event->type != WINDOW_FRAME_CHANGED)
+    // if (thread_data->current_event->type != WINDOW_FRAME_CHANGED &&
+    //     thread_data->current_event->type != WINDOW_DID_UNMINIMIZE)
         goto done;
 
     macdrv_get_cocoa_window_frame(data->cocoa_window, &frame);

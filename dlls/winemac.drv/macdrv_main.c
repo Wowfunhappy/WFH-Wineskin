@@ -55,6 +55,7 @@ bool retina_enabled = false;
 bool enable_app_nap = false;
 bool native_menu_bar = true; /* WINESKIN */
 bool native_file_dialogs = true; /* WINESKIN */
+bool full_screen_space = true; /* WINESKIN */
 
 pthread_key_t macdrv_thread_data_key = 0;
 UINT64 app_icon_callback = 0;
@@ -371,6 +372,10 @@ static void setup_options(void)
     /* WINESKIN: show NSOpenPanel and NSSavePanel for the common file dialogs */
     if (!get_config_key(hkey, appkey, "NativeFileDialogs", buffer, sizeof(buffer)))
         native_file_dialogs = IS_OPTION_TRUE(buffer[0]);
+
+    /* WINESKIN: a top-level window that covers a screen goes full screen in a Space of its own */
+    if (!get_config_key(hkey, appkey, "FullScreenSpace", buffer, sizeof(buffer)))
+        full_screen_space = IS_OPTION_TRUE(buffer[0]);
 
     /* Don't use appkey.  The DPI and monitor sizes should be consistent for all
        processes in the prefix. */

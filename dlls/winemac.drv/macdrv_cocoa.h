@@ -123,6 +123,7 @@ struct macdrv_query;
 /* main */
 extern int topmost_float_inactive;
 extern bool capture_displays_for_fullscreen;
+extern bool full_screen_space; /* WINESKIN */
 extern bool left_option_is_alt;
 extern bool right_option_is_alt;
 extern bool left_command_is_ctrl;

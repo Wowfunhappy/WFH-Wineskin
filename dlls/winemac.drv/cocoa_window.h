@@ -81,6 +81,15 @@
     BOOL fakingClose;
 
     CAShapeLayer* contentViewMaskLayer;
+
+    /* WINESKIN: see -wine_updateFullScreenSpace. */
+    BOOL wantsFullScreenSpace;      /* should be in (or entering) a full-screen Space of its own */
+    BOOL ownsFullScreen;            /* full screen because winemac put it there */
+    BOOL fullScreenSpacePending;    /* waiting to enter */
+    BOOL fullScreenSpaceDeclined;   /* the user took it out; it stays out while it covers the screen */
+    BOOL minimizedForWine;          /* Windows has it minimized */
+    BOOL minimizedInFullScreenSpace; /* minimized by Windows while its Space was in the background */
+    BOOL miniaturizeAfterFullScreen;
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -112,5 +121,9 @@
     /* WINESKIN: an OpenGL context drawing into the window counts as drawn content, as a Metal view
        does, so a window drawn only with OpenGL becomes opaque and casts its full shadow. Any thread. */
     - (void) wine_openGLContentDrawn;
+
+    /* WINESKIN: a top-level window that covers a screen goes full screen in a Space of its own. */
+    - (void) wine_updateFullScreenSpace;
+    - (void) wine_applicationDidBecomeActive;
 
 @end

@@ -748,6 +748,18 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         [self updateFullscreenWindows];
         [self adjustWindowLevels];
+        [self wine_updateFullScreenSpaces]; /* WINESKIN */
+    }
+
+    /* WINESKIN: see -[WineWindow wine_updateFullScreenSpace]. */
+    - (void) wine_updateFullScreenSpaces
+    {
+        if (![NSApp isActive]) return;
+        for (NSWindow* window in [NSApp windows])
+        {
+            if ([window isKindOfClass:[WineWindow class]])
+                [(WineWindow*)window wine_applicationDidBecomeActive];
+        }
     }
 
     - (void) sendDisplaysChanged:(BOOL)activating
@@ -2230,6 +2242,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
         [self updateFullscreenWindows];
         [self adjustWindowLevels:YES];
+        [self wine_updateFullScreenSpaces]; /* WINESKIN */
 
         if (beenActive)
             [self unminimizeWindowIfNoneVisible];
