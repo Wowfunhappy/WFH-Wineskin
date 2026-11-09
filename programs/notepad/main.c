@@ -209,7 +209,9 @@ static VOID NOTEPAD_LoadSettingFromRegistry(void)
     Globals.lfFont.lfClipPrecision  = CLIP_DEFAULT_PRECIS;
     Globals.lfFont.lfQuality        = DEFAULT_QUALITY;
     Globals.lfFont.lfPitchAndFamily = FIXED_PITCH | FF_DONTCARE;
-    lstrcpyW(Globals.lfFont.lfFaceName, L"System");
+    /* WINESKIN: the Mac's monospaced font, which draws smoothed, in place of the bitmap System font */
+    /* lstrcpyW(Globals.lfFont.lfFaceName, L"System"); */
+    lstrcpyW(Globals.lfFont.lfFaceName, L"Menlo");
 
     LoadStringW(Globals.hInstance, STRING_PAGESETUP_HEADERVALUE,
                 Globals.szHeader, ARRAY_SIZE(Globals.szHeader));
