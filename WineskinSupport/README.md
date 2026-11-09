@@ -131,11 +131,14 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
 - Compute shaders can be created; a dispatch, like an indirect draw, does nothing. Unordered access views
   have no GL objects. BC6H/BC7 are unsupported formats.
-- Vertex shaders whose input registers run past 10.9's 16 attributes have their inputs packed into
-  consecutive locations (`wined3d_vs_attrib_location`).
+- Vertex shaders whose input registers run past 10.9's 16 attributes have the inputs they read packed into
+  consecutive locations; inputs they declare but never read, and vertex/instance IDs, take no attribute
+  (`wined3d_vs_attrib_location`).
 - Timestamp queries read the CPU clock; pipeline statistics queries count nothing.
-- Buffers for shader resource and unordered access views are bound to `GL_ARRAY_BUFFER`: 10.9's driver can
-  return from `glBindBuffer(GL_TEXTURE_BUFFER, …)` holding an internal lock.
+- 10.9's driver drops a buffer texture's storage when its buffer is deleted, and then faults on the next
+  buffer change while that texture is bound, leaving an internal lock held so the next GL call hangs.
+  The dummy buffer texture keeps its buffer, and units holding a buffer texture get the dummy before any
+  buffer is deleted (`wined3d_context_gl_unbind_buffer_textures`).
 
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next

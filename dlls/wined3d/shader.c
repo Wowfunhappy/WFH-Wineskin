@@ -667,6 +667,26 @@ static void shader_set_limits(struct wined3d_shader *shader)
     }
 }
 
+/* WINESKIN: records the input registers a register reads, through relative addressing too
+ * (wined3d_vs_attrib_location). */
+static void shader_record_input_read(struct wined3d_shader_reg_maps *reg_maps,
+        const struct wined3d_shader_register *reg, BOOL operand)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(reg->idx); ++i)
+    {
+        if (reg->idx[i].rel_addr)
+            shader_record_input_read(reg_maps, &reg->idx[i].rel_addr->reg, TRUE);
+    }
+    if (!operand || reg->type != WINED3DSPR_INPUT)
+        return;
+    if (reg->idx[0].rel_addr || reg->idx[0].offset >= 32)
+        reg_maps->input_registers_read = ~0u;
+    else
+        reg_maps->input_registers_read |= 1u << reg->idx[0].offset;
+}
+
 static BOOL shader_record_register_usage(struct wined3d_shader *shader, struct wined3d_shader_reg_maps *reg_maps,
         const struct wined3d_shader_register *reg, enum wined3d_shader_type shader_type, unsigned int constf_size)
 {
@@ -1452,6 +1472,7 @@ static HRESULT shader_get_registers_used(struct wined3d_shader *shader, DWORD co
                 if (!shader_record_register_usage(shader, reg_maps, &ins.dst[i].reg,
                         shader_version.type, constf_size))
                     return WINED3DERR_INVALIDCALL;
+                shader_record_input_read(reg_maps, &ins.dst[i].reg, FALSE); /* WINESKIN */
 
                 if (shader_version.type == WINED3D_SHADER_TYPE_VERTEX)
                 {
@@ -1728,6 +1749,8 @@ static HRESULT shader_get_registers_used(struct wined3d_shader *shader, DWORD co
                 if (!shader_record_register_usage(shader, reg_maps, &ins.predicate->reg,
                         shader_version.type, constf_size))
                     return WINED3DERR_INVALIDCALL;
+            if (ins.predicate) /* WINESKIN */
+                shader_record_input_read(reg_maps, &ins.predicate->reg, TRUE);
 
             for (i = 0; i < ins.src_count; ++i)
             {
@@ -1737,12 +1760,14 @@ static HRESULT shader_get_registers_used(struct wined3d_shader *shader, DWORD co
                 if (!shader_record_register_usage(shader, reg_maps, &ins.src[i].reg,
                         shader_version.type, constf_size))
                     return WINED3DERR_INVALIDCALL;
+                shader_record_input_read(reg_maps, &ins.src[i].reg, TRUE); /* WINESKIN */
                 while (count)
                 {
                     ++reg.idx[0].offset;
                     if (!shader_record_register_usage(shader, reg_maps, &reg,
                             shader_version.type, constf_size))
                         return WINED3DERR_INVALIDCALL;
+                    shader_record_input_read(reg_maps, &reg, TRUE); /* WINESKIN */
                     --count;
                 }
 

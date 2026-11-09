@@ -4890,6 +4890,7 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
      * (wined3d_vs_attrib_location). */
     unsigned int element_idx[MAX_ATTRIBS] = {0};
     uint32_t location_map = 0, use_map = stream_info->use_map;
+    bool dropped = false;
 
     while (use_map)
     {
@@ -4897,7 +4898,11 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
         unsigned int location = wined3d_vs_attrib_location(vs, gl_info->limits.vertex_attribs, idx);
 
         if (location >= gl_info->limits.vertex_attribs || (location_map & (1u << location)))
+        {
+            if (!vs || vs->reg_maps.input_registers_read & (1u << idx))
+                dropped = true;
             continue;
+        }
         element_idx[location] = idx;
         location_map |= 1u << location;
     }
@@ -4907,7 +4912,7 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
 
     /* WINESKIN: attribute locations, not registers, are limited. */
     // if (stream_info->use_map & ~wined3d_mask_from_size(gl_info->limits.vertex_attribs))
-    if (wined3d_popcount(stream_info->use_map) > wined3d_popcount(location_map))
+    if (dropped)
     {
         static unsigned int once;
 

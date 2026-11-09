@@ -2359,6 +2359,13 @@ static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_b
     if (e->sysval_semantic && e->sysval_semantic != WINED3D_SV_POSITION)
         FIXME("Unhandled sysval semantic %#x.\n", e->sysval_semantic);
 
+    /* WINESKIN: an input given no attribute (wined3d_vs_attrib_location) reads as zero. */
+    if (wined3d_vs_attrib_location(shader, gl_info->limits.vertex_attribs, index) >= gl_info->limits.vertex_attribs)
+    {
+        shader_addline(buffer, "vec4 vs_in%u = vec4(0.0);\n", index);
+        return;
+    }
+
     if (shader_glsl_use_explicit_attrib_location(gl_info))
         /* WINESKIN: see wined3d_vs_attrib_location. */
         // shader_addline(buffer, "layout(location = %u) ", index);
@@ -10711,6 +10718,8 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
 
             i = wined3d_bit_scan(&attribs_map);
             location = wined3d_vs_attrib_location(vshader, gl_info->limits.vertex_attribs, i);
+            if (location >= gl_info->limits.vertex_attribs)
+                continue;
             string_buffer_sprintf(tmp_name, "vs_in%u", i);
             GL_EXTCALL(glBindAttribLocation(program_id, location, tmp_name->buffer));
             if (vshader && vshader->reg_maps.shader_version.major >= 4)

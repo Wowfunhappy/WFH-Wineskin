@@ -1125,6 +1125,7 @@ struct wined3d_shader_reg_maps
         BYTE output_registers_mask[MAX_REG_OUTPUT]; /* vertex >= 3.0 */
     } u;
     DWORD input_registers;                          /* max(MAX_REG_INPUT, MAX_ATTRIBS), 32 */
+    uint32_t input_registers_read;                  /* WINESKIN: inputs instructions read */
     DWORD output_registers;                         /* MAX_REG_OUTPUT, 32 */
     WORD integer_constants;                         /* WINED3D_MAX_CONSTS_I, 16 */
     WORD boolean_constants;                         /* WINED3D_MAX_CONSTS_B, 16 */
@@ -4747,19 +4748,33 @@ static inline uint32_t wined3d_mask_from_size(unsigned int size)
 
 /* WINESKIN: Direct3D 10 and later vertex shaders read up to 32 input
  * registers; macOS's OpenGL has 16 vertex attributes. A shader model 4+ vertex
- * shader whose input registers go past the attribute limit has its inputs
- * packed into consecutive attribute locations, in register order. Otherwise an
- * input register is its own attribute location. */
+ * shader whose input registers go past the attribute limit has the inputs it
+ * reads packed into consecutive attribute locations, in register order; an
+ * input it declares but never reads gets no attribute (a location past the
+ * limit) and reads as zero. Otherwise an input register is its own attribute
+ * location. */
 static inline unsigned int wined3d_vs_attrib_location(const struct wined3d_shader *vs,
         unsigned int attrib_count, unsigned int register_idx)
 {
     uint32_t inputs;
+    unsigned int i;
 
     if (!vs || vs->reg_maps.shader_version.major < 4)
         return register_idx;
     inputs = vs->reg_maps.input_registers;
+    /* Vertex and instance IDs come from gl_VertexID and gl_InstanceID, not attributes. */
+    for (i = 0; i < vs->input_signature.element_count; ++i)
+    {
+        const struct wined3d_shader_signature_element *e = &vs->input_signature.elements[i];
+
+        if (e->sysval_semantic == WINED3D_SV_VERTEX_ID || e->sysval_semantic == WINED3D_SV_INSTANCE_ID)
+            inputs &= ~(1u << e->register_idx);
+    }
     if (!(inputs & ~wined3d_mask_from_size(attrib_count)))
         return register_idx;
+    inputs &= vs->reg_maps.input_registers_read;
+    if (register_idx >= 32 || !(inputs & (1u << register_idx)))
+        return ~0u;
     return wined3d_popcount(inputs & wined3d_mask_from_size(register_idx));
 }
 
