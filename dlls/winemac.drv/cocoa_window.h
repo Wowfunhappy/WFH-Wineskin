@@ -109,4 +109,8 @@
 
     - (void) setRetinaMode:(BOOL)mode;
 
+    /* WINESKIN: an OpenGL context drawing into the window counts as drawn content, as a Metal view
+       does, so a window drawn only with OpenGL becomes opaque and casts its full shadow. Any thread. */
+    - (void) wine_openGLContentDrawn;
+
 @end

@@ -2532,6 +2532,15 @@ static inline BOOL stage_manager_enabled(void)
         }
     }
 
+    /* WINESKIN: see cocoa_window.h. */
+    - (void) wine_openGLContentDrawn
+    {
+        if (drawnSinceShown) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!drawnSinceShown && [self isVisible]) [self windowDidDrawContent];
+        });
+    }
+
     - (NSArray*) childWineWindows
     {
         NSArray* childWindows = self.childWindows;

@@ -22,6 +22,7 @@
 #import "macdrv.h"
 
 #import "cocoa_opengl.h"
+#import "cocoa_window.h" /* WINESKIN */
 
 #include "cocoa_app.h"
 #include "cocoa_event.h"
@@ -336,5 +337,11 @@ void macdrv_flush_opengl_context(WineOpenGLContext *context)
 {
     macdrv_update_opengl_context(context);
     [context flushBuffer];
+
+    /* WINESKIN: see -[WineWindow wine_openGLContentDrawn]. */
+    {
+        WineWindow *window = (WineWindow*)[context.view window];
+        if ([window isKindOfClass:[WineWindow class]]) [window wine_openGLContentDrawn];
+    }
 }
 }
