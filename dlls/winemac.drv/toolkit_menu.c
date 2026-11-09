@@ -1,7 +1,7 @@
 /*
  * WINESKIN: Mac menu bar menus for GTK and Qt programs
  *
- * GTK (2 and 3) and Qt 4 draw their menu bars themselves; a window of theirs has no Win32 menu for the Mac
+ * GTK (2 and 3) and Qt (4, 5 and 6) draw their menu bars themselves; a window of theirs has no Win32 menu for the Mac
  * menu bar to show. When such a window is activated, macdrv_toolkit_menu_check (menu.c) asks
  * this code to look for the toolkit's menu bar in it. If there is one, the window is given a
  * Win32 menu bar made from it and the toolkit's own bar is hidden. The window is subclassed:
@@ -446,31 +446,38 @@ static const struct toolkit gtk_toolkit =
 
 
 /***********************************************************************
- *              Qt 4 (built with Visual C++)
+ *              Qt 4, 5 and 6 (built with Visual C++)
  *
- * Member functions are called through their exported decorated names. A member function that
- * returns a class takes a hidden pointer to the result after "this".
+ * Member functions are called through their exported decorated names, written here as a 64-bit
+ * build decorates them and changed to the 32-bit form for 32-bit builds. A member function that
+ * returns a class takes a hidden pointer to the result after "this". The layouts of the strings
+ * and lists such functions return differ between Qt 4, Qt 5 and Qt 6.
  */
 
 #ifdef __i386__
 #define QT_THISCALL __attribute__((thiscall))
-#define QT_NAME(x86, x64) x86
 #else
 #define QT_THISCALL
-#define QT_NAME(x86, x64) x64
 #endif
 
-struct qt_list_data { LONG ref; int alloc, begin, end; unsigned int sharable; void *array[1]; };
-struct qt_string_data { LONG ref; int alloc, size; WCHAR *data; };
+struct qt4_list_data { LONG ref; int alloc, begin, end; unsigned int sharable; void *array[1]; };
+struct qt_list_data { LONG ref; int alloc, begin, end; void *array[1]; };      /* Qt 5 */
+struct qt4_string_data { LONG ref; int alloc, size; WCHAR *data; };
+struct qt5_array_data { LONG ref; int size; unsigned int alloc; LONG_PTR offset; };
+struct qt6_array { LONG *d; void *ptr; LONG_PTR size; };                      /* QString and QList */
+
+/* room for a QString, QList or QKeySequence returned by value */
+typedef struct { void *p[4]; } qt_value;
 
 static struct
 {
     BOOL tried, ok;
-    void *(CDECL *widget_find)(HWND);
-    struct qt_list_data **(QT_THISCALL *object_children)(void *);
+    int version;
+    void *(CDECL *widget_find)(ULONG_PTR);
+    const void *(QT_THISCALL *object_children)(void *);
     unsigned char (QT_THISCALL *object_inherits)(void *, const char *);
-    struct qt_list_data **(QT_THISCALL *widget_actions)(void *, struct qt_list_data **);
-    struct qt_string_data **(QT_THISCALL *action_text)(void *, struct qt_string_data **);
+    qt_value *(QT_THISCALL *widget_actions)(void *, qt_value *);
+    qt_value *(QT_THISCALL *action_text)(void *, qt_value *);
     void *(QT_THISCALL *action_menu)(void *);
     unsigned char (QT_THISCALL *action_is_separator)(void *);
     unsigned char (QT_THISCALL *action_is_enabled)(void *);
@@ -479,96 +486,276 @@ static struct
     unsigned char (QT_THISCALL *action_is_checked)(void *);
     void *(QT_THISCALL *action_group)(void *);
     unsigned char (QT_THISCALL *group_is_exclusive)(void *);
-    void **(QT_THISCALL *action_shortcut)(void *, void **);
-    struct qt_string_data **(QT_THISCALL *key_sequence_to_string)(void **, struct qt_string_data **, int);
-    void (QT_THISCALL *key_sequence_destroy)(void **);
+    qt_value *(QT_THISCALL *action_shortcut)(void *, qt_value *);
+    qt_value *(QT_THISCALL *key_sequence_to_string)(qt_value *, qt_value *, int);
+    void (QT_THISCALL *key_sequence_destroy)(qt_value *);
     void (QT_THISCALL *action_activate)(void *, int);
     void (QT_THISCALL *menu_about_to_show)(void *);
     void (QT_THISCALL *menu_bar_set_visible)(void *, int);
     void (QT_THISCALL *widget_set_fixed_height)(void *, int);
-    void (CDECL *string_free)(struct qt_string_data *);
-    void (CDECL *mem_free)(void *);
+    void (CDECL *qt4_string_free)(struct qt4_string_data *);
+    void (CDECL *qt4_free)(void *);
+    void (CDECL *qt5_list_dispose)(struct qt_list_data *);
+    void (CDECL *array_deallocate)(void *, SIZE_T, SIZE_T);
 } qt;
+
+/* A 64-bit decorated name in the form of this build. */
+static void *qt_proc(HMODULE module, const char *x64_name)
+{
+#ifdef __i386__
+    static const struct { const char *from, *to; } changes[] =
+    {
+        { "QEBA", "QBE" }, { "QEAA", "QAE" }, { "UEAA", "UAE" }, { "AEBA", "ABE" }, { "IEAA", "IAE" },
+        { "PEA", "PA" }, { "PEB", "PB" }, { "AEB", "AB" }, { "_K", "I" }, { "_J", "H" },
+    };
+    char name[256], *out = name;
+    const char *in = x64_name;
+    UINT i;
+
+    while (*in && out < name + sizeof(name) - 4)
+    {
+        for (i = 0; i < ARRAY_SIZE(changes); i++)
+        {
+            int len = lstrlenA(changes[i].from);
+            if (CompareStringA(LOCALE_INVARIANT, 0, in, min(len, lstrlenA(in)), changes[i].from, len) == CSTR_EQUAL)
+            {
+                lstrcpyA(out, changes[i].to);
+                out += lstrlenA(changes[i].to);
+                in += len;
+                break;
+            }
+        }
+        if (i == ARRAY_SIZE(changes)) *out++ = *in++;
+    }
+    *out = 0;
+    return (void *)GetProcAddress(module, name);
+#else
+    return (void *)GetProcAddress(module, x64_name);
+#endif
+}
+
+static HMODULE qt_module(const WCHAR *release, const WCHAR *debug)
+{
+    HMODULE module = GetModuleHandleW(release);
+    return module ? module : GetModuleHandleW(debug);
+}
 
 static BOOL load_qt(void)
 {
-    HMODULE core, gui;
+    HMODULE core, gui, widgets, action_module;
 
     if (qt.tried) return qt.ok;
-    if (!(gui = GetModuleHandleW(L"QtGui4.dll")) && !(gui = GetModuleHandleW(L"QtGuid4.dll"))) return FALSE;
-    qt.tried = TRUE;
-    if (!(core = GetModuleHandleW(L"QtCore4.dll")) && !(core = GetModuleHandleW(L"QtCored4.dll"))) return FALSE;
 
-#define GET(mod, field, x86, x64) qt.field = (void *)GetProcAddress(mod, QT_NAME(x86, x64))
-    GET(gui, widget_find, "?find@QWidget@@SAPAV1@PAUHWND__@@@Z", "?find@QWidget@@SAPEAV1@PEAUHWND__@@@Z");
-    GET(core, object_children, "?children@QObject@@QBEABV?$QList@PAVQObject@@@@XZ",
-        "?children@QObject@@QEBAAEBV?$QList@PEAVQObject@@@@XZ");
-    GET(core, object_inherits, "?inherits@QObject@@QBE_NPBD@Z", "?inherits@QObject@@QEBA_NPEBD@Z");
-    GET(gui, widget_actions, "?actions@QWidget@@QBE?AV?$QList@PAVQAction@@@@XZ",
-        "?actions@QWidget@@QEBA?AV?$QList@PEAVQAction@@@@XZ");
-    GET(gui, action_text, "?text@QAction@@QBE?AVQString@@XZ", "?text@QAction@@QEBA?AVQString@@XZ");
-    GET(gui, action_menu, "?menu@QAction@@QBEPAVQMenu@@XZ", "?menu@QAction@@QEBAPEAVQMenu@@XZ");
-    GET(gui, action_is_separator, "?isSeparator@QAction@@QBE_NXZ", "?isSeparator@QAction@@QEBA_NXZ");
-    GET(gui, action_is_enabled, "?isEnabled@QAction@@QBE_NXZ", "?isEnabled@QAction@@QEBA_NXZ");
-    GET(gui, action_is_visible, "?isVisible@QAction@@QBE_NXZ", "?isVisible@QAction@@QEBA_NXZ");
-    GET(gui, action_is_checkable, "?isCheckable@QAction@@QBE_NXZ", "?isCheckable@QAction@@QEBA_NXZ");
-    GET(gui, action_is_checked, "?isChecked@QAction@@QBE_NXZ", "?isChecked@QAction@@QEBA_NXZ");
-    GET(gui, action_group, "?actionGroup@QAction@@QBEPAVQActionGroup@@XZ",
-        "?actionGroup@QAction@@QEBAPEAVQActionGroup@@XZ");
-    GET(gui, group_is_exclusive, "?isExclusive@QActionGroup@@QBE_NXZ", "?isExclusive@QActionGroup@@QEBA_NXZ");
-    GET(gui, action_shortcut, "?shortcut@QAction@@QBE?AVQKeySequence@@XZ",
-        "?shortcut@QAction@@QEBA?AVQKeySequence@@XZ");
-    GET(gui, key_sequence_to_string, "?toString@QKeySequence@@QBE?AVQString@@W4SequenceFormat@1@@Z",
-        "?toString@QKeySequence@@QEBA?AVQString@@W4SequenceFormat@1@@Z");
-    GET(gui, key_sequence_destroy, "??1QKeySequence@@QAE@XZ", "??1QKeySequence@@QEAA@XZ");
-    GET(gui, action_activate, "?activate@QAction@@QAEXW4ActionEvent@1@@Z", "?activate@QAction@@QEAAXW4ActionEvent@1@@Z");
-    GET(gui, menu_about_to_show, "?aboutToShow@QMenu@@IAEXXZ", "?aboutToShow@QMenu@@IEAAXXZ");
-    GET(gui, menu_bar_set_visible, "?setVisible@QMenuBar@@UAEX_N@Z", "?setVisible@QMenuBar@@UEAAX_N@Z");
-    GET(gui, widget_set_fixed_height, "?setFixedHeight@QWidget@@QAEXH@Z", "?setFixedHeight@QWidget@@QEAAXH@Z");
-    GET(core, string_free, "?free@QString@@CAXPAUData@1@@Z", "?free@QString@@CAXPEAUData@1@@Z");
-    GET(core, mem_free, "?qFree@@YAXPAX@Z", "?qFree@@YAXPEAX@Z");
+    if ((widgets = qt_module(L"Qt6Widgets.dll", L"Qt6Widgetsd.dll")))
+    {
+        qt.version = 6;
+        gui = qt_module(L"Qt6Gui.dll", L"Qt6Guid.dll");
+        core = qt_module(L"Qt6Core.dll", L"Qt6Cored.dll");
+        action_module = gui;  /* QAction and QActionGroup moved to Qt GUI */
+    }
+    else if ((widgets = qt_module(L"Qt5Widgets.dll", L"Qt5Widgetsd.dll")))
+    {
+        qt.version = 5;
+        gui = qt_module(L"Qt5Gui.dll", L"Qt5Guid.dll");
+        core = qt_module(L"Qt5Core.dll", L"Qt5Cored.dll");
+        action_module = widgets;
+    }
+    else if ((widgets = qt_module(L"QtGui4.dll", L"QtGuid4.dll")))
+    {
+        qt.version = 4;
+        gui = widgets;
+        core = qt_module(L"QtCore4.dll", L"QtCored4.dll");
+        action_module = widgets;
+    }
+    else return FALSE;  /* not yet: a program may load Qt later */
+
+    qt.tried = TRUE;
+    if (!gui || !core) return FALSE;
+
+#define GET(mod, field, name) qt.field = qt_proc(mod, name)
+    if (qt.version == 4)
+        GET(widgets, widget_find, "?find@QWidget@@SAPEAV1@PEAUHWND__@@@Z");
+    else
+        GET(widgets, widget_find, "?find@QWidget@@SAPEAV1@_K@Z");
+    GET(core, object_children, "?children@QObject@@QEBAAEBV?$QList@PEAVQObject@@@@XZ");
+    GET(core, object_inherits, "?inherits@QObject@@QEBA_NPEBD@Z");
+    GET(widgets, widget_actions, "?actions@QWidget@@QEBA?AV?$QList@PEAVQAction@@@@XZ");
+    GET(action_module, action_text, "?text@QAction@@QEBA?AVQString@@XZ");
+    if (qt.version == 6)
+        GET(action_module, action_menu, "?menuObject@QAction@@AEBAPEAVQObject@@XZ");
+    else
+        GET(action_module, action_menu, "?menu@QAction@@QEBAPEAVQMenu@@XZ");
+    GET(action_module, action_is_separator, "?isSeparator@QAction@@QEBA_NXZ");
+    GET(action_module, action_is_enabled, "?isEnabled@QAction@@QEBA_NXZ");
+    GET(action_module, action_is_visible, "?isVisible@QAction@@QEBA_NXZ");
+    GET(action_module, action_is_checkable, "?isCheckable@QAction@@QEBA_NXZ");
+    GET(action_module, action_is_checked, "?isChecked@QAction@@QEBA_NXZ");
+    GET(action_module, action_group, "?actionGroup@QAction@@QEBAPEAVQActionGroup@@XZ");
+    GET(action_module, group_is_exclusive, "?isExclusive@QActionGroup@@QEBA_NXZ");
+    GET(action_module, action_shortcut, "?shortcut@QAction@@QEBA?AVQKeySequence@@XZ");
+    GET(gui, key_sequence_to_string, "?toString@QKeySequence@@QEBA?AVQString@@W4SequenceFormat@1@@Z");
+    GET(gui, key_sequence_destroy, "??1QKeySequence@@QEAA@XZ");
+    GET(action_module, action_activate, "?activate@QAction@@QEAAXW4ActionEvent@1@@Z");
+    if (qt.version == 4)
+        GET(widgets, menu_about_to_show, "?aboutToShow@QMenu@@IEAAXXZ");
+    else
+        GET(widgets, menu_about_to_show, "?aboutToShow@QMenu@@QEAAXXZ");
+    GET(widgets, menu_bar_set_visible, "?setVisible@QMenuBar@@UEAAX_N@Z");
+    GET(widgets, widget_set_fixed_height, "?setFixedHeight@QWidget@@QEAAXH@Z");
+    switch (qt.version)
+    {
+    case 4:
+        GET(core, qt4_string_free, "?free@QString@@CAXPEAUData@1@@Z");
+        GET(core, qt4_free, "?qFree@@YAXPEAX@Z");
+        break;
+    case 5:
+        GET(core, qt5_list_dispose, "?dispose@QListData@@SAXPEAUData@1@@Z");
+        GET(core, array_deallocate, "?deallocate@QArrayData@@SAXPEAU1@_K1@Z");
+        break;
+    case 6:
+        GET(core, array_deallocate, "?deallocate@QArrayData@@SAXPEAU1@_J1@Z");
+        break;
+    }
 #undef GET
 
     qt.ok = qt.widget_find && qt.object_children && qt.object_inherits && qt.widget_actions &&
             qt.action_text && qt.action_menu && qt.action_is_separator && qt.action_is_enabled &&
             qt.action_is_visible && qt.action_activate && qt.menu_bar_set_visible &&
-            qt.string_free && qt.mem_free;
-    TRACE("Qt 4 %s\n", qt.ok ? "found" : "lacks functions");
+            (qt.version == 4 ? qt.qt4_string_free && qt.qt4_free :
+             qt.version == 5 ? qt.qt5_list_dispose && qt.array_deallocate : qt.array_deallocate != NULL);
+    TRACE("Qt %d %s\n", qt.version, qt.ok ? "found" : "lacks functions");
     return qt.ok;
 }
 
-static void qt_release_list(struct qt_list_data *d)
+/* The count and items of a QList of pointers. */
+static UINT qt_list_items(const void *list, void ***items)
 {
-    if (d && !InterlockedDecrement(&d->ref)) qt.mem_free(d);
+    if (qt.version == 6)
+    {
+        const struct qt6_array *array = list;
+        *items = array->ptr;
+        return array->size;
+    }
+    else if (qt.version == 5)
+    {
+        struct qt_list_data *d = *(struct qt_list_data * const *)list;
+        *items = d->array + d->begin;
+        return d->end - d->begin;
+    }
+    else
+    {
+        struct qt4_list_data *d = *(struct qt4_list_data * const *)list;
+        *items = d->array + d->begin;
+        return d->end - d->begin;
+    }
 }
 
-static WCHAR *qt_take_string(struct qt_string_data *d)
+/* Drops a reference to a Qt 5 array; -1 marks static data, 0 data that is not shared. */
+static BOOL qt5_deref(LONG *ref)
 {
+    if (*ref == -1) return FALSE;
+    if (*ref == 0) return TRUE;
+    return !InterlockedDecrement(ref);
+}
+
+static void qt_release_list(qt_value *list)
+{
+    switch (qt.version)
+    {
+    case 4:
+    {
+        struct qt4_list_data *d = list->p[0];
+        if (d && !InterlockedDecrement(&d->ref)) qt.qt4_free(d);
+        break;
+    }
+    case 5:
+    {
+        struct qt_list_data *d = list->p[0];
+        if (d && qt5_deref(&d->ref)) qt.qt5_list_dispose(d);
+        break;
+    }
+    case 6:
+    {
+        struct qt6_array *array = (struct qt6_array *)list;
+        if (array->d && !InterlockedDecrement(array->d)) qt.array_deallocate(array->d, sizeof(void *), 8);
+        break;
+    }
+    }
+}
+
+/* A copy of a returned QString's characters, with the QString released. */
+static WCHAR *qt_take_string(qt_value *string)
+{
+    const WCHAR *chars = NULL;
+    UINT len = 0;
     WCHAR *ret;
 
-    if (!d) return NULL;
-    if ((ret = HeapAlloc(GetProcessHeap(), 0, (d->size + 1) * sizeof(WCHAR))))
+    switch (qt.version)
     {
-        memcpy(ret, d->data, d->size * sizeof(WCHAR));
-        ret[d->size] = 0;
+    case 4:
+    {
+        struct qt4_string_data *d = string->p[0];
+        chars = d->data;
+        len = d->size;
+        break;
     }
-    if (!InterlockedDecrement(&d->ref)) qt.string_free(d);
+    case 5:
+    {
+        struct qt5_array_data *d = string->p[0];
+        chars = (const WCHAR *)((const char *)d + d->offset);
+        len = d->size;
+        break;
+    }
+    case 6:
+    {
+        struct qt6_array *array = (struct qt6_array *)string;
+        chars = array->ptr;
+        len = array->size;
+        break;
+    }
+    }
+
+    if ((ret = HeapAlloc(GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR))))
+    {
+        if (len) memcpy(ret, chars, len * sizeof(WCHAR));
+        ret[len] = 0;
+    }
+
+    switch (qt.version)
+    {
+    case 4:
+    {
+        struct qt4_string_data *d = string->p[0];
+        if (!InterlockedDecrement(&d->ref)) qt.qt4_string_free(d);
+        break;
+    }
+    case 5:
+    {
+        struct qt5_array_data *d = string->p[0];
+        if (qt5_deref(&d->ref)) qt.array_deallocate(d, sizeof(WCHAR), 8);
+        break;
+    }
+    case 6:
+    {
+        struct qt6_array *array = (struct qt6_array *)string;
+        if (array->d && !InterlockedDecrement(array->d)) qt.array_deallocate(array->d, sizeof(WCHAR), 8);
+        break;
+    }
+    }
     return ret;
 }
 
 static void *qt_find_menu_bar_in(void *object, int depth)
 {
-    struct qt_list_data *children;
-    void *ret = NULL;
-    int i;
+    void **children, *ret = NULL;
+    UINT count, i;
 
     if (depth > MAX_DEPTH || !object) return NULL;
-    children = *qt.object_children(object);
-    for (i = children->begin; i < children->end && !ret; i++)
+    count = qt_list_items(qt.object_children(object), &children);
+    for (i = 0; i < count && !ret; i++)
     {
-        void *child = children->array[i];
-        if (qt.object_inherits(child, "QMenuBar")) ret = child;
-        else if (qt.object_inherits(child, "QWidget")) ret = qt_find_menu_bar_in(child, depth + 1);
+        if (qt.object_inherits(children[i], "QMenuBar")) ret = children[i];
+        else if (qt.object_inherits(children[i], "QWidget")) ret = qt_find_menu_bar_in(children[i], depth + 1);
     }
     return ret;
 }
@@ -576,44 +763,42 @@ static void *qt_find_menu_bar_in(void *object, int depth)
 static void *qt_find_menu_bar(HWND hwnd)
 {
     if (!load_qt()) return NULL;
-    return qt_find_menu_bar_in(qt.widget_find(hwnd), 0);
+    return qt_find_menu_bar_in(qt.widget_find((ULONG_PTR)hwnd), 0);
 }
 
 static void **qt_get_items(void *menu, UINT *count)
 {
-    struct qt_list_data *list = NULL;
-    void **ret;
-    UINT n;
-    int i;
+    qt_value list = {{ 0 }};
+    void **ret, **items;
+    UINT n, i;
 
     /* a program may fill a menu as it is about to show */
     if (qt.menu_about_to_show && !qt.object_inherits(menu, "QMenuBar")) qt.menu_about_to_show(menu);
 
     qt.widget_actions(menu, &list);
-    n = list ? list->end - list->begin : 0;
+    n = qt_list_items(&list, &items);
     if ((ret = HeapAlloc(GetProcessHeap(), 0, max(n, 1) * sizeof(*ret))))
-        for (i = 0; i < (int)n; i++) ret[i] = list->array[list->begin + i];
-    qt_release_list(list);
+        for (i = 0; i < n; i++) ret[i] = items[i];
+    qt_release_list(&list);
     *count = ret ? n : 0;
     return ret;
 }
 
 static WCHAR *qt_item_text(void *item)
 {
-    struct qt_string_data *text = NULL, *accel_text = NULL;
+    qt_value text = {{ 0 }}, shortcut = {{ 0 }}, accel_text = {{ 0 }};
     WCHAR *label, *accel = NULL, *ret;
-    void *shortcut = NULL;
 
     if (qt.action_is_separator(item)) return NULL;
     qt.action_text(item, &text);
-    if (!(label = qt_take_string(text))) return NULL;
+    if (!(label = qt_take_string(&text))) return NULL;
 
     if (qt.action_shortcut && qt.key_sequence_to_string && qt.key_sequence_destroy)
     {
         qt.action_shortcut(item, &shortcut);
         qt.key_sequence_to_string(&shortcut, &accel_text, 1 /* QKeySequence::PortableText */);
         qt.key_sequence_destroy(&shortcut);
-        accel = qt_take_string(accel_text);
+        accel = qt_take_string(&accel_text);
     }
 
     /* Qt marks mnemonics with '&', as Win32 does */
@@ -675,18 +860,17 @@ static void qt_hide_menu_bar(void *bar)
     qt.menu_bar_set_visible(bar, FALSE);
 }
 
-static const struct toolkit qt4_toolkit =
+static const struct toolkit qt_toolkit =
 {
-    "Qt 4", qt_find_menu_bar, qt_get_items, gtk_free_items, qt_item_text, qt_item_submenu,
+    "Qt", qt_find_menu_bar, qt_get_items, gtk_free_items, qt_item_text, qt_item_submenu,
     qt_item_visible, qt_item_enabled, qt_item_check, qt_keep_item, qt_activate, qt_hide_menu_bar,
 };
-
 
 /***********************************************************************
  *              building the Win32 menus
  */
 
-static const struct toolkit *toolkits[] = { &gtk_toolkit, &qt4_toolkit };
+static const struct toolkit *toolkits[] = { &gtk_toolkit, &qt_toolkit };
 
 static struct bridged_window *find_bridged_window(HWND hwnd)
 {

@@ -29,8 +29,8 @@ WineskinSupport/
 │   │                       GNU make, pkgconf and nasm from source
 │   ├── vendor/clang/       COMMITTED: clang 22 + lld (bzip2), llvm-ar, resource headers, compiler-rt
 │   └── scripts/            build_gnu.sh (one GNU-style tool from a release tarball)
-├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType), universal i386 + x86_64,
-│                           and the wine-mono tarball
+├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType, GnuTLS), universal
+│                           i386 + x86_64, and the wine-mono tarball
 ├── polyfill/               the 10.9 gap layer: libwineskin_polyfill.a + a header overlay (see below)
 ├── scripts/
 │   ├── env.sh              (sourced) toolchain PATH, sysroot, deployment target, per-arch host flags
@@ -49,8 +49,8 @@ WineskinSupport/
 1. Install the Command Line Tools (`xcode-select --install`), which put the C headers in `/usr/include`.
    `WINESKIN_SYSROOT` names another root, such as a `MacOSX10.9.sdk`.
 2. `WineskinSupport/toolchain/bootstrap.sh`
-3. `WineskinSupport/deps/build_deps.sh` — FreeType, and the wine-mono release `dlls/mscoree` expects, which
-   staging unpacks into the engine's `share/wine/mono` so .NET programs run offline.
+3. `WineskinSupport/deps/build_deps.sh` — FreeType, GnuTLS, and the wine-mono release `dlls/mscoree`
+   expects, which staging unpacks into the engine's `share/wine/mono` so .NET programs run offline.
 4. `WineskinSupport/build.sh` — wait for `REBUILD DONE (rc=0)` in `/tmp/wineskin_build.log`. It builds the
    polyfill layer first, on every run.
 5. `WineskinSupport/wrapper/build-wrapper.sh` — produces `build/WFH Wineskin.app`, a blank wrapper.
@@ -151,7 +151,7 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
 - **Menu bar.** A top-level window's Win32 menu bar is shown in the Mac menu bar, between the app menu and
   the Window menu, instead of inside the window (`winemac.drv/menu.c`, `cocoa_menu.m`; win32u reserves no
   menu bar space when the driver hosts it). Menus are refreshed with `WM_INITMENUPOPUP` as they open, and
-  `Ctrl` accelerators become Command key equivalents. GTK (2 and 3) and Qt 4 programs, which draw their
+  `Ctrl` accelerators become Command key equivalents. GTK (2 and 3) and Qt (4, 5 and 6) programs, which draw their
   menu bars themselves, get the same: when such a window is activated, `winemac.drv/toolkit_menu.c` reads
   the toolkit's menu bar through the functions its DLLs export, gives the window a Win32 menu bar made
   from it, hides the toolkit's, refills a menu from the toolkit's as it opens, and activates the
@@ -177,12 +177,27 @@ corrupted its heap through Wine's (Ori and the Will of the Wisps). Media Foundat
 video, WMA) come from GStreamer, which the engine is built without, so in-game videos and xWMA music
 do not play.
 
+## TLS
+
+Schannel (`secur32`), and with it WinHTTP, WinINet and every program that speaks TLS through Windows,
+runs on GnuTLS 3.8.13. `deps/build_deps.sh` builds it with nettle 3.10.2 (and hogweed) and GMP 6.3.0
+linked in statically, GnuTLS's own copies of libtasn1 and libunistring, and no PKCS #11, IDN, TPM,
+compression or tools: `libgnutls.30.dylib`, install name `@rpath/libgnutls.30.dylib`, needs only libSystem,
+CoreFoundation and Security. Wine dlopens it by that name (`SONAME_LIBGNUTLS`), and the engine's `lib`
+holds it, which the wrapper and the test scripts put on `DYLD_FALLBACK_LIBRARY_PATH`.
+
+Certificates are checked by crypt32, not GnuTLS, against the roots `SecTrustSettingsCopyCertificates`
+returns for the system, admin and user domains (`dlls/crypt32/unixlib.c`): the roots this Mac has, plus
+any an administrator added. 10.9's own set predates ISRG Root X1 and other current roots, so sites
+issued from those verify only on a Mac that has them installed. Wine's Schannel offers TLS 1.0 to 1.2;
+a server that speaks only TLS 1.3 fails the handshake.
+
 ## The wrapper
 
 ```
 Name.app/Contents/
 ├── MacOS/Wineskin                the launcher
-├── Resources/Engine/             the Wine installation (bin, lib/wine, share/wine) + FreeType
+├── Resources/Engine/             the Wine installation (bin, lib/wine, share/wine) + FreeType, GnuTLS
 └── SharedSupport/
     ├── prefix/                   the Windows environment (WINEPREFIX)
     ├── Wineskin.plist            the program and options
