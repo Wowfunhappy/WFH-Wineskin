@@ -2298,6 +2298,26 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
 
     TRACE("internal %#x, format %#x, type %#x.\n", internal, format_gl->format, format_gl->type);
 
+    /* WINESKIN: without ARB_texture_storage_multisample (macOS's OpenGL 4.1), multisample textures
+     * get mutable storage from OpenGL 3.2's glTexImage*Multisample(). */
+    if ((texture_gl->target == GL_TEXTURE_2D_MULTISAMPLE || texture_gl->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+            && !gl_info->supported[ARB_TEXTURE_STORAGE_MULTISAMPLE])
+    {
+        unsigned int samples = wined3d_resource_get_sample_count(resource);
+        GLboolean standard_pattern = resource->multisample_type != WINED3D_MULTISAMPLE_NON_MASKABLE
+                && resource->multisample_quality == WINED3D_STANDARD_MULTISAMPLE_PATTERN;
+        GLsizei height = wined3d_texture_get_level_height(&texture_gl->t, 0);
+        GLsizei width = wined3d_texture_get_level_width(&texture_gl->t, 0);
+
+        if (texture_gl->target == GL_TEXTURE_2D_MULTISAMPLE)
+            GL_EXTCALL(glTexImage2DMultisample(texture_gl->target, samples,
+                    internal, width, height, standard_pattern));
+        else
+            GL_EXTCALL(glTexImage3DMultisample(texture_gl->target, samples,
+                    internal, width, height, texture_gl->t.layer_count, standard_pattern));
+        checkGLcall("allocate multisample texture");
+    }
+    else
     if (wined3d_texture_use_immutable_storage(&texture_gl->t, gl_info))
         wined3d_texture_gl_allocate_immutable_storage(texture_gl, internal, gl_info);
     else
@@ -2779,6 +2799,8 @@ void wined3d_texture_gl_bind(struct wined3d_texture_gl *texture_gl,
     /* For a new texture we have to set the texture levels after binding the
      * texture. */
     TRACE("Setting GL_TEXTURE_MAX_LEVEL to %u.\n", texture_gl->t.level_count - 1);
+    /* WINESKIN: macOS's OpenGL rejects GL_TEXTURE_MAX_LEVEL on multisample textures, which have one level. */
+    if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
     gl_info->gl_ops.gl.p_glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, texture_gl->t.level_count - 1);
     checkGLcall("glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, texture->level_count)");
 

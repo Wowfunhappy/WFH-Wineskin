@@ -3672,7 +3672,11 @@ static BOOL wined3d_adapter_init_gl_caps(struct wined3d_adapter_gl *adapter_gl,
     }
     if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE] && !wined3d_settings.multisample_textures)
         gl_info->supported[ARB_TEXTURE_MULTISAMPLE] = FALSE;
-    if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE] && !gl_info->supported[ARB_TEXTURE_STORAGE_MULTISAMPLE])
+    /* WINESKIN: macOS's OpenGL (the implementation with APPLE_rgb_422) allocates multisample textures
+     * with glTexImage*Multisample() (wined3d_texture_gl_prepare_texture). */
+    if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE] && !gl_info->supported[ARB_TEXTURE_STORAGE_MULTISAMPLE]
+            && !gl_info->supported[APPLE_RGB_422])
+    // if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE] && !gl_info->supported[ARB_TEXTURE_STORAGE_MULTISAMPLE])
     {
         WARN("Disabling ARB_texture_multisample because immutable storage is not supported.\n");
         gl_info->supported[ARB_TEXTURE_MULTISAMPLE] = FALSE;

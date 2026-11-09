@@ -135,6 +135,8 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   consecutive locations; inputs they declare but never read, and vertex/instance IDs, take no attribute
   (`wined3d_vs_attrib_location`).
 - Timestamp queries read the CPU clock; pipeline statistics queries count nothing.
+- Multisample textures exist without immutable storage: they are allocated with `glTexImage2DMultisample`
+  and `glTexImage3DMultisample`, so games can resolve and sample MSAA render targets.
 - 10.9's driver drops a buffer texture's storage when its buffer is deleted, and then faults on the next
   buffer change while that texture is bound, leaving an internal lock held so the next GL call hangs.
   The dummy buffer texture keeps its buffer, and units holding a buffer texture get the dummy before any
