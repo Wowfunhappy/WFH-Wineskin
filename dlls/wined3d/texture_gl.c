@@ -1250,6 +1250,7 @@ static void gltexture_delete(struct wined3d_device *device, const struct wined3d
         struct gl_texture *tex)
 {
     context_gl_resource_released(device, tex->name, FALSE);
+    wined3d_cl_forget_gl_object(true, tex->name); /* WINESKIN */
     gl_info->gl_ops.gl.p_glDeleteTextures(1, &tex->name);
     tex->name = 0;
 }

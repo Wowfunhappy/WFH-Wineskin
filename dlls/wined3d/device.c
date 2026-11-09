@@ -1236,6 +1236,7 @@ static void wined3d_allocator_gl_destroy_chunk(struct wined3d_allocator_chunk *c
     if (chunk_gl->c.map_ptr)
         GL_EXTCALL(glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER));
     wined3d_context_gl_unbind_buffer_textures(context_gl); /* WINESKIN */
+    wined3d_cl_forget_gl_object(false, chunk_gl->gl_buffer); /* WINESKIN */
     GL_EXTCALL(glDeleteBuffers(1, &chunk_gl->gl_buffer));
     TRACE("Freed buffer %u.\n", chunk_gl->gl_buffer);
     wined3d_allocator_chunk_cleanup(&chunk_gl->c);

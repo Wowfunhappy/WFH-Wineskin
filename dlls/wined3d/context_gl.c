@@ -3125,6 +3125,7 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
     TRACE("Destroying GL buffer %u.\n", bo->id);
 
     wined3d_context_gl_unbind_buffer_textures(context_gl); /* WINESKIN */
+    wined3d_cl_forget_gl_object(false, bo->id); /* WINESKIN */
     GL_EXTCALL(glDeleteBuffers(1, &bo->id));
     checkGLcall("buffer object destruction");
     bo->id = 0;
@@ -4412,6 +4413,12 @@ void dispatch_compute(struct wined3d_device *device, const struct wined3d_state 
 
     if (!gl_info->supported[ARB_COMPUTE_SHADER])
     {
+        /* WINESKIN: the dispatch runs on OpenCL (cl_compute.c). */
+        if (wined3d_cl_dispatch_compute(context_gl, state, parameters))
+        {
+            context_release(&context_gl->c);
+            return;
+        }
         context_release(&context_gl->c);
         FIXME("OpenGL implementation does not support compute shaders.\n");
         return;

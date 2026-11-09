@@ -1816,10 +1816,27 @@ static void wined3d_unordered_access_view_gl_cs_init(void *object)
 
     gl_info = &wined3d_adapter_gl(resource->device->adapter)->gl_info;
 
-    /* WINESKIN: without ARB_shader_image_load_store (macOS) no shader reads or
-     * writes an unordered access view, so a view has no GL objects. */
+    /* WINESKIN: without ARB_shader_image_load_store (macOS) only compute
+     * shaders on OpenCL (cl_compute.c) read or write an unordered access view:
+     * they use the resource's own GL objects, and a buffer view's counter. */
     if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+    {
+        if (resource->type == WINED3D_RTYPE_BUFFER
+                && (desc->flags & (WINED3D_VIEW_BUFFER_COUNTER | WINED3D_VIEW_BUFFER_APPEND)))
+        {
+            struct wined3d_device_gl *device_gl = wined3d_device_gl(resource->device);
+            struct wined3d_context_gl *context_gl;
+            struct wined3d_bo_gl *bo = &view_gl->counter_bo;
+
+            context_gl = wined3d_context_gl(context_acquire(&device_gl->d, NULL, 0));
+            view_gl->v.counter_bo = &bo->b;
+            wined3d_device_gl_create_bo(device_gl, context_gl, sizeof(uint32_t), GL_ARRAY_BUFFER,
+                    GL_STATIC_DRAW, true, GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_CLIENT_STORAGE_BIT, bo);
+            wined3d_unordered_access_view_set_counter(&view_gl->v, 0);
+            context_release(&context_gl->c);
+        }
         return;
+    }
 
     if (resource->type == WINED3D_RTYPE_BUFFER)
     {

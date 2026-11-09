@@ -66,12 +66,119 @@ struct va_decoder_decode_params
     UINT32 output_idx;
 };
 
+/* WINESKIN: compute shaders on OpenCL with OpenGL sharing (cl.c, cl_compute.c).
+ * Every call runs on the thread whose OpenGL context is current; the OpenCL
+ * context shares that context's share group. */
+#define WINED3D_CL_MAX_ARG_DATA 32
+
+struct wined3d_cl_init_params
+{
+    UINT32 max_work_group_size;
+    UINT32 local_mem_size;
+    UINT32 max_write_images;
+    UINT32 caps; /* WINED3D_CL_CAP_* */
+};
+
+#define WINED3D_CL_CAP_DEPTH_IMAGES 0x1u
+#define WINED3D_CL_CAP_MSAA_IMAGES  0x2u
+#define WINED3D_CL_CAP_3D_WRITES    0x4u
+
+struct wined3d_cl_build_params
+{
+    UINT64 source; /* const char * */
+    UINT32 group_size[3];
+    UINT32 work_group_size; /* out: the kernel's maximum */
+    UINT64 kernel; /* out */
+};
+
+struct wined3d_cl_release_kernel_params
+{
+    UINT64 kernel;
+};
+
+enum wined3d_cl_arg_type
+{
+    WINED3D_CL_ARG_VALUE,       /* data[size] */
+    WINED3D_CL_ARG_GL_BUFFER,   /* the whole buffer gl_name */
+    WINED3D_CL_ARG_GL_TEXTURE,  /* level of texture gl_name, bound to gl_target */
+    WINED3D_CL_ARG_NULL_BUFFER, /* a small zeroed buffer */
+    WINED3D_CL_ARG_NULL_IMAGE,  /* a zeroed 1x1 image of image_type and channel */
+    WINED3D_CL_ARG_SAMPLER,     /* data: struct wined3d_cl_sampler_desc */
+};
+
+enum wined3d_cl_image_dim
+{
+    WINED3D_CL_IMAGE_NONE,
+    WINED3D_CL_IMAGE_1D,
+    WINED3D_CL_IMAGE_1D_ARRAY,
+    WINED3D_CL_IMAGE_2D,
+    WINED3D_CL_IMAGE_2D_ARRAY,
+    WINED3D_CL_IMAGE_3D,
+    WINED3D_CL_IMAGE_2D_MSAA,
+    WINED3D_CL_IMAGE_2D_ARRAY_MSAA,
+};
+
+enum wined3d_cl_channel
+{
+    WINED3D_CL_CHANNEL_FLOAT,
+    WINED3D_CL_CHANNEL_INT,
+    WINED3D_CL_CHANNEL_UINT,
+    WINED3D_CL_CHANNEL_DEPTH,
+};
+
+struct wined3d_cl_sampler_desc
+{
+    UINT32 address_mode; /* enum wined3d_texture_address */
+    UINT32 linear;
+};
+
+struct wined3d_cl_arg
+{
+    UINT32 type;
+    UINT32 gl_name;
+    UINT32 gl_target;
+    UINT32 level;
+    UINT32 size;
+    UINT32 image_type; /* enum wined3d_cl_image_dim */
+    UINT32 channel;    /* enum wined3d_cl_channel */
+    UINT32 status;     /* out: the OpenCL error for this argument */
+    BYTE data[WINED3D_CL_MAX_ARG_DATA];
+};
+
+struct wined3d_cl_dispatch_params
+{
+    UINT64 kernel;
+    UINT64 args; /* struct wined3d_cl_arg * */
+    UINT32 arg_count;
+    UINT32 group_count[3];
+    UINT32 group_size[3];
+    UINT32 sync;  /* finish before returning */
+};
+
+enum wined3d_cl_object_type
+{
+    WINED3D_CL_OBJECT_BUFFER,
+    WINED3D_CL_OBJECT_TEXTURE,
+};
+
+struct wined3d_cl_forget_params
+{
+    UINT32 type; /* enum wined3d_cl_object_type */
+    UINT32 name;
+};
+
 enum unix_funcs
 {
     unix_va_get_profiles_vk,
     unix_va_decoder_create_vk,
     unix_va_decoder_destroy_vk,
     unix_va_decoder_decode,
+    unix_cl_init, /* WINESKIN */
+    unix_cl_build, /* WINESKIN */
+    unix_cl_release_kernel, /* WINESKIN */
+    unix_cl_dispatch, /* WINESKIN */
+    unix_cl_forget, /* WINESKIN */
+    unix_cl_finish, /* WINESKIN */
 };
 
 #endif

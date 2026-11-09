@@ -1189,4 +1189,73 @@ static inline GLuint wined3d_gl_get_internal_format(struct wined3d_resource *res
         return format_gl->internal;
 }
 
+/* WINESKIN: compute shaders on OpenCL, where OpenGL lacks ARB_compute_shader
+ * (cl_compute.c, glsl_cl.h). */
+
+#include "unixlib.h"
+
+/* The OpenCL image a texture view's OpenGL texture gives: a dimension (enum
+ * wined3d_cl_image_dim) and a channel class (enum wined3d_cl_channel). */
+#define WINED3D_CL_IMAGE_KIND(dim, channel) ((dim) | ((channel) << 4))
+#define WINED3D_CL_IMAGE_KIND_DIM(kind) ((kind) & 0xf)
+#define WINED3D_CL_IMAGE_KIND_CHANNEL(kind) ((kind) >> 4)
+
+/* A kernel is generated for each combination of image kinds bound to the
+ * shader's texture views. Buffer views and unbound slots are 0. */
+struct wined3d_cl_kernel_key
+{
+    uint8_t srv[MAX_SHADER_RESOURCE_VIEWS];
+    uint8_t uav[MAX_UNORDERED_ACCESS_VIEWS];
+};
+
+enum wined3d_cl_binding_type
+{
+    WINED3D_CL_BINDING_CB,
+    WINED3D_CL_BINDING_CB_OFFSET,
+    WINED3D_CL_BINDING_SRV,
+    WINED3D_CL_BINDING_SRV_INFO,
+    WINED3D_CL_BINDING_SAMPLER,
+    WINED3D_CL_BINDING_SAMPLER_CMP,
+    WINED3D_CL_BINDING_UAV,
+    WINED3D_CL_BINDING_UAV_READ,
+    WINED3D_CL_BINDING_UAV_INFO,
+    WINED3D_CL_BINDING_UAV_COUNTER,
+};
+
+struct wined3d_cl_binding
+{
+    uint8_t type;
+    uint8_t slot;
+};
+
+struct wined3d_cl_kernel
+{
+    struct wined3d_cl_kernel_key key;
+    uint64_t handle;
+    unsigned int binding_count;
+    struct wined3d_cl_binding *bindings;
+};
+
+/* The element format of a typed buffer view, as kernels decode it. */
+#define WINED3D_CL_FORMAT_8      (0u << 2)
+#define WINED3D_CL_FORMAT_16     (1u << 2)
+#define WINED3D_CL_FORMAT_32     (2u << 2)
+#define WINED3D_CL_FORMAT_PACKED (3u << 2) /* component count 1: 10-10-10-2, 2: 11-11-10 float */
+#define WINED3D_CL_FORMAT_UNORM  (0u << 4)
+#define WINED3D_CL_FORMAT_SNORM  (1u << 4)
+#define WINED3D_CL_FORMAT_UINT   (2u << 4)
+#define WINED3D_CL_FORMAT_SINT   (3u << 4)
+#define WINED3D_CL_FORMAT_FLOAT  (4u << 4)
+#define WINED3D_CL_FORMAT_BGRA   (1u << 7)
+
+bool wined3d_cl_available(struct wined3d_context_gl *context_gl);
+bool wined3d_cl_build_kernel(const char *source, const struct wined3d_shader *shader, uint64_t *handle);
+void wined3d_cl_release_kernel(uint64_t handle);
+bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        const struct wined3d_dispatch_parameters *parameters);
+void wined3d_cl_finish(void);
+void wined3d_cl_forget_gl_object(bool texture, GLuint name);
+const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_context_gl *context_gl,
+        struct wined3d_shader *shader, const struct wined3d_cl_kernel_key *key);
+
 #endif /* __WINE_WINED3D_GL_H */

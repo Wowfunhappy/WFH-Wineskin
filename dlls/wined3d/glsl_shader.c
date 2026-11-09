@@ -271,6 +271,10 @@ struct shader_glsl_ctx_priv
     const struct ds_compile_args    *cur_ds_args;
     const struct ps_compile_args    *cur_ps_args;
     struct wined3d_string_buffer_list *string_buffers;
+    /* WINESKIN: an OpenCL kernel is being generated (glsl_cl.h); set when
+     * the shader has no OpenCL translation. */
+    const struct wined3d_cl_kernel_key *cl_key;
+    bool cl_failed;
 };
 
 struct glsl_context_data
@@ -326,6 +330,9 @@ struct glsl_shader_private
         struct glsl_cs_compiled_shader *cs;
     } gl_shaders;
     unsigned int num_gl_shaders, shader_array_size;
+    /* WINESKIN: a compute shader's OpenCL kernels (glsl_cl.h). */
+    struct wined3d_cl_kernel *cl_kernels;
+    unsigned int cl_kernel_count;
 };
 
 struct glsl_ffp_vertex_shader
@@ -11134,6 +11141,21 @@ static void shader_glsl_destroy(struct wined3d_shader *shader)
     const struct list *linked_programs;
     struct wined3d_context *context;
 
+    /* WINESKIN: a compute shader's OpenCL kernels. */
+    if (shader_data)
+    {
+        unsigned int i;
+
+        for (i = 0; i < shader_data->cl_kernel_count; ++i)
+        {
+            wined3d_cl_release_kernel(shader_data->cl_kernels[i].handle);
+            free(shader_data->cl_kernels[i].bindings);
+        }
+        free(shader_data->cl_kernels);
+        shader_data->cl_kernels = NULL;
+        shader_data->cl_kernel_count = 0;
+    }
+
     if (!shader_data || !shader_data->num_gl_shaders)
     {
         free(shader_data);
@@ -11574,6 +11596,8 @@ static BOOL shader_glsl_color_fixup_supported(struct color_fixup_desc fixup)
     return !is_complex_fixup(fixup);
 }
 
+#include "glsl_cl.h" /* WINESKIN */
+
 static const SHADER_HANDLER shader_glsl_instruction_handler_table[WINED3DSIH_TABLE_SIZE] =
 {
     /* WINED3DSIH_ABS                              */ shader_glsl_map2gl,
@@ -11822,6 +11846,14 @@ static void shader_glsl_handle_instruction(const struct wined3d_shader_instructi
 
     /* Select handler */
     hw_fct = shader_glsl_instruction_handler_table[ins->handler_idx];
+    /* WINESKIN: the OpenCL dialect has handlers of its own (glsl_cl.h). */
+    if (((const struct shader_glsl_ctx_priv *)ins->ctx->backend_data)->cl_key)
+    {
+        SHADER_HANDLER cl_fct = shader_cl_get_handler(ins->handler_idx);
+
+        if (cl_fct)
+            hw_fct = cl_fct;
+    }
 
     /* Unhandled opcode */
     if (!hw_fct)

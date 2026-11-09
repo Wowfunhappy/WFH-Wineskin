@@ -133,6 +133,7 @@ struct wined3d_settings wined3d_settings =
     .renderer = WINED3D_RENDERER_AUTO,
     .shader_backend = WINED3D_SHADER_BACKEND_AUTO,
     .decoder_backend = WINED3D_DECODER_BACKEND_AUTO,
+    .opencl_compute = TRUE, /* WINESKIN */
 };
 
 enum wined3d_renderer CDECL wined3d_get_renderer(void)
@@ -489,6 +490,14 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         {
             ERR_(winediag)("Using the HLSL-based FFP backend.\n");
             wined3d_settings.ffp_hlsl = tmpvalue;
+        }
+        /* WINESKIN: compute shaders on OpenCL (cl_compute.c), on unless "n", "0" or "disabled". */
+        if (!get_config_key(hkey, appkey, env, "OpenCLCompute", buffer, size)
+                && (!strcmp(buffer, "n") || !strcmp(buffer, "N") || !strcmp(buffer, "0")
+                || !strcmp(buffer, "disabled")))
+        {
+            ERR_(winediag)("Disabling compute shaders on OpenCL.\n");
+            wined3d_settings.opencl_compute = FALSE;
         }
     }
 
