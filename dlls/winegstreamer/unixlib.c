@@ -27,6 +27,8 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h> /* WINESKIN */
+#include <dlfcn.h> /* WINESKIN */
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
@@ -256,6 +258,42 @@ static ULONG popcount(ULONG val)
 #endif
 }
 
+/* WINESKIN: an engine that carries its own GStreamer runtime has it in lib/gstreamer-1.0, two levels
+ * above this module (lib/wine/<arch>-unix). Unless the environment names them, GStreamer loads plugins
+ * from there alone, and keeps its registry in the prefix, one file per architecture. */
+static void wineskin_set_gstreamer_paths(void)
+{
+#ifdef __x86_64__
+    static const char registry_name[] = "registry.x86_64.bin";
+#else
+    static const char registry_name[] = "registry.i386.bin";
+#endif
+    char *module_dir, *plugin_dir, *registry;
+    const char *prefix;
+    Dl_info info;
+
+    if (!dladdr(wineskin_set_gstreamer_paths, &info) || !info.dli_fname) return;
+    module_dir = g_path_get_dirname(info.dli_fname);
+    plugin_dir = g_build_filename(module_dir, "..", "..", "gstreamer-1.0", NULL);
+    g_free(module_dir);
+    if (!g_file_test(plugin_dir, G_FILE_TEST_IS_DIR))
+    {
+        g_free(plugin_dir);
+        return;
+    }
+    if (!getenv("GST_PLUGIN_SYSTEM_PATH_1_0") && !getenv("GST_PLUGIN_SYSTEM_PATH"))
+        setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir, 1);
+    g_free(plugin_dir);
+
+    if (getenv("GST_REGISTRY_1_0") || getenv("GST_REGISTRY")) return;
+    if ((prefix = getenv("WINEPREFIX")) && *prefix)
+        registry = g_build_filename(prefix, "gstreamer-1.0", registry_name, NULL);
+    else
+        registry = g_build_filename(g_get_home_dir(), ".wine", "gstreamer-1.0", registry_name, NULL);
+    setenv("GST_REGISTRY_1_0", registry, 1);
+    g_free(registry);
+}
+
 NTSTATUS wg_init_gstreamer(void *arg)
 {
     struct wg_init_gstreamer_params *params = arg;
@@ -281,6 +319,8 @@ NTSTATUS wg_init_gstreamer(void *arg)
      * and handle them, or eventually propagate the exceptions to the user.
      */
     gst_segtrap_set_enabled(false);
+
+    wineskin_set_gstreamer_paths(); /* WINESKIN */
 
     if (!gst_init_check(&argc, &argv, &err))
     {

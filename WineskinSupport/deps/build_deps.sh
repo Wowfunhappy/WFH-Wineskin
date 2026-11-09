@@ -108,4 +108,7 @@ MONO_VERSION="$(sed -n 's/^#define WINE_MONO_VERSION "\(.*\)"$/\1/p' "$WS_REPO/d
 fetch "https://dl.winehq.org/wine/wine-mono/$MONO_VERSION/wine-mono-$MONO_VERSION-x86.tar.xz" >/dev/null
 echo "### wine-mono $MONO_VERSION present"
 
+# The media runtime winegstreamer and winedmo link: GLib, GStreamer and FFmpeg.
+"$HERE/build_media.sh"
+
 echo "### deps ready under $OUT"

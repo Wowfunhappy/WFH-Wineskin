@@ -19,5 +19,15 @@ MONO_TARBALL="$WS_SUPPORT/deps/work/src/wine-mono-$MONO_VERSION-x86.tar.xz"
 [ -f "$MONO_TARBALL" ] || { echo "no $MONO_TARBALL; run deps/build_deps.sh" >&2; exit 1; }
 mkdir -p "$ENGINE/Contents/Resources/Engine/share/wine/mono"
 tar xJf "$MONO_TARBALL" -C "$ENGINE/Contents/Resources/Engine/share/wine/mono"
+# The media runtime (deps/build_media.sh): its libraries in lib/, GStreamer's plugins in
+# lib/gstreamer-1.0 and its plugin scanner in libexec/gstreamer-1.0, where libgstreamer looks for them.
+MEDIA="$WS_DEPS/lib/media-runtime.txt"
+[ -f "$MEDIA" ] || { echo "no $MEDIA; run deps/build_deps.sh" >&2; exit 1; }
+while read -r lib; do
+    cp -L "$WS_DEPS/lib/$lib" "$ENGINE/Contents/Resources/Engine/lib/$lib"
+done < "$MEDIA"
+cp -R "$WS_DEPS/lib/gstreamer-1.0" "$ENGINE/Contents/Resources/Engine/lib/"
+mkdir -p "$ENGINE/Contents/Resources/Engine/libexec/gstreamer-1.0"
+cp "$WS_DEPS/libexec/gstreamer-1.0/gst-plugin-scanner" "$ENGINE/Contents/Resources/Engine/libexec/gstreamer-1.0/"
 du -sh "$ENGINE"
 echo "### engine staged -> $ENGINE"

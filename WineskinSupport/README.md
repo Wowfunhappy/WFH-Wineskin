@@ -29,8 +29,11 @@ WineskinSupport/
 │   │                       GNU make, pkgconf and nasm from source
 │   ├── vendor/clang/       COMMITTED: clang 22 + lld (bzip2), llvm-ar, resource headers, compiler-rt
 │   └── scripts/            build_gnu.sh (one GNU-style tool from a release tarball)
-├── deps/build_deps.sh      third-party libraries Wine's Unix side loads (FreeType, GnuTLS), universal
-│                           i386 + x86_64, and the wine-mono tarball
+├── deps/
+│   ├── build_deps.sh       third-party libraries Wine's Unix side loads (FreeType, GnuTLS, and the media
+│   │                       runtime through build_media.sh), universal i386 + x86_64, and the wine-mono tarball
+│   ├── build_media.sh      the media runtime: GLib, GStreamer and FFmpeg (see "Video and compressed audio")
+│   └── patches/            patches build_media.sh applies to upstream sources
 ├── polyfill/               the 10.9 gap layer: libwineskin_polyfill.a + a header overlay (see below)
 ├── scripts/
 │   ├── env.sh              (sourced) toolchain PATH, sysroot, deployment target, per-arch host flags
@@ -49,8 +52,9 @@ WineskinSupport/
 1. Install the Command Line Tools (`xcode-select --install`), which put the C headers in `/usr/include`.
    `WINESKIN_SYSROOT` names another root, such as a `MacOSX10.9.sdk`.
 2. `WineskinSupport/toolchain/bootstrap.sh`
-3. `WineskinSupport/deps/build_deps.sh` — FreeType, GnuTLS, and the wine-mono release `dlls/mscoree`
-   expects, which staging unpacks into the engine's `share/wine/mono` so .NET programs run offline.
+3. `WineskinSupport/deps/build_deps.sh` — FreeType, GnuTLS, the media runtime, and the wine-mono release
+   `dlls/mscoree` expects, which staging unpacks into the engine's `share/wine/mono` so .NET programs run
+   offline. The media runtime takes about a quarter of an hour the first time.
 4. `WineskinSupport/build.sh` — wait for `REBUILD DONE (rc=0)` in `/tmp/wineskin_build.log`. It builds the
    polyfill layer first, on every run.
 5. `WineskinSupport/wrapper/build-wrapper.sh` — produces `build/WFH Wineskin.app`, a blank wrapper.
@@ -173,9 +177,42 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
 
 Devices offer no spatial audio client (`ISpatialAudioClient`), as on Windows without spatial sound:
 programs use an ordinary stream, which a Mac mixes to its speakers either way. Wwise's spatial sink
-corrupted its heap through Wine's (Ori and the Will of the Wisps). Media Foundation decoders (H.264
-video, WMA) come from GStreamer, which the engine is built without, so in-game videos and xWMA music
-do not play.
+corrupted its heap through Wine's (Ori and the Will of the Wisps).
+
+## Video and compressed audio
+
+Media Foundation's and DirectShow's media sources and decoders (H.264, MPEG-1/2/4, WMV, WMA and the
+xWMA XAudio2 plays through `wmadmod`, AAC, MP3, ...) are winegstreamer's, which runs GStreamer;
+winedmo's demuxers run FFmpeg. `deps/build_media.sh` builds both, each architecture into
+`deps/work/media/<arch>/prefix` and merged with lipo into `deps/build`:
+
+- GLib 2.80.5, with libffi 3.4.6 (10.9's lacks the closure API), pcre2 and proxy-libintl built in.
+- GStreamer 1.28.7 with the plugins Wine's pipeline uses and no others: core elements; from base app,
+  audioconvert, audioresample, pbtypes, playback (decodebin), rawparse, typefind, videoconvertscale;
+  from good apetag, audioparsers, avi, deinterlace, id3demux, isomp4, matroska, videofilter, wavparse;
+  from bad mpegdemux, mpegtsdemux, videoparsers; from ugly asfdemux; and gst-libav, whose decoders are
+  FFmpeg's. orc 0.4.41 compiles the SIMD code of the converters.
+- FFmpeg 8.1.3 with decoders, demuxers, parsers and bitstream filters only: no encoders, muxers,
+  filters, devices, network, or Apple frameworks.
+
+Everything compiles against 10.9's own headers. `deps/patches/gstreamer-macos-10.9.patch` gives
+`gst_macos_main()` (the tools') AppKit's 10.9 constant names and synthesized properties i386's
+Objective-C runtime needs. Meson's links go through `deps/work/media/bin/cc`, which drops two arguments
+10.9's linker tools mishandle (see the script).
+
+Every library's install name is `@rpath/<name>`. The engine holds the libraries in `lib/`, the plugins
+in `lib/gstreamer-1.0` (rpath `@loader_path/..`) and the plugin scanner in `libexec/gstreamer-1.0`, where
+a relocated libgstreamer looks for it; `lib/media-runtime.txt` lists the libraries staging copies.
+winegstreamer.so and winedmo.so carry the rpath `@loader_path/../..`, the engine's `lib/`. Before it
+initializes GStreamer, winegstreamer (`unixlib.c`, `wineskin_set_gstreamer_paths`) sets
+`GST_PLUGIN_SYSTEM_PATH_1_0` to the engine's `lib/gstreamer-1.0` and `GST_REGISTRY_1_0` to
+`<prefix>/gstreamer-1.0/registry.<arch>.bin`, unless the environment sets them, so a wrapper and a
+plain `bin/wine` use the bundled plugins and never a system or home-folder GStreamer. Wine loads
+plugins in its own process to build the registry (`--gst-disable-registry-fork`), once per prefix and
+architecture.
+
+A 32-bit program that plays 4K video can run out of address space: Tempest 4000's 3840x2160 intro
+(`ATARI.mp4`) fails to allocate its frames, and the game skips to its title screen.
 
 ## TLS
 
@@ -200,7 +237,8 @@ handshake.
 ```
 Name.app/Contents/
 ├── MacOS/Wineskin                the launcher
-├── Resources/Engine/             the Wine installation (bin, lib/wine, share/wine) + FreeType, GnuTLS
+├── Resources/Engine/             the Wine installation (bin, lib/wine, share/wine) + FreeType, GnuTLS,
+│                                 the media runtime (lib, lib/gstreamer-1.0, libexec/gstreamer-1.0)
 └── SharedSupport/
     ├── prefix/                   the Windows environment (WINEPREFIX)
     ├── Wineskin.plist            the program and options

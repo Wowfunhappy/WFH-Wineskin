@@ -1,0 +1,37 @@
+--- a/gst/gstmacos.m
++++ b/gst/gstmacos.m
+@@ -15,12 +15,18 @@
+ };
+ 
+ @interface GstCocoaApplicationDelegate : NSObject <NSApplicationDelegate>
++{
++  GMutex *nsapp_mutex;
++  GCond *nsapp_cond;
++  gboolean *nsapp_running;
++}
+ @property (assign) GMutex *nsapp_mutex;
+ @property (assign) GCond *nsapp_cond;
+ @property (assign) gboolean *nsapp_running;
+ @end
+ 
+ @implementation GstCocoaApplicationDelegate
++@synthesize nsapp_mutex, nsapp_cond, nsapp_running;
+ 
+ - (void)applicationDidFinishLaunching:(NSNotification *)notification
+ {
+@@ -51,13 +57,13 @@
+   }
+ 
+   /* Post a message so we'll break out of the message loop */
+-  NSEvent *event = [NSEvent otherEventWithType: NSEventTypeApplicationDefined
++  NSEvent *event = [NSEvent otherEventWithType: NSApplicationDefined
+                        location: NSZeroPoint
+                   modifierFlags: 0
+                       timestamp: 0
+                    windowNumber: 0
+                         context: nil
+-                        subtype: NSEventSubtypeApplicationActivated
++                        subtype: NSApplicationActivatedEventType
+                           data1: 0
+                           data2: 0];
+ 

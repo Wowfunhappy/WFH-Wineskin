@@ -25,6 +25,8 @@ mkdir -p "$TREE"
 cd "$TREE"
 export PKG_CONFIG_PATH="$WS_DEPS/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$WS_DEPS/lib/pkgconfig"
+# winegstreamer.so and winedmo.so link the media runtime (deps/build_media.sh), which the engine holds
+# in lib/, two levels above lib/wine/<arch>-unix.
 "$WS_REPO/configure" \
     --prefix="$WS_APP_ROOT/Contents/Resources/Engine" \
     --host=$ARCH-apple-darwin \
@@ -39,9 +41,13 @@ export PKG_CONFIG_LIBDIR="$WS_DEPS/lib/pkgconfig"
     FREETYPE_CFLAGS="-I$WS_DEPS/include/freetype2" \
     FREETYPE_LIBS="-L$WS_DEPS/lib -lfreetype -Wl,-rpath,$WS_DEPS/lib" \
     --with-gnutls \
+    --with-gstreamer \
+    GSTREAMER_LIBS="$(pkg-config --libs gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0) -Wl,-rpath,@loader_path/../.." \
+    --with-ffmpeg \
+    FFMPEG_LIBS="$(pkg-config --libs libavutil libavformat libavcodec) -Wl,-rpath,@loader_path/../.." \
     --with-coreaudio \
-    --without-x --without-wayland --without-gstreamer --without-cups --without-sane \
+    --without-x --without-wayland --without-cups --without-sane \
     --without-gphoto --without-pcap --without-usb --without-v4l2 --without-dbus \
     --without-krb5 --without-netapi --without-oss --without-pulse --without-alsa \
     --without-udev --without-capi --without-inotify --without-vulkan \
-    --without-ffmpeg --without-sdl --without-fontconfig
+    --without-sdl --without-fontconfig
