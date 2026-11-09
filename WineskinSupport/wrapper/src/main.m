@@ -255,14 +255,51 @@ static void ApplyRegistryOptions(Wrapper *w)
     [[NSFileManager defaultManager] removeItemAtPath:file error:NULL];
 }
 
+/* The command that starts Wine on a program, for the program's architecture. Started on a program
+   of the other architecture, a loader runs it in a new process (through start.exe), which would leave
+   this one, the wrapper's application, as an empty launcher; and the 64-bit loader on its own starts
+   the 32-bit one. So a 64-bit program gets the 64-bit preloader and loader, told not to switch
+   (WINELOADERNOEXEC, as Wine's loaders tell each other). */
+static NSArray *LoaderCommandForProgram(Wrapper *w, NSString *program, NSMutableDictionary *env)
+{
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:program];
+    NSData *dos = [fh readDataOfLength:0x40];
+    uint32_t pe = 0;
+    uint16_t machine = 0;
+
+    if (dos.length == 0x40)
+    {
+        [dos getBytes:&pe range:NSMakeRange(0x3c, 4)];
+        [fh seekToFileOffset:OSSwapLittleToHostInt32(pe) + 4];
+        NSData *header = [fh readDataOfLength:2];
+        if (header.length == 2) [header getBytes:&machine length:2];
+    }
+    [fh closeFile];
+
+    if (OSSwapLittleToHostInt16(machine) == 0x8664 /* IMAGE_FILE_MACHINE_AMD64 */)
+    {
+        NSString *dir = [w.enginePath stringByAppendingPathComponent:@"lib/wine/x86_64-unix"];
+        NSString *preloader = [dir stringByAppendingPathComponent:@"wine-preloader"];
+        NSString *loader = [dir stringByAppendingPathComponent:@"wine"];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:preloader] &&
+            [[NSFileManager defaultManager] isExecutableFileAtPath:loader])
+        {
+            env[@"WINELOADERNOEXEC"] = @"1";
+            return @[ preloader, loader ];
+        }
+    }
+    return @[ [w wineBinary] ];
+}
+
 /* Replace this process with Wine running the configured program. */
 static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
     NSString *program = [w programUnixPath];
-    NSDictionary *env = [w environment];
+    NSMutableDictionary *env = [[w environment] mutableCopy];
     NSString *log = LogFilePath(w, @"Last Run");
 
-    NSMutableArray *args = [NSMutableArray arrayWithObjects:[w wineBinary], program, nil];
+    NSMutableArray *args = [LoaderCommandForProgram(w, program, env) mutableCopy];
+    [args addObject:program];
     NSString *argString = w.config[kArgumentsKey];
     if (argString.length)
         [args addObjectsFromArray:[argString componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];

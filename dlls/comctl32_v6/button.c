@@ -396,11 +396,15 @@ static int get_draw_state(const BUTTON_INFO *infoPtr)
         state = STATE_DISABLED;
     else if (infoPtr->state & BST_PUSHED)
         state = STATE_PRESSED;
-    else if (infoPtr->state & BST_HOT)
-        state = STATE_HOT;
+    /* WINESKIN: the default button keeps its look under the mouse, as a Mac's does. */
+    /* else if (infoPtr->state & BST_HOT)
+        state = STATE_HOT; */
     else if (infoPtr->state & BST_FOCUS || type == BS_DEFPUSHBUTTON || type == BS_DEFSPLITBUTTON
              || (type == BS_DEFCOMMANDLINK && !(style & BS_PUSHLIKE)))
         state = STATE_DEFAULTED;
+    /* WINESKIN: see above. */
+    else if (infoPtr->state & BST_HOT)
+        state = STATE_HOT;
     else
         state = STATE_NORMAL;
 
