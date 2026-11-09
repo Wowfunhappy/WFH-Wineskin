@@ -36,6 +36,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(listbox);
 
+/* WINESKIN: controls draw no dotted focus rectangle, as Mac controls draw none */
+#define DrawFocusRect(hdc, rc) ((void)(hdc), (void)(rc), TRUE)
+
 /* Items array granularity (must be power of 2) */
 #define LB_ARRAY_GRANULARITY 16
 

@@ -45,6 +45,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(button);
 
+/* WINESKIN: controls draw no dotted focus rectangle, as Mac controls draw none */
+#define DrawFocusRect(hdc, rc) ((void)(hdc), (void)(rc), TRUE)
+
 /* GetWindowLong offsets for window extra information */
 #define STATE_GWL_OFFSET  0
 #define HFONT_GWL_OFFSET  (sizeof(LONG))
