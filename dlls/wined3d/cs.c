@@ -80,6 +80,7 @@ static void discard_client_address(struct wined3d_resource *resource)
 
     client->addr.buffer_object = CLIENT_BO_DISCARDED;
     client->addr.addr = NULL;
+    wined3d_client_drop_map_shadow(resource); /* WINESKIN */
 }
 
 static void invalidate_client_address(struct wined3d_resource *resource)
@@ -87,6 +88,7 @@ static void invalidate_client_address(struct wined3d_resource *resource)
     struct wined3d_client_resource *client = &resource->client;
 
     memset(&client->addr, 0, sizeof(client->addr));
+    wined3d_client_drop_map_shadow(resource); /* WINESKIN */
 }
 
 enum wined3d_cs_op
@@ -2788,6 +2790,7 @@ void wined3d_device_context_emit_blt_sub_resource(struct wined3d_device_context 
      * rename the buffer object, in which case ours is no longer valid. */
     if (dst_resource->type == WINED3D_RTYPE_BUFFER && dst_box->right - dst_box->left == dst_resource->size)
         invalidate_client_address(dst_resource);
+    wined3d_client_drop_map_shadow(dst_resource); /* WINESKIN */
 
     op = wined3d_device_context_require_space(context, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT);
     op->opcode = WINED3D_CS_OP_BLT_SUB_RESOURCE;
@@ -2819,6 +2822,13 @@ static void wined3d_cs_exec_update_sub_resource(struct wined3d_cs *cs, const voi
     struct wined3d_resource *resource = op->resource;
     const struct wined3d_box *box = &op->box;
     struct wined3d_context *context;
+
+    /* WINESKIN: see map_shadow.c. */
+    if (op->bo.flags & UPLOAD_BO_SHADOW)
+    {
+        wined3d_buffer_upload_map_shadow(buffer_from_resource(resource), box, &op->bo);
+        return;
+    }
 
     context = context_acquire(cs->c.device, NULL, 0);
 
@@ -2853,6 +2863,7 @@ void wined3d_device_context_emit_update_sub_resource(struct wined3d_device_conte
      * rename the buffer object, in which case ours is no longer valid. */
     if (resource->type == WINED3D_RTYPE_BUFFER && box->right - box->left == resource->size)
         invalidate_client_address(resource);
+    wined3d_client_drop_map_shadow(resource); /* WINESKIN */
 
     if (context->ops->map_upload_bo(context, resource, sub_resource_idx, &map_desc, box, WINED3D_MAP_WRITE))
     {
@@ -2983,6 +2994,7 @@ void wined3d_device_context_emit_copy_uav_counter(struct wined3d_device_context 
     op = wined3d_device_context_require_space(context, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT);
     op->opcode = WINED3D_CS_OP_COPY_UAV_COUNTER;
     op->buffer = dst_buffer;
+    wined3d_client_drop_map_shadow(&dst_buffer->resource); /* WINESKIN */
     op->offset = offset;
     op->view = uav;
 
@@ -3244,6 +3256,10 @@ static bool wined3d_cs_map_upload_bo(struct wined3d_device_context *context, str
 
         if ((flags & WINED3D_MAP_NOOVERWRITE) && client->addr.buffer_object == CLIENT_BO_DISCARDED)
             flags = (flags & ~WINED3D_MAP_NOOVERWRITE) | WINED3D_MAP_DISCARD;
+
+        /* WINESKIN: see map_shadow.c. */
+        if (wined3d_resource_uses_map_shadow(resource))
+            return wined3d_client_map_shadow(resource, map_desc, box, flags);
 
         if (flags & WINED3D_MAP_DISCARD)
         {
@@ -3687,6 +3703,16 @@ void CDECL wined3d_device_context_flush_mapped_buffer(struct wined3d_device_cont
 
     if (wined3d_bo_address_is_null(&client->mapped_upload.addr))
         return;
+
+    /* WINESKIN: see map_shadow.c. */
+    if (client->mapped_upload.flags & UPLOAD_BO_SHADOW)
+    {
+        wined3d_client_flush_map_shadow(&client->mapped_upload);
+        wined3d_device_context_upload_bo(context, &buffer->resource, 0,
+                &client->mapped_box, &client->mapped_upload, buffer->resource.size, buffer->resource.size);
+        client->mapped_upload.flags &= ~UPLOAD_BO_SHADOW_DISCARD;
+        return;
+    }
 
     if (client->mapped_upload.flags & UPLOAD_BO_UPLOAD_ON_UNMAP)
         wined3d_device_context_upload_bo(context, &buffer->resource, 0,

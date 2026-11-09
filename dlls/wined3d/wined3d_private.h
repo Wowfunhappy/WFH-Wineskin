@@ -495,6 +495,7 @@ struct wined3d_settings
     bool cb_access_map_w;
     bool ffp_hlsl;
     bool opencl_compute; /* WINESKIN: compute shaders on OpenCL (cl_compute.c) */
+    bool map_shadows; /* WINESKIN: client-side map shadows (map_shadow.c) */
 };
 
 extern struct wined3d_settings wined3d_settings;
@@ -2498,6 +2499,9 @@ bool wined3d_driver_info_init(struct wined3d_driver_info *driver_info,
 #define UPLOAD_BO_UPLOAD_ON_UNMAP   0x1
 #define UPLOAD_BO_RENAME_ON_UNMAP   0x2
 #define UPLOAD_BO_FREE_ON_UNMAP     0x4
+/* WINESKIN: see map_shadow.c. */
+#define UPLOAD_BO_SHADOW            0x8
+#define UPLOAD_BO_SHADOW_DISCARD    0x10
 
 struct upload_bo
 {
@@ -3248,7 +3252,18 @@ struct wined3d_client_resource
     /* The currently mapped upload BO, if applicable, and box. */
     struct upload_bo mapped_upload;
     struct wined3d_box mapped_box;
+
+    struct wined3d_map_shadow *shadow; /* WINESKIN: see map_shadow.c */
 };
+
+/* WINESKIN: map_shadow.c */
+bool wined3d_resource_uses_map_shadow(const struct wined3d_resource *resource);
+bool wined3d_client_map_shadow(struct wined3d_resource *resource, struct wined3d_map_desc *map_desc,
+        const struct wined3d_box *box, uint32_t flags);
+void wined3d_client_drop_map_shadow(struct wined3d_resource *resource);
+void wined3d_client_flush_map_shadow(struct upload_bo *upload_bo);
+void wined3d_buffer_upload_map_shadow(struct wined3d_buffer *buffer,
+        const struct wined3d_box *box, const struct upload_bo *upload_bo);
 
 static inline BOOL wined3d_resource_access_is_managed(unsigned int access)
 {

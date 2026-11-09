@@ -180,6 +180,28 @@ in place.
 - `HKCU\Software\Wine\Direct3D\OpenCLCompute` = `n` (or `WINE_D3D_CONFIG=OpenCLCompute=n`) turns it off;
   dispatches then do nothing. `WINEDEBUG=+d3d_cl` logs each kernel's source and build log.
 
+#### Dynamic buffers without persistent mapping
+
+wined3d's command stream thread makes every OpenGL call; the thread a game renders from only queues
+commands. With `ARB_buffer_storage` wined3d keeps buffers mapped and the game's thread writes into them
+directly. 10.9 has no persistent mapping, so upstream's code makes each `Map(DISCARD)` or
+`Map(NOOVERWRITE)` wait for the command stream to reach the buffer's last use and map it there, and
+replaces a buffer the GPU still reads with a new OpenGL buffer. Two files change that:
+
+- `dlls/wined3d/map_shadow.c`: a `DISCARD` or `NOOVERWRITE` map of a dynamic buffer of at most 64 KiB (a
+  constant buffer, typically) returns system memory at once, the buffer's *shadow*, and the unmap queues
+  its contents. The command stream writes them with `glBufferSubData` into the same OpenGL buffer, which
+  10.9's driver copies into its own command stream: per update and draw that takes 0.2 microseconds,
+  against 1 for mapping a spare buffer and 7 for creating a buffer and deleting the old one
+  (`~/WineskinTests/perf/tools/ubobench.c` measures it). Larger buffers, such as an engine's vertex
+  scratch buffer of megabytes, keep upstream's path: a map's writes are not known, so a shadow would be
+  copied whole at every unmap. `HKCU\Software\Wine\Direct3D\MapShadows` = `n` (or
+  `WINE_D3D_CONFIG=MapShadows=n`) turns shadows off.
+- `dlls/wined3d/bo_pool_gl.c`: an OpenGL buffer that is replaced or destroyed goes to a pool, and a new
+  buffer of the same size and usage takes one from it once the GPU has finished with it, instead of
+  `glGenBuffers`/`glDeleteBuffers` each time. A reused buffer keeps its name and its OpenCL memory
+  object.
+
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
 time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).

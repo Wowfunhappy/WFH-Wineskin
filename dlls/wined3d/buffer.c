@@ -452,6 +452,7 @@ static void wined3d_buffer_destroy_object(void *object)
 
 void wined3d_buffer_cleanup(struct wined3d_buffer *buffer)
 {
+    wined3d_client_drop_map_shadow(&buffer->resource); /* WINESKIN */
     wined3d_cs_destroy_object(buffer->resource.device->cs, wined3d_buffer_destroy_object, buffer);
     resource_cleanup(&buffer->resource);
 }

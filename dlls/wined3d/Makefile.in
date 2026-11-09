@@ -9,11 +9,13 @@ UNIX_LIBS = -lwin32u -framework OpenCL -framework OpenGL
 
 VER_FILEDESCRIPTION_STR = "Wine D3D"
 
-# WINESKIN: compute shaders run on OpenCL, sharing OpenGL's objects: cl_compute.c dispatches,
-# cl.c (Unix) builds and runs the kernels.
+# WINESKIN: compute shaders on OpenCL (cl_compute.c, and cl.c on the Unix side); dynamic buffer
+# maps from the client thread (map_shadow.c); reuse of retired OpenGL buffers (bo_pool_gl.c).
 SOURCES = \
 	cl.c \
 	cl_compute.c \
+	bo_pool_gl.c \
+	map_shadow.c \
 	adapter_gl.c \
 	adapter_vk.c \
 	buffer.c \

@@ -1417,6 +1417,10 @@ bool wined3d_device_gl_create_bo(struct wined3d_device_gl *device_gl, struct win
         if (!context_gl)
             return false;
 
+        /* WINESKIN: see bo_pool_gl.c. */
+        if ((id = wined3d_device_gl_take_pooled_bo(device_gl, size, usage, coherent)))
+            goto pooled;
+
         GL_EXTCALL(glGenBuffers(1, &id));
         if (!id)
         {
@@ -1438,6 +1442,7 @@ bool wined3d_device_gl_create_bo(struct wined3d_device_gl *device_gl, struct win
         checkGLcall("buffer object creation");
     }
 
+pooled: /* WINESKIN */
     bo->id = id;
     bo->memory = memory;
     bo->size = size;
@@ -1485,6 +1490,7 @@ void wined3d_device_gl_delete_opengl_contexts_cs(void *object)
         wined3d_context_gl_wait_command_fence(context_gl,
                 wined3d_device_gl(context_gl->c.device)->current_fence_id - 1);
     }
+    wined3d_device_gl_destroy_bo_pool(device_gl, context_gl); /* WINESKIN */
     wined3d_allocator_cleanup(&device_gl->allocator);
 
     context_release(context);

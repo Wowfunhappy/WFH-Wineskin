@@ -884,7 +884,15 @@ struct wined3d_device_gl
 
     HWND backup_wnd;
     HDC backup_dc;
+
+    struct wined3d_bo_pool_gl *bo_pool; /* WINESKIN: see bo_pool_gl.c */
 };
+
+/* WINESKIN: bo_pool_gl.c */
+GLuint wined3d_device_gl_take_pooled_bo(struct wined3d_device_gl *device_gl,
+        GLsizeiptr size, GLenum usage, bool coherent);
+bool wined3d_context_gl_pool_bo(struct wined3d_context_gl *context_gl, const struct wined3d_bo_gl *bo);
+void wined3d_device_gl_destroy_bo_pool(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
 
 static inline struct wined3d_device_gl *wined3d_device_gl(struct wined3d_device *device)
 {

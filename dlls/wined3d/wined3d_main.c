@@ -134,6 +134,7 @@ struct wined3d_settings wined3d_settings =
     .shader_backend = WINED3D_SHADER_BACKEND_AUTO,
     .decoder_backend = WINED3D_DECODER_BACKEND_AUTO,
     .opencl_compute = TRUE, /* WINESKIN */
+    .map_shadows = TRUE, /* WINESKIN */
 };
 
 enum wined3d_renderer CDECL wined3d_get_renderer(void)
@@ -498,6 +499,14 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         {
             ERR_(winediag)("Disabling compute shaders on OpenCL.\n");
             wined3d_settings.opencl_compute = FALSE;
+        }
+        /* WINESKIN: client-side map shadows (map_shadow.c): "n", "0" or "disabled" turn them off,
+         * any other value on. */
+        if (!get_config_key(hkey, appkey, env, "MapShadows", buffer, size))
+        {
+            wined3d_settings.map_shadows = strcmp(buffer, "n") && strcmp(buffer, "N")
+                    && strcmp(buffer, "0") && strcmp(buffer, "disabled");
+            ERR_(winediag)("Client-side map shadows %s.\n", wined3d_settings.map_shadows ? "on" : "off");
         }
     }
 

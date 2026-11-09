@@ -3122,6 +3122,14 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
         adapter_adjust_mapped_memory(context_gl->c.device->adapter, -bo->size);
     }
 
+    /* WINESKIN: see bo_pool_gl.c. */
+    if (wined3d_context_gl_pool_bo(context_gl, bo))
+    {
+        TRACE("Pooled GL buffer %u.\n", bo->id);
+        bo->id = 0;
+        return;
+    }
+
     TRACE("Destroying GL buffer %u.\n", bo->id);
 
     wined3d_context_gl_unbind_buffer_textures(context_gl); /* WINESKIN */
