@@ -94,14 +94,6 @@ struct cl_kernel
 static pthread_mutex_t cl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct cl_device_context *cl_contexts;
 
-static void CL_CALLBACK cl_context_notify(const char *errinfo, const void *private_info, size_t cb, void *user_data)
-{
-    if (!strncmp(errinfo, "OpenCL Build Warning", 20))
-        TRACE("OpenCL: %s\n", errinfo);
-    else
-        WARN("OpenCL: %s\n", errinfo);
-}
-
 /* The OpenCL context for the current OpenGL context's share group. */
 static struct cl_device_context *get_device_context(void)
 {
@@ -132,7 +124,7 @@ static struct cl_device_context *get_device_context(void)
     props[2] = 0;
     if (!(ctx = calloc(1, sizeof(*ctx))))
         return NULL;
-    if (!(ctx->context = clCreateContext(props, 0, NULL, cl_context_notify, NULL, &err)))
+    if (!(ctx->context = clCreateContext(props, 0, NULL, NULL, NULL, &err)))
     {
         ERR("Failed to create an OpenCL context, error %d.\n", err);
         free(ctx);

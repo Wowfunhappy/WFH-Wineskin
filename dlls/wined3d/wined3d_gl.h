@@ -1249,7 +1249,9 @@ struct wined3d_cl_kernel
 #define WINED3D_CL_FORMAT_BGRA   (1u << 7)
 
 bool wined3d_cl_available(struct wined3d_context_gl *context_gl);
-bool wined3d_cl_build_kernel(const char *source, const struct wined3d_shader *shader, uint64_t *handle);
+bool wined3d_cl_build_kernel(const char *source, const unsigned int *group_size, uint64_t *handle);
+bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
+        struct wined3d_context_gl *context_gl, bool fp);
 void wined3d_cl_release_kernel(uint64_t handle);
 bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
         const struct wined3d_dispatch_parameters *parameters);
@@ -1257,5 +1259,6 @@ void wined3d_cl_finish(void);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
 const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_context_gl *context_gl,
         struct wined3d_shader *shader, const struct wined3d_cl_kernel_key *key);
+bool wined3d_glsl_build_cl_clear_kernel(uint8_t kind, const unsigned int *group_size, uint64_t *handle);
 
 #endif /* __WINE_WINED3D_GL_H */

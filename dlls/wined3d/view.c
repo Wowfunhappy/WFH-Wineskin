@@ -1622,6 +1622,11 @@ void wined3d_unordered_access_view_gl_clear(struct wined3d_unordered_access_view
     unsigned int offset, size;
 
     resource = view_gl->v.resource;
+    /* WINESKIN: without ARB_clear_texture and ARB_clear_buffer_object
+     * (macOS) the view is cleared on OpenCL (cl_compute.c). */
+    if (!gl_info->supported[resource->type == WINED3D_RTYPE_BUFFER ? ARB_CLEAR_BUFFER_OBJECT : ARB_CLEAR_TEXTURE]
+            && wined3d_cl_clear_uav(view_gl, clear_value, context_gl, fp))
+        return;
     if (resource->type != WINED3D_RTYPE_BUFFER)
     {
         unsigned int layer_count, level_count, base_level, base_layer;

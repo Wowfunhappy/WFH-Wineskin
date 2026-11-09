@@ -1667,11 +1667,83 @@ const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_contex
     }
     if (TRACE_ON(d3d_cl))
         shader_cl_dump_source(priv->shader_buffer.buffer);
-    if (!wined3d_cl_build_kernel(priv->shader_buffer.buffer, shader, &kernel->handle))
+    if (!wined3d_cl_build_kernel(priv->shader_buffer.buffer, &shader->u.cs.thread_group_size.x, &kernel->handle))
     {
         if (!TRACE_ON(d3d_cl))
             WARN_(d3d_cl)("Use WINEDEBUG=+d3d_cl to see the kernel's source.\n");
         return NULL;
     }
     return kernel;
+}
+
+/* A kernel that clears an unordered access view: a buffer view (kind 0) or
+ * an image of "kind". Its arguments are the view's binding and information
+ * argument, and the value, as the view's write function takes it. */
+bool wined3d_glsl_build_cl_clear_kernel(uint8_t kind, const unsigned int *group_size, uint64_t *handle)
+{
+    static const enum wined3d_shader_resource_type types[] =
+    {
+        [WINED3D_CL_IMAGE_1D] = WINED3D_SHADER_RESOURCE_TEXTURE_1D,
+        [WINED3D_CL_IMAGE_1D_ARRAY] = WINED3D_SHADER_RESOURCE_TEXTURE_1DARRAY,
+        [WINED3D_CL_IMAGE_2D] = WINED3D_SHADER_RESOURCE_TEXTURE_2D,
+        [WINED3D_CL_IMAGE_2D_ARRAY] = WINED3D_SHADER_RESOURCE_TEXTURE_2DARRAY,
+        [WINED3D_CL_IMAGE_3D] = WINED3D_SHADER_RESOURCE_TEXTURE_3D,
+    };
+    struct wined3d_string_buffer buffer, coord;
+    enum wined3d_shader_resource_type type;
+    unsigned int dim;
+    bool ret;
+
+    if (!string_buffer_init(&buffer))
+        return false;
+    if (!string_buffer_init(&coord))
+    {
+        string_buffer_free(&buffer);
+        return false;
+    }
+    shader_cl_append_prelude(&buffer);
+    shader_addline(&buffer, "%s", shader_cl_prelude_formats);
+    shader_addline(&buffer, "__kernel __attribute__((reqd_work_group_size(%u, %u, %u)))\n",
+            group_size[0], group_size[1], group_size[2]);
+    if (!kind)
+    {
+        /* Format 0xffffffff is a raw or structured view: 32-bit words. */
+        shader_addline(&buffer, "void wined3d_cs(__global uchar *cs_u0_base, uint8 cs_u0_info, uint4 value)\n{\n"
+                "    uint i = get_global_id(0);\n"
+                "    if (cs_u0_info.s3 != 0xffffffffu)\n"
+                "        wfmt_st(cs_u0_base, cs_u0_info, i, value);\n"
+                "    else if (i < cs_u0_info.s1 / 4u)\n"
+                "        ((__global uint *)(cs_u0_base + cs_u0_info.s0))[i] = value.x;\n"
+                "}\n");
+    }
+    else
+    {
+        dim = WINED3D_CL_IMAGE_KIND_DIM(kind);
+        type = dim < ARRAY_SIZE(types) ? types[dim] : WINED3D_SHADER_RESOURCE_NONE;
+        if (!type || WINED3D_CL_IMAGE_KIND_CHANNEL(kind) == WINED3D_CL_CHANNEL_DEPTH)
+        {
+            FIXME_(d3d_cl)("Unhandled image kind %#x.\n", kind);
+            string_buffer_free(&coord);
+            string_buffer_free(&buffer);
+            return false;
+        }
+        shader_addline(&buffer, "void wined3d_cs(write_only %s cs_u0, uint8 cs_u0_info, uint4 value)\n{\n"
+                "    int4 wc = (int4)(get_global_id(0), get_global_id(1), get_global_id(2), 0);\n"
+                "    if (", shader_cl_image_type(kind));
+        shader_cl_append_image_bounds(&buffer, type, "wc", "cs_u0_info");
+        shader_addline(&buffer, ")\n        ");
+        shader_cl_append_image_coord(&coord, type, kind, "wc", "cs_u0_info", false);
+        shader_cl_append_image_write(&buffer, "cs_u0", kind, coord.buffer, "value");
+        shader_addline(&buffer, "}\n");
+    }
+
+    if (TRACE_ON(d3d_cl))
+    {
+        TRACE_(d3d_cl)("Clear kernel for kind %#x:\n", kind);
+        shader_cl_dump_source(buffer.buffer);
+    }
+    ret = wined3d_cl_build_kernel(buffer.buffer, group_size, handle);
+    string_buffer_free(&coord);
+    string_buffer_free(&buffer);
+    return ret;
 }

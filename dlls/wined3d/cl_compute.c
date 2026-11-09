@@ -64,26 +64,25 @@ bool wined3d_cl_available(struct wined3d_context_gl *context_gl)
     return true;
 }
 
-bool wined3d_cl_build_kernel(const char *source, const struct wined3d_shader *shader, uint64_t *handle)
+bool wined3d_cl_build_kernel(const char *source, const unsigned int *group_size, uint64_t *handle)
 {
-    const struct wined3d_shader_thread_group_size *group_size = &shader->u.cs.thread_group_size;
     struct wined3d_cl_build_params params;
     NTSTATUS status;
 
     memset(&params, 0, sizeof(params));
     params.source = (ULONG_PTR)source;
-    params.group_size[0] = group_size->x;
-    params.group_size[1] = group_size->y;
-    params.group_size[2] = group_size->z;
+    params.group_size[0] = group_size[0];
+    params.group_size[1] = group_size[1];
+    params.group_size[2] = group_size[2];
     if ((status = WINE_UNIX_CALL(unix_cl_build, &params)))
     {
-        ERR("Failed to build the OpenCL kernel for compute shader %p, status %#lx.\n", shader, status);
+        ERR("Failed to build an OpenCL kernel, status %#lx.\n", status);
         return false;
     }
-    if (params.work_group_size < group_size->x * group_size->y * group_size->z)
+    if (params.work_group_size < group_size[0] * group_size[1] * group_size[2])
     {
-        FIXME("Compute shader %p: thread group %ux%ux%u exceeds the kernel's work group size %u.\n",
-                shader, group_size->x, group_size->y, group_size->z, params.work_group_size);
+        FIXME("Thread group %ux%ux%u exceeds the kernel's work group size %u.\n",
+                group_size[0], group_size[1], group_size[2], params.work_group_size);
         wined3d_cl_release_kernel(params.kernel);
         return false;
     }
@@ -103,17 +102,6 @@ void wined3d_cl_finish(void)
 {
     if (cl_used)
         WINE_UNIX_CALL(unix_cl_finish, NULL);
-}
-
-void wined3d_cl_forget_gl_object(bool texture, GLuint name)
-{
-    struct wined3d_cl_forget_params params;
-
-    if (!cl_used || !name)
-        return;
-    params.type = texture ? WINED3D_CL_OBJECT_TEXTURE : WINED3D_CL_OBJECT_BUFFER;
-    params.name = name;
-    WINE_UNIX_CALL(unix_cl_forget, &params);
 }
 
 /* The element format of a typed buffer view (WINED3D_CL_FORMAT_*). */
@@ -186,8 +174,265 @@ static enum wined3d_cl_channel cl_texture_channel(const struct wined3d_texture *
     }
 }
 
+/* Whether OpenCL makes images of OpenGL textures of an internal format. */
+static bool cl_gl_format_shareable(GLenum internal)
+{
+    switch (internal)
+    {
+        case GL_R8: case GL_RG8: case GL_RGB8: case GL_RGBA8:
+        case GL_R16: case GL_RG16: case GL_RGBA16:
+        case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
+        case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
+        case GL_R8UI: case GL_RG8UI: case GL_RGBA8UI: case GL_R8I: case GL_RG8I: case GL_RGBA8I:
+        case GL_R16UI: case GL_RG16UI: case GL_RGBA16UI: case GL_R16I: case GL_RG16I: case GL_RGBA16I:
+        case GL_R32UI: case GL_RG32UI: case GL_RGBA32UI: case GL_R32I: case GL_RG32I: case GL_RGBA32I:
+        case GL_DEPTH_COMPONENT16: case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH24_STENCIL8: case GL_DEPTH32F_STENCIL8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* A texture level of a format OpenCL can't share has a shadow texture of one
+ * it can: the level is copied to it (through a pixel buffer) before a
+ * dispatch, and back after one that writes it. */
+struct cl_shadow
+{
+    struct list entry;
+    GLuint source, name, pbo;
+    GLenum source_target, image_target, target;
+    unsigned int level, width, height, depth;
+    GLenum internal, format, type, upload_format;
+    unsigned int texel_size;
+};
+
+static struct list cl_shadows = LIST_INIT(cl_shadows);
+
+static void cl_shadow_destroy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+
+    wined3d_cl_forget_gl_object(true, shadow->name);
+    gl_info->gl_ops.gl.p_glDeleteTextures(1, &shadow->name);
+    GL_EXTCALL(glDeleteBuffers(1, &shadow->pbo));
+    list_remove(&shadow->entry);
+    free(shadow);
+}
+
+
+/* The shadow of a level of "texture_gl"; "image_target" is a cube face's target. */
+static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, struct wined3d_texture_gl *texture_gl,
+        GLuint source, GLenum image_target, unsigned int level)
+{
+    const struct wined3d_format *format = texture_gl->t.resource.format;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    unsigned int width, height, depth;
+    struct cl_shadow *shadow;
+    GLenum target;
+
+    width = wined3d_texture_get_level_width(&texture_gl->t, level);
+    height = wined3d_texture_get_level_height(&texture_gl->t, level);
+    if (texture_gl->target == GL_TEXTURE_3D)
+        depth = wined3d_texture_get_level_depth(&texture_gl->t, level);
+    else if (texture_gl->target == GL_TEXTURE_CUBE_MAP)
+        depth = 1;
+    else
+        depth = texture_gl->t.layer_count;
+
+    LIST_FOR_EACH_ENTRY(shadow, &cl_shadows, struct cl_shadow, entry)
+    {
+        if (shadow->source == source && shadow->image_target == image_target && shadow->level == level)
+        {
+            if (shadow->width == width && shadow->height == height && shadow->depth == depth)
+                return shadow;
+            cl_shadow_destroy(context_gl, shadow);
+            break;
+        }
+    }
+
+    if (!(shadow = calloc(1, sizeof(*shadow))))
+        return NULL;
+    shadow->source = source;
+    shadow->source_target = texture_gl->target;
+    shadow->image_target = image_target;
+    shadow->level = level;
+    shadow->width = width;
+    shadow->height = height;
+    shadow->depth = depth;
+    target = texture_gl->target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_2D : texture_gl->target;
+    shadow->target = target;
+
+    if (format->depth_size)
+    {
+        shadow->internal = GL_R32F;
+        shadow->format = GL_DEPTH_COMPONENT;
+        shadow->upload_format = GL_RED;
+        shadow->type = GL_FLOAT;
+        shadow->texel_size = 4;
+    }
+    else if (format->attrs & WINED3D_FORMAT_ATTR_INTEGER)
+    {
+        bool sint = !(format->attrs & WINED3D_FORMAT_ATTR_UNSIGNED);
+
+        shadow->internal = sint ? GL_RGBA32I : GL_RGBA32UI;
+        shadow->format = shadow->upload_format = GL_RGBA_INTEGER;
+        shadow->type = sint ? GL_INT : GL_UNSIGNED_INT;
+        shadow->texel_size = 16;
+    }
+    else if (format->red_size > 16 || format->green_size > 16 || format->blue_size > 16 || format->alpha_size > 16)
+    {
+        shadow->internal = GL_RGBA32F;
+        shadow->format = shadow->upload_format = GL_RGBA;
+        shadow->type = GL_FLOAT;
+        shadow->texel_size = 16;
+    }
+    else
+    {
+        shadow->internal = GL_RGBA16F;
+        shadow->format = shadow->upload_format = GL_RGBA;
+        shadow->type = GL_HALF_FLOAT;
+        shadow->texel_size = 8;
+    }
+
+    TRACE("Creating a %ux%ux%u shadow (internal format %#x) of level %u of texture %u (%s).\n",
+            width, height, depth, shadow->internal, level, source, debug_d3dformat(format->id));
+
+    gl_info->gl_ops.gl.p_glGenTextures(1, &shadow->name);
+    wined3d_context_gl_bind_texture(context_gl, target, shadow->name);
+    gl_info->gl_ops.gl.p_glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
+    gl_info->gl_ops.gl.p_glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl_info->gl_ops.gl.p_glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    switch (target)
+    {
+        case GL_TEXTURE_1D:
+            gl_info->gl_ops.gl.p_glTexImage1D(target, 0, shadow->internal, width, 0,
+                    shadow->upload_format, shadow->type, NULL);
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_3D:
+            GL_EXTCALL(glTexImage3D(target, 0, shadow->internal, width, height, depth, 0,
+                    shadow->upload_format, shadow->type, NULL));
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            gl_info->gl_ops.gl.p_glTexImage2D(target, 0, shadow->internal, width, depth, 0,
+                    shadow->upload_format, shadow->type, NULL);
+            break;
+        default:
+            gl_info->gl_ops.gl.p_glTexImage2D(target, 0, shadow->internal, width, height, 0,
+                    shadow->upload_format, shadow->type, NULL);
+            break;
+    }
+    GL_EXTCALL(glGenBuffers(1, &shadow->pbo));
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, shadow->pbo);
+    GL_EXTCALL(glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)width * height * depth * shadow->texel_size,
+            NULL, GL_STREAM_COPY));
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, 0);
+    context_invalidate_compute_state(&context_gl->c, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
+    context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
+    checkGLcall("create shadow texture");
+
+    list_add_head(&cl_shadows, &shadow->entry);
+    return shadow;
+}
+
+/* Copies the source level to the shadow, or the shadow back to the source. */
+static void cl_shadow_copy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow, bool to_shadow)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    GLenum dst_target, dst_image_target, src_target, src_image_target, dst_format, src_format;
+    GLuint src, dst;
+    unsigned int dst_level, src_level;
+
+    if (to_shadow)
+    {
+        src = shadow->source;
+        src_target = shadow->source_target;
+        src_image_target = shadow->image_target;
+        src_level = shadow->level;
+        src_format = shadow->format;
+        dst = shadow->name;
+        dst_target = dst_image_target = shadow->target;
+        dst_level = 0;
+        dst_format = shadow->upload_format;
+    }
+    else
+    {
+        src = shadow->name;
+        src_target = src_image_target = shadow->target;
+        src_level = 0;
+        src_format = shadow->upload_format;
+        dst = shadow->source;
+        dst_target = shadow->source_target;
+        dst_image_target = shadow->image_target;
+        dst_level = shadow->level;
+        dst_format = shadow->format;
+        if (dst_format == GL_DEPTH_COMPONENT)
+            return;
+    }
+
+    wined3d_context_gl_bind_texture(context_gl, src_target, src);
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, shadow->pbo);
+    gl_info->gl_ops.gl.p_glGetTexImage(src_image_target, src_level, src_format, shadow->type, NULL);
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, 0);
+
+    wined3d_context_gl_bind_texture(context_gl, dst_target, dst);
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_UNPACK_BUFFER, shadow->pbo);
+    switch (dst_target)
+    {
+        case GL_TEXTURE_1D:
+            gl_info->gl_ops.gl.p_glTexSubImage1D(dst_image_target, dst_level, 0, shadow->width,
+                    dst_format, shadow->type, NULL);
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_3D:
+            GL_EXTCALL(glTexSubImage3D(dst_image_target, dst_level, 0, 0, 0, shadow->width, shadow->height,
+                    shadow->depth, dst_format, shadow->type, NULL));
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            gl_info->gl_ops.gl.p_glTexSubImage2D(dst_image_target, dst_level, 0, 0, shadow->width, shadow->depth,
+                    dst_format, shadow->type, NULL);
+            break;
+        default:
+            gl_info->gl_ops.gl.p_glTexSubImage2D(dst_image_target, dst_level, 0, 0, shadow->width, shadow->height,
+                    dst_format, shadow->type, NULL);
+            break;
+    }
+    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_UNPACK_BUFFER, 0);
+    context_invalidate_compute_state(&context_gl->c, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
+    context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
+    checkGLcall("shadow texture copy");
+}
+
+void wined3d_cl_forget_gl_object(bool texture, GLuint name)
+{
+    struct wined3d_cl_forget_params params;
+
+    if (!cl_used || !name)
+        return;
+    if (texture)
+    {
+        struct wined3d_context_gl *context_gl;
+        struct cl_shadow *shadow, *next;
+
+        LIST_FOR_EACH_ENTRY_SAFE(shadow, next, &cl_shadows, struct cl_shadow, entry)
+        {
+            if (shadow->source != name)
+                continue;
+            /* The caller's context is current. */
+            if ((context_gl = wined3d_context_gl_get_current()))
+                cl_shadow_destroy(context_gl, shadow);
+        }
+    }
+    params.type = texture ? WINED3D_CL_OBJECT_TEXTURE : WINED3D_CL_OBJECT_BUFFER;
+    params.name = name;
+    WINE_UNIX_CALL(unix_cl_forget, &params);
+}
+
+
 /* The OpenCL image of a texture view: the OpenGL target and level it is made
- * from, its kind, and its information argument. */
+ * from (a shadow's, for a format OpenCL can't share), its kind, and its
+ * information argument. */
 struct cl_texture_view
 {
     GLuint name;
@@ -195,6 +440,7 @@ struct cl_texture_view
     unsigned int level;
     uint8_t kind;
     uint32_t info[8];
+    struct cl_shadow *shadow;
 };
 
 static bool cl_get_texture_view(struct wined3d_context_gl *context_gl, struct wined3d_resource *resource,
@@ -235,6 +481,26 @@ static bool cl_get_texture_view(struct wined3d_context_gl *context_gl, struct wi
     }
 
     view->kind = WINED3D_CL_IMAGE_KIND(dim, cl_texture_channel(texture));
+    if (!cl_gl_format_shareable(wined3d_gl_get_internal_format(&texture->resource,
+            wined3d_format_gl(texture->resource.format), false)))
+    {
+        if (dim == WINED3D_CL_IMAGE_2D_MSAA || dim == WINED3D_CL_IMAGE_2D_ARRAY_MSAA)
+        {
+            FIXME("Unhandled multisample format %s.\n", debug_d3dformat(texture->resource.format->id));
+            return false;
+        }
+        if (!(view->shadow = cl_get_shadow(context_gl, texture_gl, view->name, view->target, level)))
+            return false;
+        view->name = view->shadow->name;
+        view->target = view->shadow->target;
+        view->level = 0;
+        if (view->shadow->internal == GL_RGBA32UI)
+            view->kind = WINED3D_CL_IMAGE_KIND(dim, WINED3D_CL_CHANNEL_UINT);
+        else if (view->shadow->internal == GL_RGBA32I)
+            view->kind = WINED3D_CL_IMAGE_KIND(dim, WINED3D_CL_CHANNEL_INT);
+        else
+            view->kind = WINED3D_CL_IMAGE_KIND(dim, WINED3D_CL_CHANNEL_FLOAT);
+    }
     view->info[0] = wined3d_texture_get_level_width(texture, level);
     view->info[1] = wined3d_texture_get_level_height(texture, level);
     if (dim == WINED3D_CL_IMAGE_3D)
@@ -342,6 +608,8 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     /* Load the resources into their OpenGL locations, and choose the kernel
      * for the image kinds bound. */
     memset(&key, 0, sizeof(key));
+    memset(srv_images, 0, sizeof(srv_images));
+    memset(uav_images, 0, sizeof(uav_images));
     for (i = 0; i < WINED3D_MAX_CBS; ++i)
     {
         if (reg_maps->cb_sizes[i] && (buffer = state->cb[WINED3D_SHADER_TYPE_COMPUTE][i].buffer))
@@ -366,7 +634,11 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
         {
             wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, FALSE);
             if (cl_get_texture_view(context_gl, view->resource, &view->desc, false, &srv_images[i]))
+            {
                 key.srv[i] = srv_images[i].kind;
+                if (srv_images[i].shadow)
+                    cl_shadow_copy(context_gl, srv_images[i].shadow, true);
+            }
         }
     }
     for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
@@ -388,7 +660,11 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
             wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, FALSE);
             wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_TEXTURE_RGB);
             if (cl_get_texture_view(context_gl, view->resource, &view->desc, true, &uav_images[i]))
+            {
                 key.uav[i] = uav_images[i].kind;
+                if (uav_images[i].shadow)
+                    cl_shadow_copy(context_gl, uav_images[i].shadow, true);
+            }
         }
     }
     /* Unbound texture slots take a null image of the kind the shader declares. */
@@ -609,9 +885,216 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     }
     free(args);
 
+    for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
+    {
+        if (uavs[i] && reg_maps->uav_resource_info[i].type > WINED3D_SHADER_RESOURCE_BUFFER
+                && uav_images[i].shadow && uav_images[i].kind == key.uav[i])
+            cl_shadow_copy(context_gl, uav_images[i].shadow, false);
+    }
+
     /* OpenGL state the dispatch's resource loads changed. */
     context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
     context_gl->c.last_was_blit = FALSE;
     context_gl->c.last_was_ffp_blit = FALSE;
+    return true;
+}
+
+/* The float a channel of "bits" holds for the raw bits "v" (a uint clear writes
+ * a view's channels' bits). */
+static uint32_t cl_channel_bits_to_float(uint32_t v, unsigned int bits, unsigned int attrs)
+{
+    uint32_t mask = bits >= 32 ? ~0u : (1u << bits) - 1;
+    union {float f; uint32_t u;} r;
+
+    v &= mask;
+    if ((attrs & WINED3D_FORMAT_ATTR_INTEGER) || bits >= 32)
+        return v;
+    if (attrs & WINED3D_FORMAT_ATTR_FLOAT)
+    {
+        /* 16-bit floats have a sign, 11 and 10-bit ones none; all have 5 exponent bits. */
+        unsigned int mantissa_bits = bits == 16 ? 10 : bits - 5, e, m;
+        bool negative = bits == 16 && (v & 0x8000);
+
+        if (bits != 16 && bits != 11 && bits != 10)
+            return v;
+        e = (v >> mantissa_bits) & 0x1f;
+        m = v & ((1u << mantissa_bits) - 1);
+        if (e == 0x1f)
+            r.u = 0x7f800000 | (m << (23 - mantissa_bits));
+        else if (!e)
+            r.f = ldexpf((float)m, -14 - (int)mantissa_bits);
+        else
+            r.u = ((e + 112) << 23) | (m << (23 - mantissa_bits));
+        if (negative)
+            r.u |= 0x80000000;
+        return r.u;
+    }
+    if (attrs & WINED3D_FORMAT_ATTR_UNSIGNED)
+    {
+        r.f = (float)v / (float)mask;
+    }
+    else
+    {
+        int s = (int)(v << (32 - bits)) >> (32 - bits);
+
+        r.f = max((float)s / (float)(mask >> 1), -1.0f);
+    }
+    return r.u;
+}
+
+/* The float bits "v" rounded to the nearest value a normalised channel of
+ * "bits" holds, so that the image write rounds no further. */
+static uint32_t cl_round_normalised(uint32_t v, unsigned int bits, unsigned int attrs)
+{
+    union {float f; uint32_t u;} r;
+    float max_value;
+
+    r.u = v;
+    if (attrs & WINED3D_FORMAT_ATTR_UNSIGNED)
+    {
+        max_value = (float)((1u << bits) - 1);
+        r.f = floorf(min(max(r.f, 0.0f), 1.0f) * max_value + 0.5f) / max_value;
+    }
+    else
+    {
+        max_value = (float)((1u << (bits - 1)) - 1);
+        r.f = min(max(r.f, -1.0f), 1.0f) * max_value;
+        r.f = (r.f < 0.0f ? -floorf(-r.f + 0.5f) : floorf(r.f + 0.5f)) / max_value;
+    }
+    return r.u;
+}
+
+bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
+        struct wined3d_context_gl *context_gl, bool fp)
+{
+    static uint64_t clear_kernels[256];
+    static bool clear_failed[256];
+    struct wined3d_unordered_access_view *view = &view_gl->v;
+    struct wined3d_resource *resource = view->resource;
+    unsigned int group_size[3] = {64, 1, 1}, extent[3] = {1, 1, 1}, i;
+    uint32_t info[8] = {0}, value[4];
+    struct wined3d_cl_dispatch_params params;
+    struct cl_shadow *shadow = NULL;
+    struct wined3d_cl_arg args[3];
+    NTSTATUS status;
+    uint8_t kind = 0;
+
+    if (!wined3d_cl_available(context_gl))
+        return false;
+    cl_used = true;
+
+    TRACE("view %p, value %#x %#x %#x %#x, fp %d.\n", view, clear_value->x, clear_value->y,
+            clear_value->z, clear_value->w, fp);
+    memset(args, 0, sizeof(args));
+    value[0] = clear_value->x;
+    value[1] = clear_value->y;
+    value[2] = clear_value->z;
+    value[3] = clear_value->w;
+
+    if (resource->type == WINED3D_RTYPE_BUFFER)
+    {
+        struct wined3d_buffer *buffer = buffer_from_resource(resource);
+
+        wined3d_buffer_acquire_bo_for_write(buffer, &context_gl->c);
+        wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
+        wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_BUFFER);
+        if (!buffer->buffer_object)
+            return false;
+        wined3d_context_gl_reference_buffer(context_gl, buffer);
+        cl_buffer_view_info(buffer, &view->desc, view->format, info);
+        if ((view->desc.flags & WINED3D_VIEW_BUFFER_RAW) || view->desc.format_id == WINED3DFMT_UNKNOWN)
+        {
+            info[3] = ~0u;
+            extent[0] = info[1] / 4;
+        }
+        else
+        {
+            /* A uint clear writes each channel's bits. */
+            if (!fp)
+                info[3] = (info[3] & ~(7u << 4)) | WINED3D_CL_FORMAT_UINT;
+            extent[0] = info[2];
+        }
+        cl_arg_gl_buffer(&args[0], wined3d_bo_gl(buffer->buffer_object));
+    }
+    else
+    {
+        const struct wined3d_format *format = view->format;
+        struct cl_texture_view image;
+        unsigned int dim;
+
+        wined3d_texture_load(texture_from_resource(resource), &context_gl->c, FALSE);
+        wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_TEXTURE_RGB);
+        if (!cl_get_texture_view(context_gl, resource, &view->desc, true, &image))
+            return false;
+        if ((shadow = image.shadow))
+            cl_shadow_copy(context_gl, shadow, true);
+        kind = image.kind;
+        dim = WINED3D_CL_IMAGE_KIND_DIM(kind);
+        memcpy(info, image.info, sizeof(info));
+        extent[0] = info[0];
+        if (dim == WINED3D_CL_IMAGE_1D_ARRAY)
+            extent[1] = info[2];
+        else if (dim != WINED3D_CL_IMAGE_1D)
+            extent[1] = info[1];
+        if (dim == WINED3D_CL_IMAGE_2D_ARRAY || dim == WINED3D_CL_IMAGE_3D)
+            extent[2] = info[2];
+        if (dim != WINED3D_CL_IMAGE_1D && dim != WINED3D_CL_IMAGE_1D_ARRAY)
+        {
+            group_size[0] = 8;
+            group_size[1] = 8;
+        }
+        if (WINED3D_CL_IMAGE_KIND_CHANNEL(kind) == WINED3D_CL_CHANNEL_FLOAT)
+        {
+            const unsigned int sizes[4] = {format->red_size, format->green_size, format->blue_size, format->alpha_size};
+
+            for (i = 0; i < 4; ++i)
+            {
+                if (!fp)
+                    value[i] = sizes[i] ? cl_channel_bits_to_float(value[i], sizes[i], format->attrs) : 0;
+                else if (sizes[i] && sizes[i] < 32 && (format->attrs & WINED3D_FORMAT_ATTR_NORMALISED))
+                    value[i] = cl_round_normalised(value[i], sizes[i], format->attrs);
+            }
+        }
+        else if (!fp)
+        {
+            const unsigned int sizes[4] = {format->red_size, format->green_size, format->blue_size, format->alpha_size};
+
+            /* Each channel takes the low bits of its value. */
+            for (i = 0; i < 4; ++i)
+            {
+                if (sizes[i] && sizes[i] < 32)
+                    value[i] &= (1u << sizes[i]) - 1;
+            }
+        }
+        args[0].type = WINED3D_CL_ARG_GL_TEXTURE;
+        args[0].gl_name = image.name;
+        args[0].gl_target = image.target;
+        args[0].level = image.level;
+    }
+    cl_arg_value(&args[1], info, sizeof(info));
+    cl_arg_value(&args[2], value, sizeof(value));
+
+    if (!clear_kernels[kind] && !clear_failed[kind]
+            && !wined3d_glsl_build_cl_clear_kernel(kind, group_size, &clear_kernels[kind]))
+        clear_failed[kind] = true;
+    if (!clear_kernels[kind])
+        return false;
+
+    memset(&params, 0, sizeof(params));
+    params.kernel = clear_kernels[kind];
+    params.args = (ULONG_PTR)args;
+    params.arg_count = ARRAY_SIZE(args);
+    for (i = 0; i < 3; ++i)
+    {
+        params.group_size[i] = group_size[i];
+        params.group_count[i] = (extent[i] + group_size[i] - 1) / group_size[i];
+        if (!params.group_count[i])
+            return true;
+    }
+    params.sync = 1;
+    if ((status = WINE_UNIX_CALL(unix_cl_dispatch, &params)))
+        ERR("Failed to clear unordered access view %p, status %#lx.\n", view, status);
+    if (shadow)
+        cl_shadow_copy(context_gl, shadow, false);
     return true;
 }
