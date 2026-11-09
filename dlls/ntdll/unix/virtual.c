@@ -3674,7 +3674,13 @@ static void set_large_address_space(void)
     }
     else if (!(main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE))
     {
+#ifdef __APPLE__
+        /* WINESKIN: Windows allocations stay below 2 GB (user_space_limit); the space above is left
+         * to the Mac's own libraries and the OpenGL driver, which otherwise take several hundred MB
+         * of the program's 2 GB. */
+#else
         reserve_area( (void *)limit_2g, host_addr_space_limit );
+#endif /* WINESKIN */
         return;
     }
     user_space_limit = working_set_limit = address_space_limit;
