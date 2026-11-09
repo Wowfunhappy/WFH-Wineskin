@@ -192,6 +192,9 @@ static const WCHAR font_assoc_keyW[] =
 };
 
 static UINT font_smoothing = GGO_BITMAP;
+#ifdef __APPLE__
+extern int wineskin_mac_lcd_font_smoothing(void); /* WINESKIN: freetype.c */
+#endif
 static UINT subpixel_orientation = GGO_GRAY4_BITMAP;
 static BOOL antialias_fakes = TRUE;
 static struct font_gamma_ramp font_gamma_ramp;
@@ -4748,6 +4751,11 @@ static UINT init_font_options(void)
         {
             if (get_key_value( key, "FontSmoothingType", &val ) && val == 2 /* FE_FONTSMOOTHINGCLEARTYPE */)
                 font_smoothing = subpixel_orientation;
+#ifdef __APPLE__
+            /* WINESKIN: standard smoothing follows the Mac's choice between LCD and grayscale */
+            else if (wineskin_mac_lcd_font_smoothing())
+                font_smoothing = subpixel_orientation;
+#endif
             else
                 font_smoothing = GGO_GRAY4_BITMAP;
         }
