@@ -50,6 +50,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
     NSPopUpButton* typePopUp;
     WineEventQueue* queue;          /* of the thread that waits for the panel */
     NSWindow* sheetWindow;          /* the window the panel is a sheet on */
+    NSWindow* sheetOwner;           /* the window the panel was a sheet on, once it has ended */
     BOOL hasTitle;                  /* the program gave the panel a title */
     id keyMonitor;
 
@@ -202,6 +203,7 @@ static NSArray* extensions_from_spec(NSString* spec)
         [typePopUp release];
         [queue release];
         [sheetWindow release];
+        [sheetOwner release];
         [chosenURLs release];
         [super dealloc];
     }
@@ -330,6 +332,11 @@ static NSArray* extensions_from_spec(NSString* spec)
     {
         NSArray* urls = nil;
 
+        /* A sheet is still attached while its completion handler runs, and a window with a sheet
+           cannot become key; the owner is made key again once the program re-enables it
+           (-restoreOwner). */
+        if (sheetWindow) [panel orderOut:nil];
+
         if (keyMonitor)
         {
             [NSEvent removeMonitor:keyMonitor];
@@ -353,7 +360,8 @@ static NSArray* extensions_from_spec(NSString* spec)
             done = YES;
         }
 
-        [sheetWindow release];
+        [sheetOwner release];
+        sheetOwner = sheetWindow;
         sheetWindow = nil;
 
         [queue signalEventAvailable];
@@ -385,6 +393,18 @@ static NSArray* extensions_from_spec(NSString* spec)
             [NSApp activateIgnoringOtherApps:YES];
             [panel makeKeyAndOrderFront:nil];
         }
+    }
+
+    /* While the panel was up its owner was disabled, so Windows activation moved elsewhere, and the
+       program cannot take it back itself. The owner becoming key gives it back, as a Windows dialog's
+       owner is activated when the dialog closes. */
+    - (void) restoreOwner
+    {
+        if (sheetOwner && [NSApp isActive] && [sheetOwner isVisible] && ![sheetOwner isMiniaturized] &&
+            ![sheetOwner attachedSheet] && [sheetOwner canBecomeKeyWindow])
+            [sheetOwner makeKeyWindow];
+        [sheetOwner release];
+        sheetOwner = nil;
     }
 
     - (void) cancel
@@ -565,6 +585,7 @@ NTSTATUS macdrv_file_panel_release(void *arg)
     /* The panel's last release happens on the main thread. */
     OnMainThreadAsync(^{
         [controller cancel];
+        [controller restoreOwner];
         [controller release];
     });
     return STATUS_SUCCESS;

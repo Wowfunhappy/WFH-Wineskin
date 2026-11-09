@@ -525,9 +525,10 @@ HRESULT CDECL wineskin_file_panel(struct wineskin_file_panel *panel)
         hr = S_FALSE;
 
     if (poll.done) panel->filter_index = poll.filter_index;
-    MACDRV_CALL(file_panel_release, &poll);
 
+    /* Released once the owner is enabled again, so that it can become key (-restoreOwner). */
     if (reenable) EnableWindow(root, TRUE);
+    MACDRV_CALL(file_panel_release, &poll);
     if (root && IsWindow(root)) SetForegroundWindow(root);
     if (quit) PostQuitMessage(quit_code);
 
