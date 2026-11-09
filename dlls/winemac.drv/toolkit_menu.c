@@ -1,7 +1,7 @@
 /*
  * WINESKIN: Mac menu bar menus for GTK and Qt programs
  *
- * GTK and Qt draw their menu bars themselves; a window of theirs has no Win32 menu for the Mac
+ * GTK (2 and 3) and Qt 4 draw their menu bars themselves; a window of theirs has no Win32 menu for the Mac
  * menu bar to show. When such a window is activated, macdrv_toolkit_menu_check (menu.c) asks
  * this code to look for the toolkit's menu bar in it. If there is one, the window is given a
  * Win32 menu bar made from it and the toolkit's own bar is hidden. The window is subclassed:
@@ -446,10 +446,247 @@ static const struct toolkit gtk_toolkit =
 
 
 /***********************************************************************
+ *              Qt 4 (built with Visual C++)
+ *
+ * Member functions are called through their exported decorated names. A member function that
+ * returns a class takes a hidden pointer to the result after "this".
+ */
+
+#ifdef __i386__
+#define QT_THISCALL __attribute__((thiscall))
+#define QT_NAME(x86, x64) x86
+#else
+#define QT_THISCALL
+#define QT_NAME(x86, x64) x64
+#endif
+
+struct qt_list_data { LONG ref; int alloc, begin, end; unsigned int sharable; void *array[1]; };
+struct qt_string_data { LONG ref; int alloc, size; WCHAR *data; };
+
+static struct
+{
+    BOOL tried, ok;
+    void *(CDECL *widget_find)(HWND);
+    struct qt_list_data **(QT_THISCALL *object_children)(void *);
+    unsigned char (QT_THISCALL *object_inherits)(void *, const char *);
+    struct qt_list_data **(QT_THISCALL *widget_actions)(void *, struct qt_list_data **);
+    struct qt_string_data **(QT_THISCALL *action_text)(void *, struct qt_string_data **);
+    void *(QT_THISCALL *action_menu)(void *);
+    unsigned char (QT_THISCALL *action_is_separator)(void *);
+    unsigned char (QT_THISCALL *action_is_enabled)(void *);
+    unsigned char (QT_THISCALL *action_is_visible)(void *);
+    unsigned char (QT_THISCALL *action_is_checkable)(void *);
+    unsigned char (QT_THISCALL *action_is_checked)(void *);
+    void *(QT_THISCALL *action_group)(void *);
+    unsigned char (QT_THISCALL *group_is_exclusive)(void *);
+    void **(QT_THISCALL *action_shortcut)(void *, void **);
+    struct qt_string_data **(QT_THISCALL *key_sequence_to_string)(void **, struct qt_string_data **, int);
+    void (QT_THISCALL *key_sequence_destroy)(void **);
+    void (QT_THISCALL *action_activate)(void *, int);
+    void (QT_THISCALL *menu_about_to_show)(void *);
+    void (QT_THISCALL *menu_bar_set_visible)(void *, int);
+    void (QT_THISCALL *widget_set_fixed_height)(void *, int);
+    void (CDECL *string_free)(struct qt_string_data *);
+    void (CDECL *mem_free)(void *);
+} qt;
+
+static BOOL load_qt(void)
+{
+    HMODULE core, gui;
+
+    if (qt.tried) return qt.ok;
+    if (!(gui = GetModuleHandleW(L"QtGui4.dll")) && !(gui = GetModuleHandleW(L"QtGuid4.dll"))) return FALSE;
+    qt.tried = TRUE;
+    if (!(core = GetModuleHandleW(L"QtCore4.dll")) && !(core = GetModuleHandleW(L"QtCored4.dll"))) return FALSE;
+
+#define GET(mod, field, x86, x64) qt.field = (void *)GetProcAddress(mod, QT_NAME(x86, x64))
+    GET(gui, widget_find, "?find@QWidget@@SAPAV1@PAUHWND__@@@Z", "?find@QWidget@@SAPEAV1@PEAUHWND__@@@Z");
+    GET(core, object_children, "?children@QObject@@QBEABV?$QList@PAVQObject@@@@XZ",
+        "?children@QObject@@QEBAAEBV?$QList@PEAVQObject@@@@XZ");
+    GET(core, object_inherits, "?inherits@QObject@@QBE_NPBD@Z", "?inherits@QObject@@QEBA_NPEBD@Z");
+    GET(gui, widget_actions, "?actions@QWidget@@QBE?AV?$QList@PAVQAction@@@@XZ",
+        "?actions@QWidget@@QEBA?AV?$QList@PEAVQAction@@@@XZ");
+    GET(gui, action_text, "?text@QAction@@QBE?AVQString@@XZ", "?text@QAction@@QEBA?AVQString@@XZ");
+    GET(gui, action_menu, "?menu@QAction@@QBEPAVQMenu@@XZ", "?menu@QAction@@QEBAPEAVQMenu@@XZ");
+    GET(gui, action_is_separator, "?isSeparator@QAction@@QBE_NXZ", "?isSeparator@QAction@@QEBA_NXZ");
+    GET(gui, action_is_enabled, "?isEnabled@QAction@@QBE_NXZ", "?isEnabled@QAction@@QEBA_NXZ");
+    GET(gui, action_is_visible, "?isVisible@QAction@@QBE_NXZ", "?isVisible@QAction@@QEBA_NXZ");
+    GET(gui, action_is_checkable, "?isCheckable@QAction@@QBE_NXZ", "?isCheckable@QAction@@QEBA_NXZ");
+    GET(gui, action_is_checked, "?isChecked@QAction@@QBE_NXZ", "?isChecked@QAction@@QEBA_NXZ");
+    GET(gui, action_group, "?actionGroup@QAction@@QBEPAVQActionGroup@@XZ",
+        "?actionGroup@QAction@@QEBAPEAVQActionGroup@@XZ");
+    GET(gui, group_is_exclusive, "?isExclusive@QActionGroup@@QBE_NXZ", "?isExclusive@QActionGroup@@QEBA_NXZ");
+    GET(gui, action_shortcut, "?shortcut@QAction@@QBE?AVQKeySequence@@XZ",
+        "?shortcut@QAction@@QEBA?AVQKeySequence@@XZ");
+    GET(gui, key_sequence_to_string, "?toString@QKeySequence@@QBE?AVQString@@W4SequenceFormat@1@@Z",
+        "?toString@QKeySequence@@QEBA?AVQString@@W4SequenceFormat@1@@Z");
+    GET(gui, key_sequence_destroy, "??1QKeySequence@@QAE@XZ", "??1QKeySequence@@QEAA@XZ");
+    GET(gui, action_activate, "?activate@QAction@@QAEXW4ActionEvent@1@@Z", "?activate@QAction@@QEAAXW4ActionEvent@1@@Z");
+    GET(gui, menu_about_to_show, "?aboutToShow@QMenu@@IAEXXZ", "?aboutToShow@QMenu@@IEAAXXZ");
+    GET(gui, menu_bar_set_visible, "?setVisible@QMenuBar@@UAEX_N@Z", "?setVisible@QMenuBar@@UEAAX_N@Z");
+    GET(gui, widget_set_fixed_height, "?setFixedHeight@QWidget@@QAEXH@Z", "?setFixedHeight@QWidget@@QEAAXH@Z");
+    GET(core, string_free, "?free@QString@@CAXPAUData@1@@Z", "?free@QString@@CAXPEAUData@1@@Z");
+    GET(core, mem_free, "?qFree@@YAXPAX@Z", "?qFree@@YAXPEAX@Z");
+#undef GET
+
+    qt.ok = qt.widget_find && qt.object_children && qt.object_inherits && qt.widget_actions &&
+            qt.action_text && qt.action_menu && qt.action_is_separator && qt.action_is_enabled &&
+            qt.action_is_visible && qt.action_activate && qt.menu_bar_set_visible &&
+            qt.string_free && qt.mem_free;
+    TRACE("Qt 4 %s\n", qt.ok ? "found" : "lacks functions");
+    return qt.ok;
+}
+
+static void qt_release_list(struct qt_list_data *d)
+{
+    if (d && !InterlockedDecrement(&d->ref)) qt.mem_free(d);
+}
+
+static WCHAR *qt_take_string(struct qt_string_data *d)
+{
+    WCHAR *ret;
+
+    if (!d) return NULL;
+    if ((ret = HeapAlloc(GetProcessHeap(), 0, (d->size + 1) * sizeof(WCHAR))))
+    {
+        memcpy(ret, d->data, d->size * sizeof(WCHAR));
+        ret[d->size] = 0;
+    }
+    if (!InterlockedDecrement(&d->ref)) qt.string_free(d);
+    return ret;
+}
+
+static void *qt_find_menu_bar_in(void *object, int depth)
+{
+    struct qt_list_data *children;
+    void *ret = NULL;
+    int i;
+
+    if (depth > MAX_DEPTH || !object) return NULL;
+    children = *qt.object_children(object);
+    for (i = children->begin; i < children->end && !ret; i++)
+    {
+        void *child = children->array[i];
+        if (qt.object_inherits(child, "QMenuBar")) ret = child;
+        else if (qt.object_inherits(child, "QWidget")) ret = qt_find_menu_bar_in(child, depth + 1);
+    }
+    return ret;
+}
+
+static void *qt_find_menu_bar(HWND hwnd)
+{
+    if (!load_qt()) return NULL;
+    return qt_find_menu_bar_in(qt.widget_find(hwnd), 0);
+}
+
+static void **qt_get_items(void *menu, UINT *count)
+{
+    struct qt_list_data *list = NULL;
+    void **ret;
+    UINT n;
+    int i;
+
+    /* a program may fill a menu as it is about to show */
+    if (qt.menu_about_to_show && !qt.object_inherits(menu, "QMenuBar")) qt.menu_about_to_show(menu);
+
+    qt.widget_actions(menu, &list);
+    n = list ? list->end - list->begin : 0;
+    if ((ret = HeapAlloc(GetProcessHeap(), 0, max(n, 1) * sizeof(*ret))))
+        for (i = 0; i < (int)n; i++) ret[i] = list->array[list->begin + i];
+    qt_release_list(list);
+    *count = ret ? n : 0;
+    return ret;
+}
+
+static WCHAR *qt_item_text(void *item)
+{
+    struct qt_string_data *text = NULL, *accel_text = NULL;
+    WCHAR *label, *accel = NULL, *ret;
+    void *shortcut = NULL;
+
+    if (qt.action_is_separator(item)) return NULL;
+    qt.action_text(item, &text);
+    if (!(label = qt_take_string(text))) return NULL;
+
+    if (qt.action_shortcut && qt.key_sequence_to_string && qt.key_sequence_destroy)
+    {
+        qt.action_shortcut(item, &shortcut);
+        qt.key_sequence_to_string(&shortcut, &accel_text, 1 /* QKeySequence::PortableText */);
+        qt.key_sequence_destroy(&shortcut);
+        accel = qt_take_string(accel_text);
+    }
+
+    /* Qt marks mnemonics with '&', as Win32 does */
+    if ((ret = HeapAlloc(GetProcessHeap(), 0, (lstrlenW(label) + (accel ? lstrlenW(accel) + 1 : 0) + 1) * sizeof(WCHAR))))
+    {
+        lstrcpyW(ret, label);
+        if (accel && *accel)
+        {
+            lstrcatW(ret, L"\t");
+            lstrcatW(ret, accel);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, label);
+    HeapFree(GetProcessHeap(), 0, accel);
+    return ret;
+}
+
+static void *qt_item_submenu(void *item)
+{
+    return qt.action_menu(item);
+}
+
+static BOOL qt_item_visible(void *item)
+{
+    return qt.action_is_visible(item);
+}
+
+static BOOL qt_item_enabled(void *item)
+{
+    return qt.action_is_enabled(item);
+}
+
+static UINT qt_item_check(void *item)
+{
+    void *group;
+    UINT ret;
+
+    if (!qt.action_is_checkable || !qt.action_is_checked || !qt.action_is_checkable(item)) return 0;
+    ret = qt.action_is_checked(item) ? MF_CHECKED : 0;
+    if (qt.action_group && (group = qt.action_group(item)) &&
+        (!qt.group_is_exclusive || qt.group_is_exclusive(group)))
+        ret |= MFT_RADIOCHECK;
+    return ret;
+}
+
+static void qt_keep_item(void *item)
+{
+}
+
+static void qt_activate(void *item)
+{
+    qt.action_activate(item, 0 /* QAction::Trigger */);
+}
+
+/* Hidden for good: with no height, the window's layout gives it no room even if it is shown again. */
+static void qt_hide_menu_bar(void *bar)
+{
+    if (qt.widget_set_fixed_height) qt.widget_set_fixed_height(bar, 0);
+    qt.menu_bar_set_visible(bar, FALSE);
+}
+
+static const struct toolkit qt4_toolkit =
+{
+    "Qt 4", qt_find_menu_bar, qt_get_items, gtk_free_items, qt_item_text, qt_item_submenu,
+    qt_item_visible, qt_item_enabled, qt_item_check, qt_keep_item, qt_activate, qt_hide_menu_bar,
+};
+
+
+/***********************************************************************
  *              building the Win32 menus
  */
 
-static const struct toolkit *toolkits[] = { &gtk_toolkit };
+static const struct toolkit *toolkits[] = { &gtk_toolkit, &qt4_toolkit };
 
 static struct bridged_window *find_bridged_window(HWND hwnd)
 {
