@@ -151,8 +151,11 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
 - **Menu bar.** A top-level window's Win32 menu bar is shown in the Mac menu bar, between the app menu and
   the Window menu, instead of inside the window (`winemac.drv/menu.c`, `cocoa_menu.m`; win32u reserves no
   menu bar space when the driver hosts it). Menus are refreshed with `WM_INITMENUPOPUP` as they open, and
-  `Ctrl` accelerators become Command key equivalents. `HKCU\Software\Wine\Mac Driver\NativeMenuBar`
-  = `n` turns it off.
+  `Ctrl` accelerators become Command key equivalents. GTK (2 and 3) and Qt 4 programs, which draw their
+  menu bars themselves, get the same: when such a window is activated, `winemac.drv/toolkit_menu.c` reads
+  the toolkit's menu bar through the functions its DLLs export, gives the window a Win32 menu bar made
+  from it, hides the toolkit's, refills a menu from the toolkit's as it opens, and activates the
+  toolkit's item for a command. `HKCU\Software\Wine\Mac Driver\NativeMenuBar` = `n` turns all of it off.
 - **Aqua theme.** `dlls/aqua.msstyles`, the default theme, draws common controls as OS X 10.9 draws them,
   with Lucida Grande for menus, captions, message boxes and status bars. `generate.py` in that directory
   draws every bitmap. Dialogs use Lucida Grande too: `wine.inf` substitutes it for "MS Shell Dlg" and
