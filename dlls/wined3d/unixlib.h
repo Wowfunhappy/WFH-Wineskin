@@ -179,6 +179,7 @@ enum unix_funcs
     unix_cl_dispatch, /* WINESKIN */
     unix_cl_forget, /* WINESKIN */
     unix_cl_finish, /* WINESKIN */
+    unix_cl_release_context, /* WINESKIN */
 };
 
 #endif

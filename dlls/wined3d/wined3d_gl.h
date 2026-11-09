@@ -1265,6 +1265,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
         const struct wined3d_dispatch_parameters *parameters);
 void wined3d_cl_finish(void);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
+void wined3d_cl_release_device(struct wined3d_context_gl *context_gl);
 const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_context_gl *context_gl,
         struct wined3d_shader *shader, const struct wined3d_cl_kernel_key *key);
 bool wined3d_glsl_build_cl_clear_kernel(uint8_t kind, const unsigned int *group_size, uint64_t *handle);

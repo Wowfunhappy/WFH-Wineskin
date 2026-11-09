@@ -206,9 +206,20 @@ struct cl_shadow
     GLenum internal, format, type, upload_format;
     unsigned int texel_size;
     bool blit; /* copied with glBlitFramebuffer, on the GPU */
+    struct wined3d_device *device; /* whose share group "source" and "name" are in */
 };
 
+/* Each device's CS thread reaches its own shadows only; the lock keeps the
+ * list whole. It is recursive: destroying a shadow forgets its texture. */
 static struct list cl_shadows = LIST_INIT(cl_shadows);
+static CRITICAL_SECTION cl_shadows_cs;
+static CRITICAL_SECTION_DEBUG cl_shadows_cs_debug =
+{
+    0, 0, &cl_shadows_cs,
+    {&cl_shadows_cs_debug.ProcessLocksList, &cl_shadows_cs_debug.ProcessLocksList},
+    0, 0, {(DWORD_PTR)(__FILE__ ": cl_shadows_cs")}
+};
+static CRITICAL_SECTION cl_shadows_cs = {&cl_shadows_cs_debug, -1, 0, 0, 0, 0};
 
 static void cl_shadow_destroy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow)
 {
@@ -217,7 +228,9 @@ static void cl_shadow_destroy(struct wined3d_context_gl *context_gl, struct cl_s
     wined3d_cl_forget_gl_object(true, shadow->name);
     gl_info->gl_ops.gl.p_glDeleteTextures(1, &shadow->name);
     GL_EXTCALL(glDeleteBuffers(1, &shadow->pbo));
+    EnterCriticalSection(&cl_shadows_cs);
     list_remove(&shadow->entry);
+    LeaveCriticalSection(&cl_shadows_cs);
     free(shadow);
 }
 
@@ -241,19 +254,26 @@ static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, st
     else
         depth = texture_gl->t.layer_count;
 
+    EnterCriticalSection(&cl_shadows_cs);
     LIST_FOR_EACH_ENTRY(shadow, &cl_shadows, struct cl_shadow, entry)
     {
-        if (shadow->source == source && shadow->image_target == image_target && shadow->level == level)
+        if (shadow->device == context_gl->c.device && shadow->source == source
+                && shadow->image_target == image_target && shadow->level == level)
         {
             if (shadow->width == width && shadow->height == height && shadow->depth == depth)
+            {
+                LeaveCriticalSection(&cl_shadows_cs);
                 return shadow;
+            }
             cl_shadow_destroy(context_gl, shadow);
             break;
         }
     }
+    LeaveCriticalSection(&cl_shadows_cs);
 
     if (!(shadow = calloc(1, sizeof(*shadow))))
         return NULL;
+    shadow->device = context_gl->c.device;
     shadow->source = source;
     shadow->source_target = texture_gl->target;
     shadow->image_target = image_target;
@@ -349,7 +369,9 @@ static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, st
     context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
     checkGLcall("create shadow texture");
 
+    EnterCriticalSection(&cl_shadows_cs);
     list_add_head(&cl_shadows, &shadow->entry);
+    LeaveCriticalSection(&cl_shadows_cs);
     return shadow;
 }
 
@@ -469,23 +491,45 @@ void wined3d_cl_forget_gl_object(bool texture, GLuint name)
 
     if (!cl_used || !name)
         return;
+    /* The caller's context is current; "name" is in its share group. */
     if (texture)
     {
         struct wined3d_context_gl *context_gl;
         struct cl_shadow *shadow, *next;
 
-        LIST_FOR_EACH_ENTRY_SAFE(shadow, next, &cl_shadows, struct cl_shadow, entry)
+        if ((context_gl = wined3d_context_gl_get_current()))
         {
-            if (shadow->source != name)
-                continue;
-            /* The caller's context is current. */
-            if ((context_gl = wined3d_context_gl_get_current()))
-                cl_shadow_destroy(context_gl, shadow);
+            EnterCriticalSection(&cl_shadows_cs);
+            LIST_FOR_EACH_ENTRY_SAFE(shadow, next, &cl_shadows, struct cl_shadow, entry)
+            {
+                if (shadow->device == context_gl->c.device && shadow->source == name)
+                    cl_shadow_destroy(context_gl, shadow);
+            }
+            LeaveCriticalSection(&cl_shadows_cs);
         }
     }
     params.type = texture ? WINED3D_CL_OBJECT_TEXTURE : WINED3D_CL_OBJECT_BUFFER;
     params.name = name;
     WINE_UNIX_CALL(unix_cl_forget, &params);
+}
+
+/* Releases the shadows and the OpenCL context of the device whose context is
+ * current, before its OpenGL contexts, and with them its share group, are
+ * destroyed. A share group made later may reuse the address. */
+void wined3d_cl_release_device(struct wined3d_context_gl *context_gl)
+{
+    struct cl_shadow *shadow, *next;
+
+    if (!cl_used)
+        return;
+    EnterCriticalSection(&cl_shadows_cs);
+    LIST_FOR_EACH_ENTRY_SAFE(shadow, next, &cl_shadows, struct cl_shadow, entry)
+    {
+        if (shadow->device == context_gl->c.device)
+            cl_shadow_destroy(context_gl, shadow);
+    }
+    LeaveCriticalSection(&cl_shadows_cs);
+    WINE_UNIX_CALL(unix_cl_release_context, NULL);
 }
 
 

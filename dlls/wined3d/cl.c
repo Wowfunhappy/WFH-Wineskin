@@ -82,6 +82,8 @@ struct cl_device_context
     struct cl_sampler_entry *samplers;
     struct cl_null_image *null_images;
     BOOL pending;
+    LONG refcount; /* the list's, and each kernel's */
+    BOOL released; /* out of the list: its share group is going away */
 };
 
 struct cl_kernel
@@ -162,9 +164,38 @@ static struct cl_device_context *get_device_context(void)
     }
 
     ctx->share_group = share_group;
+    ctx->refcount = 1;
     ctx->next = cl_contexts;
     cl_contexts = ctx;
     return ctx;
+}
+
+/* Called with cl_mutex held. */
+static void cl_context_release(struct cl_device_context *ctx)
+{
+    struct cl_sampler_entry *sampler;
+    struct cl_null_image *image;
+
+    if (--ctx->refcount)
+        return;
+
+    while ((sampler = ctx->samplers))
+    {
+        ctx->samplers = sampler->next;
+        clReleaseSampler(sampler->sampler);
+        free(sampler);
+    }
+    while ((image = ctx->null_images))
+    {
+        ctx->null_images = image->next;
+        clReleaseMemObject(image->mem);
+        free(image);
+    }
+    if (ctx->null_buffer)
+        clReleaseMemObject(ctx->null_buffer);
+    clReleaseCommandQueue(ctx->queue);
+    clReleaseContext(ctx->context);
+    free(ctx);
 }
 
 static NTSTATUS cl_init(void *args)
@@ -279,6 +310,7 @@ static NTSTATUS cl_build(void *args)
         return STATUS_NO_MEMORY;
     }
     kernel->ctx = ctx;
+    ++ctx->refcount;
     kernel->program = program;
     if (!(kernel->kernel = clCreateKernel(program, "wined3d_cs", &err)))
     {
@@ -308,6 +340,7 @@ static NTSTATUS cl_release_kernel(void *args)
     pthread_mutex_lock(&cl_mutex);
     clReleaseKernel(kernel->kernel);
     clReleaseProgram(kernel->program);
+    cl_context_release(kernel->ctx);
     pthread_mutex_unlock(&cl_mutex);
     free(kernel);
     return STATUS_SUCCESS;
@@ -481,6 +514,13 @@ static NTSTATUS cl_dispatch(void *args)
 
     pthread_mutex_lock(&cl_mutex);
 
+    if (ctx->released)
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        WARN("The kernel's share group is gone.\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     for (i = 0; i < params->arg_count; ++i)
     {
         struct wined3d_cl_arg *arg = &cl_args[i];
@@ -595,15 +635,25 @@ static NTSTATUS cl_finish(void *args)
     return STATUS_SUCCESS;
 }
 
+/* OpenGL names are per share group: the current context's. */
 static NTSTATUS cl_forget(void *args)
 {
     const struct wined3d_cl_forget_params *params = args;
     struct cl_mem_entry *entry, **prev;
     struct cl_device_context *ctx;
+    CGLContextObj gl_context;
+
+    if (!(gl_context = CGLGetCurrentContext()))
+    {
+        ERR("No current OpenGL context.\n");
+        return STATUS_INVALID_PARAMETER;
+    }
 
     pthread_mutex_lock(&cl_mutex);
     for (ctx = cl_contexts; ctx; ctx = ctx->next)
     {
+        if (ctx->share_group != CGLGetShareGroup(gl_context))
+            continue;
         prev = &ctx->mems[mem_hash(params->name) % CL_MEM_HASH_SIZE];
         while ((entry = *prev))
         {
@@ -628,6 +678,55 @@ static NTSTATUS cl_forget(void *args)
     return STATUS_SUCCESS;
 }
 
+/* Releases the OpenCL context of the current OpenGL context's share group,
+ * which is about to be destroyed, with its memory objects. */
+static NTSTATUS cl_release_context(void *args)
+{
+    struct cl_device_context *ctx, **prev;
+    struct cl_mem_entry *entry;
+    CGLShareGroupObj share_group;
+    CGLContextObj gl_context;
+    unsigned int i;
+
+    if (!(gl_context = CGLGetCurrentContext()))
+    {
+        ERR("No current OpenGL context.\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    share_group = CGLGetShareGroup(gl_context);
+
+    pthread_mutex_lock(&cl_mutex);
+    for (prev = &cl_contexts; (ctx = *prev); prev = &ctx->next)
+    {
+        if (ctx->share_group == share_group)
+            break;
+    }
+    if (!ctx)
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        return STATUS_SUCCESS;
+    }
+    *prev = ctx->next;
+    ctx->released = TRUE;
+
+    /* The OpenGL objects go with the share group: nothing may be in flight. */
+    clFinish(ctx->queue);
+    ctx->pending = FALSE;
+    for (i = 0; i < CL_MEM_HASH_SIZE; ++i)
+    {
+        while ((entry = ctx->mems[i]))
+        {
+            ctx->mems[i] = entry->next;
+            clReleaseMemObject(entry->mem);
+            free(entry);
+        }
+    }
+    TRACE("Released the OpenCL context %p.\n", ctx->context);
+    cl_context_release(ctx);
+    pthread_mutex_unlock(&cl_mutex);
+    return STATUS_SUCCESS;
+}
+
 #if !defined(SONAME_LIBVA) || !defined(SONAME_LIBVA_DRM)
 
 static NTSTATUS va_unsupported(void *args)
@@ -647,6 +746,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     [unix_cl_dispatch] = cl_dispatch,
     [unix_cl_forget] = cl_forget,
     [unix_cl_finish] = cl_finish,
+    [unix_cl_release_context] = cl_release_context,
 };
 
 /* The parameter structures hold no pointer-sized fields. */
@@ -662,6 +762,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     [unix_cl_dispatch] = cl_dispatch,
     [unix_cl_forget] = cl_forget,
     [unix_cl_finish] = cl_finish,
+    [unix_cl_release_context] = cl_release_context,
 };
 
 #endif
