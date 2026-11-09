@@ -23,6 +23,7 @@ SOURCES = \
 	winemac.drv.spec \
 	cocoa_menu.m \
 	menu.c \
+	toolkit_menu.c \
 	clipboard.c \
 	cocoa_app.m \
 	cocoa_clipboard.m \

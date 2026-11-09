@@ -29,6 +29,8 @@
 #include "wine/debug.h"
 #include "wine/wineskin_file_panel.h" /* WINESKIN */
 
+extern NTSTATUS WINAPI macdrv_toolkit_menu(void *arg, ULONG size); /* WINESKIN: toolkit_menu.c */
+
 WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
 
 
@@ -571,6 +573,7 @@ static BOOL process_attach(void)
     params.strings = strings;
     params.app_icon_callback = (UINT_PTR)macdrv_app_icon;
     params.app_quit_request_callback = (UINT_PTR)macdrv_app_quit_request;
+    params.toolkit_menu_callback = (UINT_PTR)macdrv_toolkit_menu; /* WINESKIN */
 
     if (MACDRV_CALL(init, &params)) return FALSE;
 

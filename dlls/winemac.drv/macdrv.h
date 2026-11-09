@@ -82,6 +82,9 @@ extern bool allow_vsync;
 extern bool allow_set_gamma;
 extern bool allow_software_rendering;
 extern bool native_menu_bar; /* WINESKIN */
+extern UINT64 toolkit_menu_callback; /* WINESKIN */
+struct macdrv_thread_data; /* WINESKIN */
+extern void macdrv_toolkit_menu_check(struct macdrv_thread_data *thread_data); /* WINESKIN */
 extern bool native_file_dialogs; /* WINESKIN */
 
 extern UINT64 app_icon_callback;
@@ -154,6 +157,7 @@ struct macdrv_thread_data
     bool                        ime_open;
     WORD                        keyc2vkey[128];
     WORD                        keyc2scan[128];
+    HWND                        toolkit_menu_hwnd;  /* WINESKIN: see macdrv_toolkit_menu_check */
 };
 
 extern struct macdrv_thread_data *macdrv_init_thread_data(void);

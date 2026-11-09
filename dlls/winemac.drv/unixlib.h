@@ -44,6 +44,7 @@ struct init_params
     struct localized_string *strings;
     UINT64 app_icon_callback;
     UINT64 app_quit_request_callback;
+    UINT64 toolkit_menu_callback;   /* WINESKIN: macdrv_toolkit_menu */
 };
 
 /* macdrv_quit_result params */
@@ -94,6 +95,13 @@ struct app_quit_request_params
 {
     struct dispatch_callback_params dispatch;
     UINT flags;
+};
+
+/* WINESKIN: macdrv_toolkit_menu params */
+struct toolkit_menu_params
+{
+    struct dispatch_callback_params dispatch;
+    UINT32 hwnd;
 };
 
 /* macdrv_dnd_query_exited params */

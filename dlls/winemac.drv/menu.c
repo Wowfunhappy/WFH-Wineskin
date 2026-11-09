@@ -473,6 +473,32 @@ BOOL macdrv_SetWindowMenu(HWND hwnd, HMENU menu)
 
 
 /***********************************************************************
+ *              macdrv_toolkit_menu_check
+ *
+ * WINESKIN: GTK and Qt draw their menu bars themselves, with no Win32 menu. When a top-level window
+ * without a menu bar has been activated, the PE side (toolkit_menu.c) is asked, at this thread's
+ * next wait for messages, to give it a Win32 menu bar made from the toolkit's, which the Mac menu
+ * bar then shows.
+ */
+void macdrv_toolkit_menu_check(struct macdrv_thread_data *thread_data)
+{
+    struct toolkit_menu_params params = {.dispatch = {.callback = toolkit_menu_callback}};
+    HWND hwnd = thread_data->toolkit_menu_hwnd;
+    void *ret_ptr;
+    ULONG ret_len;
+
+    if (!hwnd) return;
+    thread_data->toolkit_menu_hwnd = 0;
+    if (!native_menu_bar || !toolkit_menu_callback || get_window_menu(hwnd)) return;
+    if (NtUserGetAncestor(hwnd, GA_PARENT) != NtUserGetDesktopWindow()) return;
+
+    TRACE("win %p\n", hwnd);
+    params.hwnd = HandleToUlong(hwnd);
+    KeUserDispatchCallback(&params.dispatch, sizeof(params), &ret_ptr, &ret_len);
+}
+
+
+/***********************************************************************
  *              query_menu_popup
  *
  * Handler for QUERY_MENU_POPUP: a popup of the window's menu bar is opening in the Mac menu

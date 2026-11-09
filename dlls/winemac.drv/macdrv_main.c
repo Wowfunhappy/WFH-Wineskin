@@ -59,6 +59,7 @@ bool native_file_dialogs = true; /* WINESKIN */
 pthread_key_t macdrv_thread_data_key = 0;
 UINT64 app_icon_callback = 0;
 UINT64 app_quit_request_callback = 0;
+UINT64 toolkit_menu_callback = 0; /* WINESKIN */
 
 CFDictionaryRef localized_strings;
 
@@ -430,6 +431,7 @@ static NTSTATUS macdrv_init(void *arg)
 
     app_icon_callback = params->app_icon_callback;
     app_quit_request_callback = params->app_quit_request_callback;
+    toolkit_menu_callback = params->toolkit_menu_callback; /* WINESKIN */
 
     status = SessionGetInfo(callerSecuritySession, NULL, &attributes);
     if (status != noErr || !(attributes & sessionHasGraphicAccess))
@@ -624,12 +626,14 @@ static NTSTATUS wow64_init(void *arg)
         ULONG strings;
         UINT64 app_icon_callback;
         UINT64 app_quit_request_callback;
+        UINT64 toolkit_menu_callback; /* WINESKIN */
     } *params32 = arg;
     struct init_params params;
 
     params.strings = UlongToPtr(params32->strings);
     params.app_icon_callback = params32->app_icon_callback;
     params.app_quit_request_callback = params32->app_quit_request_callback;
+    params.toolkit_menu_callback = params32->toolkit_menu_callback; /* WINESKIN */
     return macdrv_init(&params);
 }
 

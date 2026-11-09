@@ -453,6 +453,8 @@ BOOL macdrv_ProcessEvents(DWORD mask)
 
     if (!data) return FALSE;
 
+    if (!data->current_event) macdrv_toolkit_menu_check(data); /* WINESKIN */
+
     if (data->current_event && data->current_event->type != QUERY_EVENT &&
         data->current_event->type != QUERY_EVENT_NO_PREEMPT_WAIT &&
         data->current_event->type != APP_QUIT_REQUESTED &&

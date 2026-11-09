@@ -1289,6 +1289,8 @@ void macdrv_ActivateWindow(HWND hwnd, HWND previous)
     if (!thread_data) return;
     thread_data->dead_key_state = 0;
     set_focus(hwnd, TRUE);
+    /* WINESKIN: see macdrv_toolkit_menu_check */
+    if (native_menu_bar && toolkit_menu_callback) thread_data->toolkit_menu_hwnd = hwnd;
 }
 
 
