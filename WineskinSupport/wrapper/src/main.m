@@ -291,6 +291,24 @@ static NSArray *LoaderCommandForProgram(Wrapper *w, NSString *program, NSMutable
     return @[ [w wineBinary] ];
 }
 
+/* Each user's Desktop folder is a directory in the prefix rather than Wine's link to the Mac's
+   Desktop, so the shortcuts installers put there stay out of Finder. */
+static void KeepDesktopInPrefix(Wrapper *w)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *users = [[w driveCPath] stringByAppendingPathComponent:@"users"];
+
+    for (NSString *user in [fm contentsOfDirectoryAtPath:users error:NULL])
+    {
+        NSString *desktop = [[users stringByAppendingPathComponent:user] stringByAppendingPathComponent:@"Desktop"];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:desktop error:NULL];
+
+        if (![attrs[NSFileType] isEqual:NSFileTypeSymbolicLink]) continue;
+        if ([fm removeItemAtPath:desktop error:NULL])
+            [fm createDirectoryAtPath:desktop withIntermediateDirectories:NO attributes:nil error:NULL];
+    }
+}
+
 /* Replace this process with Wine running the configured program. */
 static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
@@ -298,6 +316,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     NSMutableDictionary *env = [[w environment] mutableCopy];
     NSString *log = LogFilePath(w, @"Last Run");
 
+    KeepDesktopInPrefix(w);
     NSMutableArray *args = [LoaderCommandForProgram(w, program, env) mutableCopy];
     [args addObject:program];
     NSString *argString = w.config[kArgumentsKey];
@@ -498,6 +517,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
             [alert runModal];
             return;
         }
+        KeepDesktopInPrefix(self.wrapper);
         ApplyRegistryOptions(self.wrapper);
         self.status.stringValue = @"Ready.";
     }];
