@@ -363,6 +363,12 @@ Wine's link to the Mac's Documents. "AppData in Application Support" (on) and "D
 Support" (off) in the configuration window choose; turning AppData off moves it back into the prefix, and
 turning Documents off links the Mac's Documents again, leaving what the program saved where it is.
 
+The bundle's icon is the program's own, so Finder shows what the Dock shows while it runs. When the
+program changes (chosen in the configuration window, or found changed at launch; `IconProgram` in
+`Wineskin.plist` records which program the icon came from), `MatchBundleIcon` reads the program's first
+icon group from its resources and writes it as `Contents/Resources/Wineskin.icns`. A program without an
+icon gets `Blank.icns`, the blank wrapper's.
+
 Opening a wrapper with no program, or with Option held, shows the configuration window: install
 software, choose the program and its arguments, Wine's tools (configuration, registry, command prompt,
 task manager), and the Mac driver options, among them "Full screen in its own Space" (see "Full screen

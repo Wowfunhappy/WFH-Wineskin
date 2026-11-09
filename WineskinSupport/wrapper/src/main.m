@@ -55,6 +55,8 @@ static NSString *const kDocumentsInSupportKey = @"DocumentsInApplicationSupport"
 static NSString *const kDataFolderKey = @"DataFolder";
 /* Whether the prefix's text smoothing is set to ClearType (subpixel), as last matched to the Mac's. */
 static NSString *const kLCDFontSmoothingKey = @"LCDFontSmoothing";
+/* The program (as stored in kProgramKey) the bundle's icon was last made from. */
+static NSString *const kIconProgramKey = @"IconProgram";
 
 static BOOL AppDataInSupport(NSDictionary *config)
 {
@@ -439,6 +441,173 @@ static void ApplyDataFolders(Wrapper *w)
     }
 }
 
+/* The first icon group of a Windows program, as the contents of a .ico file; nil when the file is not
+   a PE image or has no icon. The first group in resource order is the one Windows shows for the file. */
+static NSData *ProgramIconData(NSString *program)
+{
+    NSData *file = [NSData dataWithContentsOfFile:program options:NSDataReadingMappedIfSafe error:NULL];
+    const uint8_t *b = file.bytes;
+    NSUInteger len = file.length;
+
+#define RD16(o) ((o) + 2 <= len ? (uint32_t)(b[o] | b[(o) + 1] << 8) : 0)
+#define RD32(o) ((o) + 4 <= len ? (uint32_t)b[o] | (uint32_t)b[(o) + 1] << 8 | (uint32_t)b[(o) + 2] << 16 | (uint32_t)b[(o) + 3] << 24 : 0)
+
+    if (len < 0x40 || RD16(0) != 0x5a4d) return nil;
+    NSUInteger pe = RD32(0x3c);
+    if (RD32(pe) != 0x4550) return nil;
+    NSUInteger sectionCount = RD16(pe + 6), optional = pe + 24, sections = optional + RD16(pe + 20);
+    uint32_t magic = RD16(optional);
+    uint32_t resourceRVA = RD32(optional + (magic == 0x20b ? 112 : 96) + 2 * 8);
+    if (!resourceRVA) return nil;
+
+    /* file offset of an RVA, 0 when no section holds it */
+    NSUInteger (^offsetOfRVA)(uint32_t) = ^NSUInteger(uint32_t rva) {
+        for (NSUInteger i = 0; i < sectionCount; i++)
+        {
+            NSUInteger s = sections + i * 40;
+            uint32_t va = RD32(s + 12), vsize = MAX(RD32(s + 8), RD32(s + 16));
+            if (rva >= va && rva < va + vsize) return RD32(s + 20) + (rva - va);
+        }
+        return 0;
+    };
+    NSUInteger root = offsetOfRVA(resourceRVA);
+    if (!root) return nil;
+
+    /* The entry of a resource directory with the given id, or its first entry for id 0; returns the
+       offset of the subdirectory or data entry it points to, 0 when there is none. */
+    NSUInteger (^entry)(NSUInteger, uint32_t) = ^NSUInteger(NSUInteger dir, uint32_t wanted) {
+        NSUInteger count = RD16(dir + 12) + RD16(dir + 14);
+        for (NSUInteger i = 0; i < count; i++)
+        {
+            NSUInteger e = dir + 16 + i * 8;
+            if (!wanted || RD32(e) == wanted) return root + (RD32(e + 4) & 0x7fffffff);
+        }
+        return 0;
+    };
+    /* the data of the resource of a type: the one with the given id, or the first for id 0 */
+    NSData *(^resource)(uint32_t, uint32_t) = ^NSData *(uint32_t type, uint32_t wanted) {
+        NSUInteger dir = entry(root, type);
+        if (dir) dir = entry(dir, wanted);
+        if (dir) dir = entry(dir, 0);
+        if (!dir) return nil;
+        NSUInteger offset = offsetOfRVA(RD32(dir)), size = RD32(dir + 4);
+        if (!offset || !size || offset + size > len) return nil;
+        return [file subdataWithRange:NSMakeRange(offset, size)];
+    };
+
+    NSData *group = resource(14 /* RT_GROUP_ICON */, 0);
+    const uint8_t *g = group.bytes;
+    if (group.length < 6) return nil;
+    NSUInteger count = g[4] | g[5] << 8;
+    if (!count || group.length < 6 + count * 14) return nil;
+
+    NSMutableData *ico = [NSMutableData dataWithBytes:g length:6];
+    NSMutableData *images = [NSMutableData data];
+    NSMutableArray *kept = [NSMutableArray array];
+    for (NSUInteger i = 0; i < count; i++)
+    {
+        const uint8_t *e = g + 6 + i * 14;
+        NSData *image = resource(3 /* RT_ICON */, e[12] | e[13] << 8);
+        if (image) [kept addObject:@[ [NSData dataWithBytes:e length:8], image ]];
+    }
+    if (!kept.count) return nil;
+    uint16_t keptCount = OSSwapHostToLittleInt16(kept.count);
+    [ico replaceBytesInRange:NSMakeRange(4, 2) withBytes:&keptCount];
+    for (NSArray *k in kept)
+    {
+        uint32_t size = OSSwapHostToLittleInt32((uint32_t)[k[1] length]);
+        uint32_t offset = OSSwapHostToLittleInt32((uint32_t)(6 + kept.count * 16 + images.length));
+        [ico appendData:k[0]];
+        [ico appendBytes:&size length:4];
+        [ico appendBytes:&offset length:4];
+        [images appendData:k[1]];
+    }
+    [ico appendData:images];
+    return ico;
+#undef RD16
+#undef RD32
+}
+
+/* Writes an icon file's images as a .icns file with the sizes Finder and the Dock use, each drawn
+   from the smallest image at least that large. */
+static BOOL WriteIcns(NSData *ico, NSString *path)
+{
+    NSArray *reps = [NSBitmapImageRep imageRepsWithData:ico];
+    NSInteger largest = 0;
+
+    for (NSImageRep *rep in reps) largest = MAX(largest, rep.pixelsWide);
+    if (!largest) return NO;
+
+    NSMutableArray *images = [NSMutableArray array];
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    for (NSNumber *n in @[ @16, @32, @128, @256, @512 ])
+    {
+        NSInteger size = n.integerValue;
+        NSBitmapImageRep *best = nil;
+
+        if (size > MAX(largest, 128)) continue;
+        for (NSBitmapImageRep *rep in reps)
+        {
+            if (![rep isKindOfClass:[NSBitmapImageRep class]]) continue;
+            BOOL enough = rep.pixelsWide >= size, bestEnough = best.pixelsWide >= size;
+            if (!best || (enough && (!bestEnough || rep.pixelsWide < best.pixelsWide ||
+                                     (rep.pixelsWide == best.pixelsWide && rep.bitsPerPixel > best.bitsPerPixel))) ||
+                (!enough && !bestEnough && (rep.pixelsWide > best.pixelsWide ||
+                                            (rep.pixelsWide == best.pixelsWide && rep.bitsPerPixel > best.bitsPerPixel))))
+                best = rep;
+        }
+        CGContextRef ctx = CGBitmapContextCreate(NULL, size, size, 8, 0, space, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        if (!ctx || !best.CGImage) { if (ctx) CGContextRelease(ctx); continue; }
+        CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+        CGContextDrawImage(ctx, CGRectMake(0, 0, size, size), best.CGImage);
+        [images addObject:CFBridgingRelease(CGBitmapContextCreateImage(ctx))];
+        CGContextRelease(ctx);
+    }
+    CGColorSpaceRelease(space);
+    if (!images.count) return NO;
+
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],
+                                                                 CFSTR("com.apple.icns"), images.count, NULL);
+    if (!dest) return NO;
+    for (id image in images) CGImageDestinationAddImage(dest, (__bridge CGImageRef)image, NULL);
+    BOOL ok = CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    return ok;
+}
+
+/* The bundle's icon is the program's own, so Finder shows what the Dock shows while it runs; a
+   program without an icon leaves the blank wrapper's. Done when the program changes. */
+static void MatchBundleIcon(Wrapper *w)
+{
+    NSString *stored = w.config[kProgramKey] ?: @"";
+    if ([w.config[kIconProgramKey] isEqual:stored]) return;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *resources = [w.bundlePath stringByAppendingPathComponent:@"Contents/Resources"];
+    NSString *icon = [resources stringByAppendingPathComponent:@"Wineskin.icns"];
+    NSString *blank = [resources stringByAppendingPathComponent:@"Blank.icns"];
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"wineskin-%d.icns", getpid()]];
+    NSString *program = [w programUnixPath];
+    NSData *ico = program ? ProgramIconData(program) : nil;
+    BOOL changed = NO;
+
+    if (ico && WriteIcns(ico, temp))
+        changed = [fm removeItemAtPath:icon error:NULL] && [fm copyItemAtPath:temp toPath:icon error:NULL];
+    else if ([fm fileExistsAtPath:blank] && ![fm contentsEqualAtPath:blank andPath:icon])
+        changed = [fm removeItemAtPath:icon error:NULL] && [fm copyItemAtPath:blank toPath:icon error:NULL];
+    [fm removeItemAtPath:temp error:NULL];
+
+    if (changed)
+    {
+        /* Finder and the Dock reread an application's icon when the bundle's modification date changes */
+        [fm setAttributes:@{ NSFileModificationDate : [NSDate date] } ofItemAtPath:w.bundlePath error:NULL];
+        [[NSWorkspace sharedWorkspace] noteFileSystemChanged:w.bundlePath];
+    }
+    w.config[kIconProgramKey] = stored;
+    [w save];
+}
+
 /* Whether the Mac draws text with LCD (subpixel) smoothing: the default, and any AppleFontSmoothing
    level but 0, which "Use LCD font smoothing when available" off sets. */
 static BOOL MacUsesLCDFontSmoothing(void)
@@ -490,6 +659,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     KeepDesktopInPrefix(w);
     ApplyDataFolders(w);
     MatchFontSmoothing(w);
+    MatchBundleIcon(w);
     NSMutableArray *args = [LoaderCommandForProgram(w, program, env) mutableCopy];
     [args addObject:program];
     NSString *argString = w.config[kArgumentsKey];
@@ -861,6 +1031,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
     self.wrapper.config[kProgramKey] = [self.wrapper storedPathForUnixPath:path];
     [self.wrapper save];
+    MatchBundleIcon(self.wrapper);
     [self refresh];
     self.status.stringValue = [NSString stringWithFormat:@"%@ will run when this app opens.", path.lastPathComponent];
 }

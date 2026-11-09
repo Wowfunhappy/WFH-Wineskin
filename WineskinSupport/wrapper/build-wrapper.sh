@@ -23,4 +23,6 @@ cp "$HERE/build/Wineskin" "$APP/Contents/MacOS/Wineskin"
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(cat "$WS_REPO/VERSION" | awk '{print $3}')" "$APP/Contents/Info.plist"
 cp "$HERE/build/Wineskin.icns" "$APP/Contents/Resources/Wineskin.icns"
+# The blank wrapper's icon, kept for a program that has none of its own.
+cp "$HERE/build/Wineskin.icns" "$APP/Contents/Resources/Blank.icns"
 echo "### wrapper assembled -> $APP"
