@@ -832,10 +832,15 @@ static HRESULT WINAPI MMDevice_Activate(IMMDevice *iface, REFIID riid, DWORD cls
                 IDirectSoundCapture_Release((IDirectSoundCapture*)*ppv);
         }
     }
+    /* WINESKIN: devices offer no spatial audio client, as on Windows without spatial sound support, so
+     * programs use an ordinary audio stream; a Mac's output is mixed to its own speakers either way.
+     * Wwise's spatial audio sink corrupts its heap through this one (Ori and the Will of the Wisps). */
     else if (IsEqualIID(riid, &IID_ISpatialAudioClient))
+        hr = E_NOINTERFACE; /* WINESKIN */
+    /* else if (IsEqualIID(riid, &IID_ISpatialAudioClient))
     {
         hr = SpatialAudioClient_Create(iface, (ISpatialAudioClient**)ppv);
-    }
+    } (WINESKIN) */
     else
         ERR("Invalid/unknown iid %s\n", debugstr_guid(riid));
 
