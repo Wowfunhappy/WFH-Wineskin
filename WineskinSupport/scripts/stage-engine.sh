@@ -13,7 +13,7 @@ make -C "$WS_REPO/build/wine64" -j"$WS_JOBS" install-lib DESTDIR="$DEST"
 make -C "$WS_REPO/build/wine32" -j"$WS_JOBS" install-lib DESTDIR="$DEST"
 mv "$DEST$WS_APP_ROOT" "$ENGINE"
 rm -rf "$DEST"
-cp "$WS_DEPS/lib/libfreetype.6.dylib" "$ENGINE/Contents/Resources/Engine/lib/"
+cp "$WS_DEPS/lib/libfreetype.6.dylib" "$WS_DEPS/lib/libgnutls.30.dylib" "$ENGINE/Contents/Resources/Engine/lib/"
 MONO_VERSION="$(sed -n 's/^#define WINE_MONO_VERSION "\(.*\)"$/\1/p' "$WS_REPO/dlls/mscoree/mscoree_private.h")"
 MONO_TARBALL="$WS_SUPPORT/deps/work/src/wine-mono-$MONO_VERSION-x86.tar.xz"
 [ -f "$MONO_TARBALL" ] || { echo "no $MONO_TARBALL; run deps/build_deps.sh" >&2; exit 1; }

@@ -38,9 +38,10 @@ export PKG_CONFIG_LIBDIR="$WS_DEPS/lib/pkgconfig"
     --with-freetype \
     FREETYPE_CFLAGS="-I$WS_DEPS/include/freetype2" \
     FREETYPE_LIBS="-L$WS_DEPS/lib -lfreetype -Wl,-rpath,$WS_DEPS/lib" \
+    --with-gnutls \
     --with-coreaudio \
     --without-x --without-wayland --without-gstreamer --without-cups --without-sane \
     --without-gphoto --without-pcap --without-usb --without-v4l2 --without-dbus \
     --without-krb5 --without-netapi --without-oss --without-pulse --without-alsa \
-    --without-udev --without-capi --without-inotify --without-gnutls --without-vulkan \
+    --without-udev --without-capi --without-inotify --without-vulkan \
     --without-ffmpeg --without-sdl --without-fontconfig

@@ -186,11 +186,14 @@ compression or tools: `libgnutls.30.dylib`, install name `@rpath/libgnutls.30.dy
 CoreFoundation and Security. Wine dlopens it by that name (`SONAME_LIBGNUTLS`), and the engine's `lib`
 holds it, which the wrapper and the test scripts put on `DYLD_FALLBACK_LIBRARY_PATH`.
 
-Certificates are checked by crypt32, not GnuTLS, against the roots `SecTrustSettingsCopyCertificates`
-returns for the system, admin and user domains (`dlls/crypt32/unixlib.c`): the roots this Mac has, plus
-any an administrator added. 10.9's own set predates ISRG Root X1 and other current roots, so sites
-issued from those verify only on a Mac that has them installed. Wine's Schannel offers TLS 1.0 to 1.2;
-a server that speaks only TLS 1.3 fails the handshake.
+GnuTLS checks no certificates, and neither does Wine's Schannel: a program that asks Schannel to
+validate the server (`SCH_CRED_AUTO_CRED_VALIDATION`, such as libcurl's Schannel backend) gets any
+certificate accepted. WinHTTP and WinINet check the chain themselves with crypt32, against the roots
+`SecTrustSettingsCopyCertificates` returns for the system, admin and user domains
+(`dlls/crypt32/unixlib.c`): the roots this Mac has, plus any an administrator added. 10.9's own set
+predates ISRG Root X1 and other current roots, so sites issued from those verify only on a Mac that has
+them installed. Wine's Schannel offers TLS 1.0 to 1.2; a server that speaks only TLS 1.3 fails the
+handshake.
 
 ## The wrapper
 
