@@ -749,6 +749,23 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
     TRACE("%p %s %p 0x%08x %p\n", displays, debugstr_w(primary_name), hwnd, flags, lpvoid);
 
+    /* WINESKIN: the desktop process changes display settings only to restore them after a program
+     * that changed them exits. macOS restores a display when the process that captured it exits, so
+     * this puts back the user's configuration if it isn't already; changing the mode here the usual
+     * way would capture every display for the desktop process and cover the screen until it exits. */
+    {
+        DWORD pid = 0;
+
+        NtUserGetWindowThread(NtUserGetDesktopWindow(), &pid);
+        if (pid == GetCurrentProcessId())
+        {
+            TRACE("restoring the permanent display configuration\n");
+            CGRestorePermanentDisplayConfiguration();
+            macdrv_reset_device_metrics();
+            return DISP_CHANGE_SUCCESSFUL;
+        }
+    }
+
     init_original_display_mode();
 
     /* TODO: support displays other than the main one */
