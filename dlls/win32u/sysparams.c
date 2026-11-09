@@ -165,7 +165,12 @@ static INT64 last_query_display_time;
 static UINT64 monitor_update_serial;
 static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* WINESKIN: on macOS, programs' display mode changes are emulated by default (see sysparams_init). */
+#ifdef __APPLE__
+BOOL emulate_modeset = TRUE;
+#else
 BOOL emulate_modeset = FALSE;
+#endif /* WINESKIN */
 BOOL decorated_mode = TRUE;
 UINT64 thunk_lock_callback = 0;
 
@@ -2234,6 +2239,20 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
     {
         if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &virtual ) || is_detached_mode( &virtual ))
             virtual = physical;
+        /* WINESKIN: an emulated mode follows the display when the display changes (a display
+         * reconfigured or replaced while Wine runs), unless a program set a mode of its own that the
+         * display still holds: one that is not the display's earlier mode, and no larger than its mode now. */
+        else if (emulate_modeset)
+        {
+            DEVMODEW earlier = {.dmSize = sizeof(earlier)};
+            UINT width = devmode_get( &physical, DM_PELSWIDTH ), height = devmode_get( &physical, DM_PELSHEIGHT );
+
+            if (!read_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &earlier ) ||
+                (virtual.dmPelsWidth == earlier.dmPelsWidth && virtual.dmPelsHeight == earlier.dmPelsHeight) ||
+                max( virtual.dmPelsWidth, virtual.dmPelsHeight ) > max( width, height ) ||
+                min( virtual.dmPelsWidth, virtual.dmPelsHeight ) > min( width, height ))
+                virtual = physical;
+        }
 
         if ((virtual_modes = get_virtual_modes( current, &physical, host_modes, host_modes_count, &virtual_count )))
         {
@@ -5983,6 +6002,10 @@ void sysparams_init(void)
     pthread_mutexattr_t attr;
     HKEY hkey, appkey = 0;
     DWORD len;
+#ifdef __APPLE__
+    HKEY mac_hkey, mac_appkey = 0; /* WINESKIN */
+    static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0}; /* WINESKIN */
+#endif
 
     static const WCHAR oneW[] = {'1',0};
     static const WCHAR x11driverW[] = {'\\','X','1','1',' ','D','r','i','v','e','r',0};
@@ -6068,6 +6091,11 @@ void sysparams_init(void)
         {
             memcpy( appname + i, x11driverW, sizeof(x11driverW) );
             appkey = reg_open_key( tmpkey, appname, lstrlenW( appname ) * sizeof(WCHAR) );
+#ifdef __APPLE__
+            /* WINESKIN: @@ Wine registry key: HKCU\Software\Wine\AppDefaults\app.exe\Mac Driver */
+            memcpy( appname + i, macdriverW, sizeof(macdriverW) );
+            mac_appkey = reg_open_key( tmpkey, appname, lstrlenW( appname ) * sizeof(WCHAR) );
+#endif
             NtClose( tmpkey );
         }
     }
@@ -6083,6 +6111,17 @@ void sysparams_init(void)
         decorated_mode = IS_OPTION_TRUE( buffer[0] );
     if (!get_config_key( hkey, appkey, "EmulateModeset", buffer, sizeof(buffer) ))
         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
+#ifdef __APPLE__
+    /* WINESKIN: @@ Wine registry key: HKCU\Software\Wine\Mac Driver. EmulateModeset (on unless set
+     * off) has programs' display mode changes take effect for Windows only: the display keeps its
+     * mode, and OpenGL drawing (and Direct3D and DirectDraw, which draw through it) is scaled from
+     * the program's mode to the screen. */
+    mac_hkey = reg_open_hkcu_key( "Software\\Wine\\Mac Driver" );
+    if (!get_config_key( mac_hkey, mac_appkey, "EmulateModeset", buffer, sizeof(buffer) ))
+        emulate_modeset = IS_OPTION_TRUE( buffer[0] );
+    if (mac_appkey) NtClose( mac_appkey );
+    if (mac_hkey) NtClose( mac_hkey );
+#endif
 
 #undef IS_OPTION_TRUE
 

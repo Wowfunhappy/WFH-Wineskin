@@ -2212,13 +2212,24 @@ static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format
     {
         struct client_surface *client;
 
+        /* WINESKIN: winemac gives a window's OpenGL surface the window's size in Windows'
+         * coordinates, and the window server scales it to the window on screen, so a program in an
+         * emulated display mode draws at the mode's size without a framebuffer surface. */
+#ifdef __APPLE__
+        if (!(client = get_unused_client_surface( hwnd, format, raw )))
+#else
         if (!(client = get_unused_client_surface( hwnd, format, raw || emulate_modeset )))
+#endif /* WINESKIN */
             WARN( "Failed to create a surface for window %p, format %d\n", hwnd, format );
         else
         {
             if (!(driver_funcs->p_surface_create( client, format, &drawable )))
                 WARN( "Failed to create a drawable for window %p, format %d\n", hwnd, format );
+#ifdef __APPLE__
+            else if (0) /* WINESKIN: see above */
+#else
             else if (!raw && emulate_modeset && drawable->funcs != &framebuffer_surface_funcs)
+#endif /* WINESKIN */
             {
                 struct opengl_drawable *framebuffer = framebuffer_surface_create( format, client, NULL, drawable );
                 opengl_drawable_release( drawable );
