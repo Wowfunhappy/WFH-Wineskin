@@ -667,8 +667,19 @@ static void shader_set_limits(struct wined3d_shader *shader)
     }
 }
 
-/* WINESKIN: records the input registers a register reads, through relative addressing too
- * (wined3d_vs_attrib_location). */
+/* WINESKIN: records the input registers an operand reads (wined3d_vs_attrib_location). */
+static void shader_record_input_operand(struct wined3d_shader_reg_maps *reg_maps,
+        const struct wined3d_shader_register *reg)
+{
+    if (reg->type != WINED3DSPR_INPUT)
+        return;
+    if (reg->idx[0].rel_addr || reg->idx[0].offset >= 32)
+        reg_maps->input_registers_read = ~0u;
+    else
+        reg_maps->input_registers_read |= 1u << reg->idx[0].offset;
+}
+
+/* WINESKIN: an index absent from a register has offset ~0u and an unset rel_addr. */
 static void shader_record_input_read(struct wined3d_shader_reg_maps *reg_maps,
         const struct wined3d_shader_register *reg, BOOL operand)
 {
@@ -676,15 +687,11 @@ static void shader_record_input_read(struct wined3d_shader_reg_maps *reg_maps,
 
     for (i = 0; i < ARRAY_SIZE(reg->idx); ++i)
     {
-        if (reg->idx[i].rel_addr)
-            shader_record_input_read(reg_maps, &reg->idx[i].rel_addr->reg, TRUE);
+        if (reg->idx[i].offset != ~0u && reg->idx[i].rel_addr)
+            shader_record_input_operand(reg_maps, &reg->idx[i].rel_addr->reg);
     }
-    if (!operand || reg->type != WINED3DSPR_INPUT)
-        return;
-    if (reg->idx[0].rel_addr || reg->idx[0].offset >= 32)
-        reg_maps->input_registers_read = ~0u;
-    else
-        reg_maps->input_registers_read |= 1u << reg->idx[0].offset;
+    if (operand)
+        shader_record_input_operand(reg_maps, reg);
 }
 
 static BOOL shader_record_register_usage(struct wined3d_shader *shader, struct wined3d_shader_reg_maps *reg_maps,
