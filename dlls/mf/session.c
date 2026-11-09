@@ -177,6 +177,8 @@ struct transform_stream
     unsigned int min_buffer_size;
     BOOL samples_independent;
     BOOL draining;
+    /* WINESKIN: for an input, the samples asked of the upstream node and not yet delivered */
+    unsigned int upstream_requests;
 };
 
 enum topo_node_flags
@@ -1074,6 +1076,7 @@ static void session_flush_transform_node(struct topo_node *node)
             stream = &node->u.transform.inputs[i];
             transform_stream_drop_events(stream);
             stream->draining = FALSE; /* we're about to flush, so draining can halt */
+            stream->upstream_requests = 0; /* WINESKIN */
         }
         IMFTransform_ProcessMessage(node->object.transform, MFT_MESSAGE_COMMAND_FLUSH, 0);
         for (i = 0; i < node->u.transform.output_count; i++)
@@ -4124,10 +4127,17 @@ static void transform_node_deliver_samples(struct media_session *session, struct
                 ERR("Failed to handle stream event, hr %#lx\n", hr);
             IMFMediaEvent_Release(event);
         }
+        /* WINESKIN: one sample asked of the upstream node at a time; asking again whenever the
+           transform is found empty piles up requests a slow source (4K video) can't keep up with,
+           and every sample it then delivers waits in the input queue. */
+        else if (stream->upstream_requests)
+            TRACE("node %p/%lu input already waiting for a sample\n", topo_node, input);
         else if (!(up_node = session_get_topo_node_input(session, topo_node, input, &output)))
             WARN("Failed to node %p/%lu input\n", topo_node, input);
         else if (FAILED(hr = session_request_sample_from_node(session, up_node, output)))
             WARN("Failed to request sample from upstream node %p/%lu, hr %#lx\n", up_node, output, hr);
+        else
+            stream->upstream_requests++; /* WINESKIN */
     }
 }
 
@@ -4164,6 +4174,9 @@ static void session_deliver_sample_to_node(struct media_session *session, struct
             }
             break;
         case MF_TOPOLOGY_TRANSFORM_NODE:
+            /* WINESKIN: see transform_node_deliver_samples */
+            if (topo_node->u.transform.inputs[input].upstream_requests)
+                topo_node->u.transform.inputs[input].upstream_requests--;
             if (FAILED(hr = transform_node_push_sample(session, topo_node, input, sample)))
                 WARN("Failed to push or queue sample to transform, hr %#lx\n", hr);
             if (!topo_node->u.transform.async)
