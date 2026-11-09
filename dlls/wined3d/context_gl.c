@@ -4885,6 +4885,65 @@ static void wined3d_context_gl_unload_numbered_arrays(struct wined3d_context_gl 
     }
 }
 
+/* WINESKIN: sets a constant (stride 0) attribute of "format" from "ptr":
+ * up to four 8, 16 or 32-bit components, missing ones (0, 0, 0, 1). */
+static bool wined3d_context_gl_load_stride0_attrib(struct wined3d_context_gl *context_gl, unsigned int idx,
+        const struct wined3d_format *format, const BYTE *ptr, bool integer_inputs)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    const unsigned int sizes[4] = {format->red_size, format->green_size, format->blue_size, format->alpha_size};
+    const unsigned int offsets[4] = {format->red_offset, format->green_offset, format->blue_offset, format->alpha_offset};
+    bool is_signed = !(format->attrs & WINED3D_FORMAT_ATTR_UNSIGNED);
+    GLfloat f[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    GLint v[4] = {0, 0, 0, 1};
+    unsigned int c, bits;
+    uint32_t raw;
+
+    for (c = 0; c < 4; ++c)
+    {
+        if (!(bits = sizes[c]))
+            continue;
+        if ((bits != 8 && bits != 16 && bits != 32) || offsets[c] % 8)
+            return false;
+        if (bits == 8)
+            raw = ptr[offsets[c] / 8];
+        else if (bits == 16)
+            raw = *(const uint16_t *)(ptr + offsets[c] / 8);
+        else
+            raw = *(const uint32_t *)(ptr + offsets[c] / 8);
+
+        if (format->attrs & WINED3D_FORMAT_ATTR_FLOAT)
+        {
+            unsigned short half = raw;
+
+            f[c] = bits == 16 ? float_16_to_32(&half) : *(const float *)&raw;
+            continue;
+        }
+        if (is_signed && bits < 32)
+            v[c] = (int32_t)(raw << (32 - bits)) >> (32 - bits);
+        else
+            v[c] = raw;
+        if (format->attrs & WINED3D_FORMAT_ATTR_NORMALISED)
+            f[c] = is_signed ? max((float)v[c] / (float)((1u << (bits - 1)) - 1), -1.0f)
+                    : (float)raw / (float)(bits == 32 ? ~0u : (1u << bits) - 1);
+        else
+            f[c] = is_signed ? (float)v[c] : (float)raw;
+    }
+
+    if ((format->attrs & WINED3D_FORMAT_ATTR_INTEGER) && integer_inputs)
+    {
+        if (is_signed)
+            GL_EXTCALL(glVertexAttribI4iv(idx, v));
+        else
+            GL_EXTCALL(glVertexAttribI4uiv(idx, (const GLuint *)v));
+    }
+    else
+    {
+        GL_EXTCALL(glVertexAttrib4f(idx, f[0], f[1], f[2], f[3]));
+    }
+    return true;
+}
+
 static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *context_gl,
         const struct wined3d_stream_info *stream_info, const struct wined3d_state *state)
 {
@@ -5111,6 +5170,10 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
                     }
                     break;
                 default:
+                    /* WINESKIN: any other format is decoded here. */
+                    if (wined3d_context_gl_load_stride0_attrib(context_gl, i, &format_gl->f, ptr,
+                            vs && vs->reg_maps.shader_version.major >= 4))
+                        break;
                     ERR("Unexpected declaration in stride 0 attributes.\n");
                     break;
 

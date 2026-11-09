@@ -2736,6 +2736,8 @@ static void load_gl_funcs(struct wined3d_gl_info *gl_info)
     USE_GL_FUNC(glVertexAttrib4ubv)                            /* OpenGL 2.0 */
     USE_GL_FUNC(glVertexAttribDivisor)                         /* OpenGL 3.3 */
     USE_GL_FUNC(glVertexAttribIPointer)                        /* OpenGL 3.0 */
+    USE_GL_FUNC(glVertexAttribI4iv)                            /* OpenGL 3.0, WINESKIN */
+    USE_GL_FUNC(glVertexAttribI4uiv)                           /* OpenGL 3.0, WINESKIN */
     USE_GL_FUNC(glVertexAttribPointer)                         /* OpenGL 2.0 */
 #undef USE_GL_FUNC
 
