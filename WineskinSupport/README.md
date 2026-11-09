@@ -230,6 +230,13 @@ Each user's Desktop folder in the prefix is a directory of its own, not Wine's l
 Desktop, so the shortcuts installers leave there stay out of Finder. The launcher makes it so when it
 creates the prefix and before each run.
 
+A program's AppData folder lives in the wrapper's own folder in `~/Library/Application Support` (named
+after the wrapper the first time, kept in `Wineskin.plist` as `DataFolder`), where settings and saved games
+outlast the wrapper; the prefix's `AppData` is a link to it. Documents can live there too, instead of being
+Wine's link to the Mac's Documents. "AppData in Application Support" (on) and "Documents in Application
+Support" (off) in the configuration window choose; turning AppData off moves it back into the prefix, and
+turning Documents off links the Mac's Documents again, leaving what the program saved where it is.
+
 Opening a wrapper with no program, or with Option held, shows the configuration window: install
 software, choose the program and its arguments, Wine's tools (configuration, registry, command prompt,
 task manager), and the Mac driver options.

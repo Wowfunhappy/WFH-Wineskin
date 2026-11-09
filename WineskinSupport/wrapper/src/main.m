@@ -36,6 +36,18 @@ static BOOL CommandAsControl(NSDictionary *config)
 }
 static NSString *const kWineDebugKey = @"WineDebug";
 
+/* The program's AppData (on unless set off) and Documents (off unless set on) folders can live in the
+   wrapper's own folder in ~/Library/Application Support, named by kDataFolderKey, where they outlast
+   the wrapper. With Documents off, Documents is the Mac's, as Wine links it. */
+static NSString *const kAppDataInSupportKey = @"AppDataInApplicationSupport";
+static NSString *const kDocumentsInSupportKey = @"DocumentsInApplicationSupport";
+static NSString *const kDataFolderKey = @"DataFolder";
+
+static BOOL AppDataInSupport(NSDictionary *config)
+{
+    return config[kAppDataInSupportKey] ? [config[kAppDataInSupportKey] boolValue] : YES;
+}
+
 static NSString *const kBundleIdentifierBase = @"com.wowfunhappy.wfhwineskin";
 static NSString *const kConfigureArgument = @"--configure";
 
@@ -309,6 +321,103 @@ static void KeepDesktopInPrefix(Wrapper *w)
     }
 }
 
+/* The wrapper's folder in ~/Library/Application Support. It is named after the wrapper the first time
+   it is needed and keeps that name, so a renamed wrapper keeps its data. */
+static NSString *DataFolderPath(Wrapper *w)
+{
+    NSString *name = w.config[kDataFolderKey];
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+
+    if (!name.length)
+    {
+        name = [w name];
+        w.config[kDataFolderKey] = name;
+        [w save];
+    }
+    return [dirs.firstObject stringByAppendingPathComponent:name];
+}
+
+/* Makes a user folder in the prefix a link to another folder. Items of a folder that was a directory
+   move into the other folder; one that was a link to elsewhere (Documents to the Mac's) is only
+   replaced. */
+static void LinkFolder(NSString *folder, NSString *target)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *attrs = [fm attributesOfItemAtPath:folder error:NULL];
+
+    [fm createDirectoryAtPath:target withIntermediateDirectories:YES attributes:nil error:NULL];
+    if ([attrs[NSFileType] isEqual:NSFileTypeSymbolicLink])
+    {
+        if ([[fm destinationOfSymbolicLinkAtPath:folder error:NULL] isEqual:target]) return;
+        [fm removeItemAtPath:folder error:NULL];
+    }
+    else if (attrs)
+    {
+        for (NSString *item in [fm contentsOfDirectoryAtPath:folder error:NULL])
+        {
+            NSString *to = [target stringByAppendingPathComponent:item];
+            if (![fm fileExistsAtPath:to])
+                [fm moveItemAtPath:[folder stringByAppendingPathComponent:item] toPath:to error:NULL];
+        }
+        if (![fm removeItemAtPath:folder error:NULL]) return;
+    }
+    [fm createSymbolicLinkAtPath:folder withDestinationPath:target error:NULL];
+}
+
+/* Undoes LinkFolder for a folder that belongs in the prefix: it is a directory again, with the items
+   moved back. */
+static void UnlinkFolder(NSString *folder, NSString *target)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *attrs = [fm attributesOfItemAtPath:folder error:NULL];
+
+    if (![attrs[NSFileType] isEqual:NSFileTypeSymbolicLink] ||
+        ![[fm destinationOfSymbolicLinkAtPath:folder error:NULL] isEqual:target])
+        return;
+    [fm removeItemAtPath:folder error:NULL];
+    [fm createDirectoryAtPath:folder withIntermediateDirectories:NO attributes:nil error:NULL];
+    for (NSString *item in [fm contentsOfDirectoryAtPath:target error:NULL])
+        [fm moveItemAtPath:[target stringByAppendingPathComponent:item]
+                    toPath:[folder stringByAppendingPathComponent:item] error:NULL];
+}
+
+/* Puts each user's AppData and Documents folders where the options say. */
+static void ApplyDataFolders(Wrapper *w)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *users = [[w driveCPath] stringByAppendingPathComponent:@"users"];
+    BOOL appData = AppDataInSupport(w.config), documents = [w.config[kDocumentsInSupportKey] boolValue];
+    NSString *data = (appData || documents) ? DataFolderPath(w) : nil;
+
+    for (NSString *user in [fm contentsOfDirectoryAtPath:users error:NULL])
+    {
+        NSString *home = [users stringByAppendingPathComponent:user];
+        NSString *docs = [home stringByAppendingPathComponent:@"Documents"];
+        NSDictionary *attrs;
+
+        if ([user isEqual:@"Public"] || [user hasPrefix:@"."]) continue;
+
+        if (appData)
+            LinkFolder([home stringByAppendingPathComponent:@"AppData"], [data stringByAppendingPathComponent:@"AppData"]);
+        else if (w.config[kDataFolderKey])
+            UnlinkFolder([home stringByAppendingPathComponent:@"AppData"],
+                         [DataFolderPath(w) stringByAppendingPathComponent:@"AppData"]);
+
+        if (documents)
+            LinkFolder(docs, [data stringByAppendingPathComponent:@"Documents"]);
+        else if ((attrs = [fm attributesOfItemAtPath:docs error:NULL]) &&
+                 [attrs[NSFileType] isEqual:NSFileTypeSymbolicLink] && w.config[kDataFolderKey] &&
+                 [[fm destinationOfSymbolicLinkAtPath:docs error:NULL]
+                     isEqual:[DataFolderPath(w) stringByAppendingPathComponent:@"Documents"]])
+        {
+            /* back to the Mac's Documents; what the program saved stays in Application Support */
+            NSString *mac = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            [fm removeItemAtPath:docs error:NULL];
+            [fm createSymbolicLinkAtPath:docs withDestinationPath:mac error:NULL];
+        }
+    }
+}
+
 /* Replace this process with Wine running the configured program. */
 static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
@@ -317,6 +426,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     NSString *log = LogFilePath(w, @"Last Run");
 
     KeepDesktopInPrefix(w);
+    ApplyDataFolders(w);
     NSMutableArray *args = [LoaderCommandForProgram(w, program, env) mutableCopy];
     [args addObject:program];
     NSString *argString = w.config[kArgumentsKey];
@@ -351,6 +461,8 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 @property (strong) NSButton *optionAltBox;
 @property (strong) NSButton *retinaBox;
 @property (strong) NSButton *commandCtrlBox;
+@property (strong) NSButton *appDataBox;
+@property (strong) NSButton *documentsBox;
 @property (strong) NSTextField *status;
 @property (strong) NSProgressIndicator *spinner;
 @property (strong) NSMutableArray *busyControls;
@@ -399,14 +511,14 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 - (void)show
 {
     self.busyControls = [NSMutableArray array];
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 430)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 454)
                                               styleMask:NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask
                                                 backing:NSBackingStoreBuffered defer:NO];
     self.window.title = [NSString stringWithFormat:@"%@ — WFH Wineskin", [self.wrapper name]];
     self.window.delegate = self;
     [self.window center];
 
-    CGFloat y = 390;
+    CGFloat y = 414;
     [self label:@"Program" frame:NSMakeRect(20, y, 520, 20) bold:YES];
     y -= 28;
     self.programField = [[NSTextField alloc] initWithFrame:NSMakeRect(20, y, 410, 22)];
@@ -450,6 +562,12 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     self.commandCtrlBox = [self checkbox:@"Command keys act as Control" key:kCommandAsControlKey frame:NSMakeRect(20, y, 250, 20)];
     self.commandCtrlBox.state = CommandAsControl(self.wrapper.config) ? NSOnState : NSOffState;
     self.debugLogBox = [self checkbox:@"Write a debug log of each run" key:kDebugLogKey frame:NSMakeRect(290, y, 250, 20)];
+    y -= 24;
+    self.appDataBox = [self checkbox:@"AppData in Application Support" key:kAppDataInSupportKey frame:NSMakeRect(20, y, 250, 20)];
+    self.appDataBox.state = AppDataInSupport(self.wrapper.config) ? NSOnState : NSOffState;
+    self.appDataBox.toolTip = @"Keep the program's settings and saved games in ~/Library/Application Support, where they outlast this app.";
+    self.documentsBox = [self checkbox:@"Documents in Application Support" key:kDocumentsInSupportKey frame:NSMakeRect(290, y, 250, 20)];
+    self.documentsBox.toolTip = @"Keep what the program saves to Documents in ~/Library/Application Support instead of your Documents folder.";
 
     self.spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 18, 16, 16)];
     self.spinner.style = NSProgressIndicatorSpinningStyle;
@@ -518,6 +636,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
             return;
         }
         KeepDesktopInPrefix(self.wrapper);
+        ApplyDataFolders(self.wrapper);
         ApplyRegistryOptions(self.wrapper);
         self.status.stringValue = @"Ready.";
     }];
@@ -698,7 +817,12 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     c[kOptionAsAltKey] = @(self.optionAltBox.state == NSOnState);
     c[kRetinaModeKey] = @(self.retinaBox.state == NSOnState);
     c[kCommandAsControlKey] = @(self.commandCtrlBox.state == NSOnState);
+    BOOL foldersChanged = AppDataInSupport(c) != (self.appDataBox.state == NSOnState) ||
+                          [c[kDocumentsInSupportKey] boolValue] != (self.documentsBox.state == NSOnState);
+    c[kAppDataInSupportKey] = @(self.appDataBox.state == NSOnState);
+    c[kDocumentsInSupportKey] = @(self.documentsBox.state == NSOnState);
     [self.wrapper save];
+    if (foldersChanged && [self.wrapper prefixExists]) ApplyDataFolders(self.wrapper);
     return registryChanged && [self.wrapper prefixExists];
 }
 
