@@ -114,7 +114,10 @@ static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout,
     if ((s = socket(addr->addr.ss_family, SOCK_STREAM, 0)) == -1)
         return -1;
 
-    blocking = 0;
+    /* WINESKIN: FIONBIO's argument is nonzero for non-blocking. The connect waits in select() below,
+     * where the timeout applies; a connected socket stays non-blocking, as netconn_t expects. */
+    /* blocking = 0; */
+    blocking = 1; /* WINESKIN */
     ioctlsocket(s, FIONBIO, &blocking);
 
     if (!connect(s, (struct sockaddr *)&addr->addr, addr->addr_len))
@@ -161,7 +164,16 @@ int create_connect_socket(server_addr_t *addr, int af, DWORD timeout, object_hea
     a = addr;
     while (a)
     {
-        if ((s = try_create_connect_socket(a, af, timeout, hdr, callback_context)) != -1)
+        /* WINESKIN: while an address of the other family remains, as an IPv4 one after IPv6 ones on a
+         * network whose IPv6 does not route, an address gets two seconds before the next is tried. */
+        server_addr_t *other;
+        DWORD attempt = timeout;
+
+        for (other = a->next; other; other = other->next)
+            if (other->addr.ss_family != a->addr.ss_family) break;
+        if (other && (attempt == INFINITE || attempt > 2000)) attempt = 2000;
+        if ((s = try_create_connect_socket(a, af, attempt, hdr, callback_context)) != -1)
+        /* if ((s = try_create_connect_socket(a, af, timeout, hdr, callback_context)) != -1) */
         {
             /* try this address first next time. */
             tmp = *addr;
