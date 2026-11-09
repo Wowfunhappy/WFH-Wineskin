@@ -150,7 +150,8 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
   = `n` turns it off.
 - **Aqua theme.** `dlls/aqua.msstyles`, the default theme, draws common controls as OS X 10.9 draws them,
   with Lucida Grande for menus, captions, message boxes and status bars. `generate.py` in that directory
-  draws every bitmap.
+  draws every bitmap. Dialogs use Lucida Grande too: `wine.inf` substitutes it for "MS Shell Dlg" and
+  "MS Shell Dlg 2", and dialog templates size their controls from it.
 - **Open and Save panels.** GetOpenFileName/GetSaveFileName, IFileOpenDialog/IFileSaveDialog and
   SHBrowseForFolder show NSOpenPanel or NSSavePanel, as a sheet on the owner window where there is one
   (`comdlg32/nativedlg.c`, `winemac.drv/cocoa_file_panel.m`, reached through winemac.drv's
