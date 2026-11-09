@@ -53,6 +53,8 @@ static BOOL FullScreenSpace(NSDictionary *config)
 static NSString *const kAppDataInSupportKey = @"AppDataInApplicationSupport";
 static NSString *const kDocumentsInSupportKey = @"DocumentsInApplicationSupport";
 static NSString *const kDataFolderKey = @"DataFolder";
+/* Whether the prefix's text smoothing is set to ClearType (subpixel), as last matched to the Mac's. */
+static NSString *const kLCDFontSmoothingKey = @"LCDFontSmoothing";
 
 static BOOL AppDataInSupport(NSDictionary *config)
 {
@@ -437,6 +439,47 @@ static void ApplyDataFolders(Wrapper *w)
     }
 }
 
+/* Whether the Mac draws text with LCD (subpixel) smoothing: the default, and any AppleFontSmoothing
+   level but 0, which "Use LCD font smoothing when available" off sets. */
+static BOOL MacUsesLCDFontSmoothing(void)
+{
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("AppleFontSmoothing"), kCFPreferencesAnyApplication);
+    int level = 2;
+
+    if (value)
+    {
+        if (CFGetTypeID(value) == CFNumberGetTypeID()) CFNumberGetValue(value, kCFNumberIntType, &level);
+        CFRelease(value);
+    }
+    return level != 0;
+}
+
+/* Windows text smoothing follows the Mac's: ClearType when the Mac uses LCD smoothing, standard
+   (grayscale) otherwise. The registry is written only when the Mac's setting differs from the one
+   last matched, so a launch normally costs nothing. */
+static void MatchFontSmoothing(Wrapper *w)
+{
+    BOOL lcd = MacUsesLCDFontSmoothing();
+
+    if (w.config[kLCDFontSmoothingKey] && [w.config[kLCDFontSmoothingKey] boolValue] == lcd) return;
+
+    NSString *reg = [NSString stringWithFormat:
+        @"REGEDIT4\n\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\n"
+        @"\"FontSmoothing\"=\"2\"\n\"FontSmoothingType\"=dword:%08x\n\"FontSmoothingOrientation\"=dword:00000001\n",
+        lcd ? 2 /* FE_FONTSMOOTHINGCLEARTYPE */ : 1 /* FE_FONTSMOOTHINGSTANDARD */];
+    NSString *file = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"wineskin-%d.reg", getpid()]];
+    [reg writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    NSTask *task = StartWine(w, @[ @"regedit", @"/S", file ], nil, @"Registry");
+    [task waitUntilExit];
+    [[NSFileManager defaultManager] removeItemAtPath:file error:NULL];
+    if (task.terminationStatus == 0)
+    {
+        w.config[kLCDFontSmoothingKey] = @(lcd);
+        [w save];
+    }
+}
+
 /* Replace this process with Wine running the configured program. */
 static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
@@ -446,6 +489,7 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 
     KeepDesktopInPrefix(w);
     ApplyDataFolders(w);
+    MatchFontSmoothing(w);
     NSMutableArray *args = [LoaderCommandForProgram(w, program, env) mutableCopy];
     [args addObject:program];
     NSString *argString = w.config[kArgumentsKey];

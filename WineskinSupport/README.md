@@ -164,9 +164,10 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
   with Lucida Grande for menus, captions, message boxes and status bars. `generate.py` in that directory
   draws every bitmap. Dialogs use Lucida Grande too: `wine.inf` substitutes it for "MS Shell Dlg" and
   "MS Shell Dlg 2", and dialog templates size their controls from it.
-- **Text smoothing.** Wine's standard font smoothing draws subpixel (LCD) text when the Mac does, and
-  grayscale when "Use LCD font smoothing when available" is off (`win32u/font.c`,
-  `wineskin_mac_lcd_font_smoothing` in `freetype.c`). Notepad's default font is Menlo.
+- **Text smoothing.** The wrapper sets the prefix's Windows text smoothing to match the Mac's: ClearType
+  (subpixel) when the Mac uses LCD font smoothing, standard (grayscale) when "Use LCD font smoothing when
+  available" is off. `MatchFontSmoothing` writes `HKCU\Control Panel\Desktop` only when the Mac's setting
+  differs from the one recorded in `Wineskin.plist` (`LCDFontSmoothing`). Notepad's default font is Menlo.
 - **Open and Save panels.** GetOpenFileName/GetSaveFileName, IFileOpenDialog/IFileSaveDialog and
   SHBrowseForFolder show NSOpenPanel or NSSavePanel, as a sheet on the owner window where there is one
   (`comdlg32/nativedlg.c`, `winemac.drv/cocoa_file_panel.m`, reached through winemac.drv's
