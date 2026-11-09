@@ -890,6 +890,31 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
     return devmodes;
 }
 
+/* WINESKIN: in Retina mode a display in its original mode has twice as many Windows pixels as
+ * points each way (display_get_current_mode), as a Retina display has pixels; anywhere else, one. */
+static UINT display_pixels_per_point(CGDirectDisplayID display_id)
+{
+    struct display_mode_descriptor *desc;
+    CGDisplayModeRef display_mode;
+    UINT scale = 1;
+
+    if (!retina_enabled) return 1;
+    if (!(display_mode = CGDisplayCopyDisplayMode(display_id))) return 1;
+    desc = create_original_display_mode_descriptor(display_id);
+    if (display_mode_matches_descriptor(display_mode, desc)) scale = 2;
+    free_display_mode_descriptor(desc);
+    CFRelease(display_mode);
+    return scale;
+}
+
+/* WINESKIN: a display's DPI is 96 for each Windows pixel per point, as Windows gives a display
+ * scaled to 200% 192 DPI, and never less than the system DPI (LogPixels). */
+static UINT display_dpi(CGDirectDisplayID display_id)
+{
+    UINT dpi = USER_DEFAULT_SCREEN_DPI * display_pixels_per_point(display_id);
+    return max(dpi, NtUserGetSystemDpiForProcess(NULL));
+}
+
 static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *devmode)
 {
     CGDisplayModeRef display_mode;
@@ -1088,7 +1113,8 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
         for (adapter = adapters; adapter < adapters + adapter_count; adapter++)
         {
             DEVMODEW current_mode = { .dmSize = sizeof(current_mode) };
-            UINT dpi = NtUserGetSystemDpiForProcess( NULL );
+            UINT dpi = display_dpi(adapter->id); /* WINESKIN */
+            // UINT dpi = NtUserGetSystemDpiForProcess( NULL );
             char buffer[32];
 
             snprintf( buffer, sizeof(buffer), "%04x", adapter->id );
