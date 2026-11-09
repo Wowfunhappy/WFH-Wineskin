@@ -166,6 +166,14 @@ time it is made current with its window visible (`macdrv_attach_pending_view_ope
   unless set off), so Command-C copies and Command-S saves; the app menu then takes Command-H and
   Command-Q.
 
+## Audio
+
+Devices offer no spatial audio client (`ISpatialAudioClient`), as on Windows without spatial sound:
+programs use an ordinary stream, which a Mac mixes to its speakers either way. Wwise's spatial sink
+corrupted its heap through Wine's (Ori and the Will of the Wisps). Media Foundation decoders (H.264
+video, WMA) come from GStreamer, which the engine is built without, so in-game videos and xWMA music
+do not play.
+
 ## The wrapper
 
 ```
@@ -179,7 +187,9 @@ Name.app/Contents/
 ```
 
 A configured wrapper's launcher execs Wine before AppKit starts, so the program runs in the process
-LaunchServices launched. Every Wine process carries `CFProcessPath`, naming the launcher, from which
+LaunchServices launched. A 64-bit program gets the 64-bit preloader and loader directly, with
+`WINELOADERNOEXEC=1`: Wine's default loader is the 32-bit one, which would start a 64-bit program in a
+new process through start.exe. Every Wine process carries `CFProcessPath`, naming the launcher, from which
 CoreFoundation finds its main bundle: the program is the wrapper app to the system, under the wrapper's
 one Dock icon, and Keep in Dock and Recent Items open the wrapper.
 
@@ -194,6 +204,10 @@ A wrapper is named by its file name. On the first launch after a copy or rename,
 `CFBundleName` and a `CFBundleIdentifier` of its own (`com.wowfunhappy.wfhwineskin.<name>`) into
 Info.plist, registers the bundle, and relaunches once through LaunchServices, so the menu bar, Cmd-Tab,
 Keep in Dock and Recent Items all name and open this wrapper, never another copy.
+
+Each user's Desktop folder in the prefix is a directory of its own, not Wine's link to the Mac's
+Desktop, so the shortcuts installers leave there stay out of Finder. The launcher makes it so when it
+creates the prefix and before each run.
 
 Opening a wrapper with no program, or with Option held, shows the configuration window: install
 software, choose the program and its arguments, Wine's tools (configuration, registry, command prompt,
