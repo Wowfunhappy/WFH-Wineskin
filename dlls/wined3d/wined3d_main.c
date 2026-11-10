@@ -124,6 +124,7 @@ struct wined3d_settings wined3d_settings =
     .pci_device_id = PCI_DEVICE_NONE,
     .multisample_textures = TRUE,
     .sample_count = ~0u,
+    .multiply_special = 1, /* WINESKIN: see shader_glsl_guard_inf() */
     .max_sm_vs = UINT_MAX,
     .max_sm_ps = UINT_MAX,
     .max_sm_ds = UINT_MAX,
@@ -453,6 +454,9 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         }
         if (!get_config_key_dword(hkey, appkey, env, "strict_shader_math", &wined3d_settings.strict_shader_math))
             ERR_(winediag)("Setting strict shader math to %#x.\n", wined3d_settings.strict_shader_math);
+        /* WINESKIN: see shader_glsl_guard_inf(). */
+        if (!get_config_key_dword(hkey, appkey, env, "multiply_special", &wined3d_settings.multiply_special))
+            ERR_(winediag)("Setting multiply special to %#x.\n", wined3d_settings.multiply_special);
         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
             TRACE("Limiting VS shader model to %u.\n", wined3d_settings.max_sm_vs);
         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelHS", &wined3d_settings.max_sm_hs))

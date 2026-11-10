@@ -468,6 +468,10 @@ void wined3d_resource_update_draw_binding(struct wined3d_resource *resource)
 const struct wined3d_format *wined3d_resource_get_decompress_format(const struct wined3d_resource *resource)
 {
     const struct wined3d_adapter *adapter = resource->device->adapter;
+    /* WINESKIN: see bptc_decompress.c. */
+    if (resource->format->id == WINED3DFMT_BC6H_UF16 || resource->format->id == WINED3DFMT_BC6H_SF16
+            || resource->format->id == WINED3DFMT_BC6H_TYPELESS)
+        return wined3d_get_format(adapter, WINED3DFMT_R16G16B16A16_FLOAT, resource->bind_flags);
     if (resource->format_caps & (WINED3D_FORMAT_CAP_SRGB_READ | WINED3D_FORMAT_CAP_SRGB_WRITE)
             && !(adapter->d3d_info.wined3d_creation_flags & WINED3D_SRGB_READ_WRITE_CONTROL))
         return wined3d_get_format(adapter, WINED3DFMT_B8G8R8A8_UNORM_SRGB, resource->bind_flags);

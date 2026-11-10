@@ -2901,6 +2901,9 @@ void *wined3d_context_gl_map_bo_address(struct wined3d_context_gl *context_gl,
     if (!(bo = data->buffer_object))
         return data->addr;
 
+    if (flags & WINED3D_MAP_WRITE) /* WINESKIN: see struct wined3d_bo */
+        ++bo->content_serial;
+
     if (!(map_ptr = wined3d_bo_gl_map(wined3d_bo_gl(bo), context_gl, flags)))
     {
         ERR("Failed to map bo.\n");
@@ -2988,6 +2991,8 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
     gl_info = context_gl->gl_info;
     src_bo = src->buffer_object ? wined3d_bo_gl(src->buffer_object) : NULL;
     dst_bo = dst->buffer_object ? wined3d_bo_gl(dst->buffer_object) : NULL;
+    if (dst_bo) /* WINESKIN: see struct wined3d_bo */
+        ++dst_bo->b.content_serial;
 
     if (dst_bo && src_bo)
     {
@@ -3986,6 +3991,9 @@ static void context_gl_load_shader_resources(struct wined3d_context_gl *context_
                 srv_gl = wined3d_shader_resource_view_gl(view);
                 if (!srv_gl->bo_user.valid)
                     wined3d_shader_resource_view_gl_update(srv_gl, context_gl);
+                /* WINESKIN: see struct wined3d_gl_view. */
+                if (srv_gl->gl_view.range_bo && buffer->buffer_object)
+                    wined3d_gl_view_load_buffer_range(&srv_gl->gl_view, buffer->buffer_object, false, context_gl);
             }
             else
             {
@@ -3996,6 +4004,9 @@ static void context_gl_load_shader_resources(struct wined3d_context_gl *context_
                     srgb = sampler->desc.srgb_decode;
 
                 wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, srgb);
+                srv_gl = wined3d_shader_resource_view_gl(view);
+                if (srv_gl->gl_view.copy) /* WINESKIN: see view_copy_gl.c */
+                    wined3d_gl_view_load_copy(&srv_gl->gl_view, context_gl);
             }
         }
     }
@@ -4036,6 +4047,11 @@ static void context_gl_load_unordered_access_resources(struct wined3d_context_gl
         {
             texture = texture_from_resource(view->resource);
             wined3d_texture_load(texture, &context_gl->c, FALSE);
+            /* WINESKIN: OpenGL without images reads the view as a texture
+             * and writes nothing (shader_glsl_declare_image_emulation). */
+            if (!context_gl->gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+                wined3d_unordered_access_view_gl_load_copy(wined3d_unordered_access_view_gl(view), context_gl);
+            else
             wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_TEXTURE_RGB);
         }
 
@@ -5356,4 +5372,54 @@ void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, 
 
     gl_info->gl_ops.gl.p_glTexParameteri(info.bind_target, GL_TEXTURE_MAX_LEVEL, texture_gl->t.level_count - 1);
     wined3d_context_gl_bind_texture(context_gl, info.bind_target, 0);
+}
+
+/* WINESKIN: the state for a draw that covers its target with a triangle
+ * generated from gl_VertexID (texture_copy_gl.c): what
+ * wined3d_context_gl_apply_blit_state() sets, on texture unit 0, with no
+ * vertex arrays and no transform feedback. The caller binds the framebuffer
+ * and sets the viewport, which this leaves alone (a context need not have a
+ * render target). Context activation is done by the caller. */
+void wined3d_context_gl_prepare_generated_draw(struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_context *context = &context_gl->c;
+
+    context->last_was_blit = FALSE;
+
+    wined3d_context_gl_active_texture(context_gl, gl_info, 0);
+    context_invalidate_compute_state(context, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
+    context_invalidate_state(context, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
+
+    if (gl_info->supported[WINED3D_GL_LEGACY_CONTEXT])
+        gl_info->gl_ops.gl.p_glDisable(GL_ALPHA_TEST);
+    gl_info->gl_ops.gl.p_glDisable(GL_BLEND);
+    gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    context_invalidate_state(context, STATE_BLEND);
+    gl_info->gl_ops.gl.p_glDisable(GL_CULL_FACE);
+    gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+    gl_info->gl_ops.gl.p_glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    context_invalidate_state(context, STATE_RASTERIZER);
+    gl_info->gl_ops.gl.p_glDisable(GL_DEPTH_TEST);
+    gl_info->gl_ops.gl.p_glDisable(GL_STENCIL_TEST);
+    context_invalidate_state(context, STATE_DEPTH_STENCIL);
+    if (gl_info->supported[ARB_FRAMEBUFFER_SRGB])
+        gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
+    context_invalidate_state(context, STATE_SHADER(WINED3D_SHADER_TYPE_PIXEL));
+
+    context_invalidate_state(context, STATE_VDECL);
+
+    wined3d_context_gl_enable_clip_distances(context_gl, 0);
+    context_invalidate_state(context, STATE_SHADER(WINED3D_SHADER_TYPE_VERTEX));
+    if (gl_info->supported[ARB_CLIP_CONTROL])
+        GL_EXTCALL(glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE));
+    context->viewport_count = WINED3D_MAX_VIEWPORTS;
+    context_invalidate_state(context, STATE_VIEWPORT);
+    context_invalidate_state(context, STATE_FRAMEBUFFER);
+
+    context->device->shader_backend->shader_disable(context->device->shader_priv, context);
+
+    wined3d_context_gl_pause_transform_feedback(context_gl, FALSE);
+    wined3d_context_gl_unload_numbered_arrays(context_gl);
+    checkGLcall("generated draw state");
 }

@@ -68,7 +68,7 @@ struct va_decoder_decode_params
 
 /* WINESKIN: compute shaders on OpenCL with OpenGL sharing (cl.c, cl_compute.c).
  * Every call runs on the thread whose OpenGL context is current; the OpenCL
- * context shares that context's share group. */
+ * context shares the host OpenGL share group of that context. */
 #define WINED3D_CL_MAX_ARG_DATA 32
 
 struct wined3d_cl_init_params
@@ -85,6 +85,7 @@ struct wined3d_cl_init_params
 
 struct wined3d_cl_build_params
 {
+    UINT64 group;  /* see struct wined3d_cl_register_params */
     UINT64 source; /* const char * */
     UINT32 group_size[3];
     UINT32 work_group_size; /* out: the kernel's maximum */
@@ -100,7 +101,7 @@ enum wined3d_cl_arg_type
 {
     WINED3D_CL_ARG_VALUE,       /* data[size] */
     WINED3D_CL_ARG_GL_BUFFER,   /* the whole buffer gl_name */
-    WINED3D_CL_ARG_GL_TEXTURE,  /* level of texture gl_name, bound to gl_target */
+    WINED3D_CL_ARG_GL_TEXTURE,  /* level of texture gl_name, image target gl_target */
     WINED3D_CL_ARG_NULL_BUFFER, /* a small zeroed buffer */
     WINED3D_CL_ARG_NULL_IMAGE,  /* a zeroed 1x1 image of image_type and channel */
     WINED3D_CL_ARG_SAMPLER,     /* data: struct wined3d_cl_sampler_desc */
@@ -141,12 +142,17 @@ struct wined3d_cl_arg
     UINT32 size;
     UINT32 image_type; /* enum wined3d_cl_image_dim */
     UINT32 channel;    /* enum wined3d_cl_channel */
-    UINT32 status;     /* out: the OpenCL error for this argument */
+    UINT32 status;     /* out: the OpenCL error for this argument, or WINED3D_CL_UNREGISTERED */
     BYTE data[WINED3D_CL_MAX_ARG_DATA];
 };
 
+/* The status of an OpenGL object argument unix_cl_register has not been told
+ * of; the dispatch then fails with STATUS_OBJECT_NAME_NOT_FOUND. */
+#define WINED3D_CL_UNREGISTERED 0x7fffffffu
+
 struct wined3d_cl_dispatch_params
 {
+    UINT64 group;  /* whose OpenGL names the arguments are; see struct wined3d_cl_register_params */
     UINT64 kernel;
     UINT64 args; /* struct wined3d_cl_arg * */
     UINT32 arg_count;
@@ -163,8 +169,29 @@ enum wined3d_cl_object_type
 
 struct wined3d_cl_forget_params
 {
+    UINT64 group; /* 0: the name in every group */
     UINT32 type; /* enum wined3d_cl_object_type */
     UINT32 name;
+};
+
+/* The names wined3d has for OpenGL objects are opengl32's, which gives each
+ * group of contexts that share objects (a wined3d device, "group") names of
+ * its own and keeps every context in one share group of the host's OpenGL.
+ * OpenCL takes the host's names. unix_cl_register is called with the object
+ * bound (a buffer to GL_COPY_READ_BUFFER, a texture to the active unit) and
+ * asks the host's OpenGL for the name bound there. */
+struct wined3d_cl_register_params
+{
+    UINT64 group;
+    UINT32 type;   /* enum wined3d_cl_object_type */
+    UINT32 name;
+    UINT32 target; /* textures: the image target */
+    UINT32 level;
+};
+
+struct wined3d_cl_release_context_params
+{
+    UINT64 group;
 };
 
 enum unix_funcs
@@ -180,6 +207,7 @@ enum unix_funcs
     unix_cl_forget, /* WINESKIN */
     unix_cl_finish, /* WINESKIN */
     unix_cl_release_context, /* WINESKIN */
+    unix_cl_register, /* WINESKIN */
 };
 
 #endif

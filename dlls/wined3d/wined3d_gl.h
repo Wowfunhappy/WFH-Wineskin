@@ -577,20 +577,75 @@ struct wined3d_gl_view
 
     /* WINESKIN: without ARB_texture_buffer_range, the buffer texture of a
      * view of part of a buffer is attached to "range_bo", which holds a copy
-     * of that part of "range_source" (wined3d_gl_view_load_buffer_range). */
+     * of that part of "range_source", made again when the view is bound after
+     * the buffer object was written (wined3d_gl_view_load_buffer_range). */
     GLuint range_bo, range_source;
     unsigned int range_offset, range_size;
+    uint32_t range_serial; /* the buffer object's content_serial of the copy */
+    /* WINESKIN: set for a view of a format that is not a buffer texture
+     * format: "range_bo" holds the viewed elements as RGBA32F
+     * (buffer_convert_gl.c). */
+    const struct wined3d_format_gl *range_convert;
 
-    /* WINESKIN: without ARB_texture_view, a view that reads a typeless
-     * texture as integers when it is stored as float or normalised values
-     * (or the reverse) is a texture of its own in the view's format; "copy_bo"
-     * carries the texture's bits to it each time the view is bound
-     * (wined3d_shader_resource_view_gl_load_copy). */
-    GLuint copy_bo;
+    /* WINESKIN: without ARB_texture_view, a view its texture can't stand for
+     * is a texture of its own, "name", kept in step with the texture
+     * (view_copy_gl.c). */
+    struct wined3d_gl_view_copy *copy;
 };
 
 /* WINESKIN */
-void wined3d_gl_view_load_buffer_range(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl);
+void wined3d_gl_view_load_buffer_range(struct wined3d_gl_view *view, const struct wined3d_bo *bo,
+        bool force, struct wined3d_context_gl *context_gl);
+
+/* WINESKIN: texture_copy_gl.c */
+enum wined3d_gl_texel_type
+{
+    WINED3D_GL_TEXEL_FLOAT,     /* float texels of other sizes; copied by value only */
+    WINED3D_GL_TEXEL_FLOAT16,
+    WINED3D_GL_TEXEL_FLOAT32,
+    WINED3D_GL_TEXEL_UNORM,
+    WINED3D_GL_TEXEL_SNORM,
+    WINED3D_GL_TEXEL_UINT,
+    WINED3D_GL_TEXEL_SINT,
+    WINED3D_GL_TEXEL_DEPTH,
+};
+
+struct wined3d_gl_texel_format
+{
+    enum wined3d_gl_texel_type type;
+    uint8_t bits[4];
+};
+
+/* One image of a texture: a level of a layer, cube face or 3D slice.
+ * "texture_gl" is set for a wined3d texture's own OpenGL texture. */
+struct wined3d_gl_copy_image
+{
+    GLuint name;
+    GLenum target;
+    unsigned int level, layer;
+    struct wined3d_texture_gl *texture_gl;
+};
+
+void wined3d_gl_texel_format_from_format(struct wined3d_gl_texel_format *texel, const struct wined3d_format *format);
+void wined3d_gl_texel_format_from_internal(struct wined3d_gl_texel_format *texel, GLenum internal);
+bool wined3d_context_gl_copy_texels(struct wined3d_context_gl *context_gl,
+        const struct wined3d_gl_copy_image *src, const struct wined3d_gl_texel_format *src_format,
+        const struct wined3d_gl_copy_image *dst, const struct wined3d_gl_texel_format *dst_format,
+        unsigned int width, unsigned int height, bool reinterpret);
+void wined3d_context_gl_prepare_generated_draw(struct wined3d_context_gl *context_gl);
+
+/* WINESKIN: view_copy_gl.c */
+bool wined3d_gl_view_needs_copy(const struct wined3d_gl_info *gl_info, const struct wined3d_texture_gl *texture_gl,
+        const struct wined3d_view_desc *desc, const struct wined3d_format *view_format, GLenum view_target);
+void wined3d_gl_view_create_copy(struct wined3d_gl_view *view, struct wined3d_texture_gl *texture_gl,
+        const struct wined3d_view_desc *desc, const struct wined3d_format *view_format, GLenum view_target);
+void wined3d_gl_view_destroy_copy(const struct wined3d_gl_view *view);
+void wined3d_gl_view_load_copy(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl);
+void wined3d_gl_view_copy_generate_mipmap(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl);
+void wined3d_gl_view_copy_set_current(const struct wined3d_gl_view *view);
+struct wined3d_unordered_access_view_gl;
+void wined3d_unordered_access_view_gl_load_copy(struct wined3d_unordered_access_view_gl *view_gl,
+        struct wined3d_context_gl *context_gl);
 
 struct wined3d_rendertarget_info
 {
@@ -902,6 +957,8 @@ struct wined3d_device_gl
     HDC backup_dc;
 
     struct wined3d_bo_pool_gl *bo_pool; /* WINESKIN: see bo_pool_gl.c */
+    struct wined3d_gl_copy_state *copy_state; /* WINESKIN: see texture_copy_gl.c */
+    struct wined3d_gl_buffer_convert_state *buffer_convert_state; /* WINESKIN: see buffer_convert_gl.c */
 };
 
 /* WINESKIN: gl_filter.c */
@@ -914,6 +971,16 @@ GLuint wined3d_device_gl_take_pooled_bo(struct wined3d_device_gl *device_gl,
         GLsizeiptr size, GLenum usage, bool coherent);
 bool wined3d_context_gl_pool_bo(struct wined3d_context_gl *context_gl, const struct wined3d_bo_gl *bo);
 void wined3d_device_gl_destroy_bo_pool(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
+/* WINESKIN: texture_copy_gl.c */
+void wined3d_device_gl_destroy_copy_state(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
+/* WINESKIN: buffer_convert_gl.c */
+struct wined3d_format_gl;
+bool wined3d_gl_buffer_view_format_convertible(const struct wined3d_gl_info *gl_info,
+        const struct wined3d_format_gl *format_gl);
+void wined3d_context_gl_convert_buffer_elements(struct wined3d_context_gl *context_gl,
+        const struct wined3d_format_gl *format_gl, GLuint src, unsigned int offset, unsigned int count, GLuint dst);
+void wined3d_device_gl_destroy_buffer_convert_state(struct wined3d_device_gl *device_gl,
+        struct wined3d_context_gl *context_gl);
 
 static inline struct wined3d_device_gl *wined3d_device_gl(struct wined3d_device *device)
 {

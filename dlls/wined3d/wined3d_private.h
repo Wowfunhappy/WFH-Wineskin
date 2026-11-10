@@ -482,6 +482,7 @@ struct wined3d_settings
     unsigned int multisample_textures;
     unsigned int sample_count;
     unsigned int strict_shader_math;
+    unsigned int multiply_special; /* WINESKIN: see shader_glsl_guard_inf() */
     unsigned int max_sm_vs;
     unsigned int max_sm_hs;
     unsigned int max_sm_ds;
@@ -1619,6 +1620,10 @@ struct wined3d_bo
      * needs to make a copy unless it's the only owner (refcount == 1).
      * Deferred contexts may also hold a reference. */
     uint8_t refcount;
+    /* WINESKIN: changes with every write to the buffer object; a copy of its
+     * contents (struct wined3d_gl_view.range_bo) is current while this is
+     * the value it was made at. */
+    uint32_t content_serial;
 };
 
 struct wined3d_bo_user
@@ -3364,6 +3369,16 @@ void resource_unload(struct wined3d_resource *resource);
 HRESULT wined3d_resource_check_box_dimensions(struct wined3d_resource *resource,
         unsigned int sub_resource_idx, const struct wined3d_box *box);
 void wined3d_resource_free_sysmem(struct wined3d_resource *resource);
+/* WINESKIN: bptc_decompress.c */
+void wined3d_decompress_bc7(const BYTE *src, BYTE *dst, unsigned int src_row_pitch,
+        unsigned int src_slice_pitch, unsigned int dst_row_pitch, unsigned int dst_slice_pitch,
+        unsigned int width, unsigned int height, unsigned int depth);
+void wined3d_decompress_bc6h_uf16(const BYTE *src, BYTE *dst, unsigned int src_row_pitch,
+        unsigned int src_slice_pitch, unsigned int dst_row_pitch, unsigned int dst_slice_pitch,
+        unsigned int width, unsigned int height, unsigned int depth);
+void wined3d_decompress_bc6h_sf16(const BYTE *src, BYTE *dst, unsigned int src_row_pitch,
+        unsigned int src_slice_pitch, unsigned int dst_row_pitch, unsigned int dst_slice_pitch,
+        unsigned int width, unsigned int height, unsigned int depth);
 const struct wined3d_format *wined3d_resource_get_decompress_format(
         const struct wined3d_resource *resource);
 unsigned int wined3d_resource_get_sample_count(const struct wined3d_resource *resource);
@@ -3441,6 +3456,12 @@ struct wined3d_texture
     unsigned int slice_pitch;
 
     struct wined3d_shader_resource_view *identity_srv;
+
+    /* WINESKIN: changes whenever a location of a sub-resource is invalidated,
+     * that is, with every write to the texture. Copies of the texture
+     * (cl_compute.c, view_copy_gl.c) are current while it is the value they
+     * were made at. Accessed from the command stream worker thread. */
+    uint32_t content_serial;
 
     /* May only be accessed from the command stream worker thread. */
     struct wined3d_texture_async

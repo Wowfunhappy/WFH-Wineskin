@@ -4637,8 +4637,7 @@ static void wined3d_view_gl_destroy_object(void *object)
             gl_info->gl_ops.gl.p_glDeleteTextures(1, &ctx->gl_view->name);
             if (ctx->gl_view->range_bo) /* WINESKIN: see struct wined3d_gl_view */
                 GL_EXTCALL(glDeleteBuffers(1, &ctx->gl_view->range_bo));
-            if (ctx->gl_view->copy_bo) /* WINESKIN: see struct wined3d_gl_view */
-                GL_EXTCALL(glDeleteBuffers(1, &ctx->gl_view->copy_bo));
+            wined3d_gl_view_destroy_copy(ctx->gl_view); /* WINESKIN: see struct wined3d_gl_view */
         }
         if (counter_id)
             wined3d_context_gl_destroy_bo(wined3d_context_gl(context), ctx->counter_bo);

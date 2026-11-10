@@ -119,6 +119,10 @@ static void wined3d_buffer_invalidate_range(struct wined3d_buffer *buffer, DWORD
 
     if ((location & WINED3D_LOCATION_BUFFER) && (buffer->flags & WINED3D_BUFFER_USE_BO))
         buffer_invalidate_bo_range(buffer, offset, size);
+    /* WINESKIN: the buffer object was written by the GPU (stream output, an
+     * unordered access view); see struct wined3d_bo. */
+    else if (buffer->buffer_object)
+        ++buffer->buffer_object->content_serial;
 
     buffer->locations &= ~location;
 

@@ -124,6 +124,17 @@ renderer, such as a virtual machine, falls back to the software renderer automat
 (`opengl.c: has_accelerated_renderer`), so no machine-specific setting lives in a wrapper's prefix.
 Don't set `AllowSoftwareRendering` in a prefix that will be copied to a Mac with a GPU.
 
+### Direct3D 8 and 9 shaders: zero and infinity
+
+Direct3D 8 and 9 define `rsq(0)` and `rcp(0)` as the largest float and `log(0)` as its negative. GLSL
+gives infinities, and the shader's next multiplication by zero makes a NaN, which Apple's drivers draw
+as black or white blocks in bloom, specular and fog passes. For shader model 1 to 3, wined3d's GLSL
+backend clamps the results of `rsq`, `rcp`, `log` and `pow` to ±`FLT_MAX` (`shader_glsl_guard_inf`).
+This is wine-staging's `wined3d-zero-inf-shaders` patch set by Paul Gofman (Wine bugs 34266 and 45375),
+which CrossOver ships switched on. `HKCU\Software\Wine\Direct3D\multiply_special` (a DWORD, or
+`WINE_D3D_CONFIG=multiply_special=…`) selects 1 (the default, the clamp), 2 (`mul`, `mad` and `dp2/3/4`
+take 0 × x as 0 instead, with slower shaders) or 0 (neither).
+
 ### Direct3D 10 and 11 on OpenGL 4.1
 
 macOS 10.9 stops at OpenGL 4.1: no compute shaders, image load/store, atomic counters, cull distances,
@@ -133,13 +144,26 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
 - Shader model 4 and 5 graphics shaders translate; the GLSL they need and 10.9 lacks (integer `mix()`,
   `packHalf2x16()`, coarse/fine derivatives) is declared in each shader
   (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
-- Compute shaders run on OpenCL 1.2 (see below). Indirect draws do nothing. BC6H/BC7 are unsupported
-  formats.
+- Compute shaders run on OpenCL 1.2 (see below). Indirect draws do nothing.
+- There is no BPTC texture compression. BC6H and BC7 textures are decoded when they are uploaded
+  (`bptc_decompress.c`), through wined3d's own decompress-on-upload path (`WINED3D_FORMAT_CAP_DECOMPRESS`):
+  the texture keeps its blocks in system memory, where `Map`, `UpdateSubresource` and
+  `CopySubresourceRegion` work on them, and is B8G8R8A8 (sRGB for `BC7_UNORM_SRGB`) or R16G16B16A16_FLOAT
+  in OpenGL, mip levels, array layers and cube faces included. The decoder is bcdec by Sergii Kudlai
+  (`dlls/wined3d/bcdec.h`, MIT or Unlicense, the same file Wine has in `dlls/d3dx9_36`).
+- A draw without a pixel shader (a depth prepass, a shadow map) links an empty fragment shader
+  (`shader_glsl_get_empty_fragment_shader`): 10.9's core profile fails every draw of a program that has
+  none with `GL_INVALID_OPERATION`.
 - Graphics shaders that use unordered access views translate without image load/store
   (`shader_glsl_declare_image_emulation`): each view is a sampler on one of the stage's last texture
   units, so loads and size queries read the view as it is before the draw. Stores do nothing, atomic
   operations and counters return what they read without changing it, and `early_fragment_tests` is not
-  declared. The shader's color and depth output is drawn as usual.
+  declared. The shader's color and depth output is drawn as usual. A view of some layers or of a level
+  other than the first is read through a texture of its own (see the next item). Stores have no
+  emulation: an OpenGL 4.1 fragment shader writes only its framebuffer attachments, at its own pixel,
+  and a store writes any texel or buffer element (there are no shader storage buffers either).
+- `resinfo`'s level count comes from a uniform array loaded with the level count of the view bound to
+  each sampler (`shader_glsl_load_level_counts`): `textureQueryLevels()` is OpenGL 4.3.
 - There are no texture views (`ARB_texture_view`). A shader resource view is bound as its texture, with
   the view's level range set as the texture's base and maximum level
   (`wined3d_shader_resource_view_gl_apply_view`). Typeless textures and swap chain buffers of a format
@@ -149,12 +173,17 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   `GL_FRAMEBUFFER_SRGB` from the render target view of each draw (`shader_glsl_apply_draw_state`).
   A typeless format is allocated as the last of its float and normalised formats (`init_typeless_formats`):
   R32 as R32F, R8 as R8 UNORM, R8G8 as RG8 UNORM, which is how games view them (Unity's ambient occlusion
-  and depth targets are typeless with float views). A shader resource view of a 1D or 2D typeless texture
-  whose class differs from that storage (an R32_UINT view of an R32 typeless texture, say) is a texture of
-  its own in the view's format, and the texture's bits are copied to it through a pixel buffer each time
-  the view is bound (`wined3d_shader_resource_view_gl_load_copy`); views of the storage's class cost
-  nothing. Views of some layers of an array, views that change the texture's type (a cube view of an
-  array, say), and render target or unordered access views of the other class use the whole texture as
+  and depth targets are typeless with float views).
+- A shader resource view its texture can't stand for is a texture of its own (`view_copy_gl.c`): a view
+  that reads a typeless texture's bits as another kind of number than it is stored as (an R32_UINT view
+  of an R32 typeless texture), a view of some of the texture's layers, and a view of another type than
+  the texture (a cube view of an array, a 2D view of one layer). The view's texture is brought up to date
+  where a draw loads its resources, and only when the texture has been written since
+  (`wined3d_texture.content_serial` changes with every write). The copy is a draw with a fragment shader
+  that fetches the source texel and writes its value or, for the first kind, its bits
+  (`floatBitsToUint()` and the like; `texture_copy_gl.c`), so nothing is read back from the GPU. Views
+  of compressed textures hold decoded texels, depth views hold depth without stencil. Render target and
+  unordered access views that would write a typeless texture as another kind of number use the texture as
   it was allocated.
 - 10.9's driver keeps the converted colour of the previous `glClear` when the same colour is cleared again
   with `GL_FRAMEBUFFER_SRGB` toggled, so clears of sRGB views convert the colour themselves and run with
@@ -168,8 +197,15 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   sampler they share (`wined3d_shader_get_sampler_aliases`). When more than 16 distinct pairs remain, the
   last ones read an earlier sampler's texture, and a FIXME names them.
 - A buffer view of part of a buffer (no `ARB_texture_buffer_range`) attaches its buffer texture to a
-  buffer of its own, and copies the viewed range into it on the GPU each time the view is bound
-  (`wined3d_gl_view_load_buffer_range`).
+  buffer of its own, and copies the viewed range into it on the GPU when the view is used after the
+  buffer was written (`wined3d_gl_view_load_buffer_range`; `wined3d_bo.content_serial` changes with every
+  write to a buffer object).
+- OpenGL 4.1 makes buffer textures of a short list of formats: no SNORM, BGRA or 10/10/10/2 ones. A buffer
+  view of another format (Unreal Engine fetches vertex tangents from R8G8B8A8_SNORM views) reads a buffer
+  of its own that holds the viewed elements as RGBA32F. The conversion is on the GPU
+  (`buffer_convert_gl.c`): the source is fetched as a vertex attribute of the view's format and captured
+  with transform feedback, again only after the source was written. Integer formats outside the list
+  and R11G11B10_FLOAT have no conversion.
 - Constant (stride 0) vertex attributes of any format of 8, 16 or 32-bit components are set from their
   element (`wined3d_context_gl_load_stride0_attrib`).
 - Vertex shaders whose input registers run past 10.9's 16 attributes have the inputs they read packed into
@@ -200,23 +236,29 @@ in place.
   views decode their format in the kernel); texture views are images of the view's first level, with
   out-of-bounds reads returning 0 and writes dropped; samplers take the view's address mode and filter.
   A texture UAV the shader reads is bound twice, as a write-only and a read-only image.
+- Wine's opengl32 gives each group of contexts that share objects (a wined3d device) object names of its
+  own and keeps every context of the process in one share group of the Mac's OpenGL
+  (`dlls/opengl32/wgl.c`). OpenCL takes the Mac's names, so `cl_compute.c` binds an object the Unix side
+  has not seen and `unix_cl_register` asks the Mac's OpenGL which name is bound there; memory objects
+  are kept per device and name. A second device's names differ from the Mac's: a kernel given wined3d's
+  names writes to another device's objects, which the NVIDIA driver answers with "GPU hang occurred".
 - `dlls/wined3d/cl_compute.c` loads the bound resources into their OpenGL locations, describes each
   argument, reads indirect arguments back, and dispatches. It also clears unordered access views (10.9 has
   neither `ARB_clear_texture` nor `ARB_clear_buffer_object`). Formats OpenCL can't share (R11G11B10F,
-  RGB10A2, sRGB, SNORM, 24-bit depth, compressed) get a shadow texture of a shareable format, blitted on
-  the GPU (or copied through a pixel buffer) before a dispatch and back after one that writes it.
+  RGB10A2, sRGB, SNORM, 24-bit depth, compressed) get a shadow texture of a shareable format. A dispatch
+  copies the texture to its shadow when the texture has been written since they were last in step, and
+  copies a shadow it wrote back; both copies are draws (`texture_copy_gl.c`). Only a texture OpenGL
+  can't draw to gets its shadow back through a pixel buffer, which waits for the GPU.
 - `dlls/wined3d/cl.c` (`wined3d.so`) builds the kernels, keeps an OpenCL memory object per OpenGL buffer
   and texture level until wined3d deletes the OpenGL object, acquires them, runs the NDRange and flushes;
   the device has `cl_khr_gl_event`, under which acquiring OpenGL objects waits for the OpenGL commands
   of the context bound on the calling thread, and OpenGL commands issued after the release see the
   kernel's results; both calls run on wined3d's command stream thread with its OpenGL context current.
   A device without the extension finishes OpenGL before and OpenCL after each dispatch.
-- An OpenCL context belongs to one device's share group. OpenGL names are per share group, so memory
-  objects are looked up and released only in the current context's share group, and shadow textures
-  belong to their device. When a device deletes its OpenGL contexts, its kernels in flight are finished
-  and its shadows, memory objects and OpenCL context are released first (`wined3d_cl_release_device`);
-  an OpenCL context must never outlive its share group, since a later share group can be allocated at
-  the same address.
+- One OpenCL context serves the process's share group. When a device deletes its OpenGL contexts, its
+  kernels in flight are finished and its shadows, kernels and memory objects are released first
+  (`wined3d_cl_release_device`); the OpenCL context goes with the last device, since an OpenCL context
+  must never outlive its share group.
 - Uncompressed, non-sRGB color formats report unordered access support.
 - OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
   view's first level only; cube textures are read one face at a time; subroutines (`call`) don't

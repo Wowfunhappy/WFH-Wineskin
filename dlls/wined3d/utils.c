@@ -4106,6 +4106,54 @@ BOOL wined3d_adapter_no3d_init_format_info(struct wined3d_adapter *adapter)
 }
 
 /* Context activation is done by the caller. */
+/* WINESKIN: without ARB_texture_compression_bptc, BC6H and BC7 textures are
+ * decoded when they are uploaded (bptc_decompress.c). They can be what the
+ * format they decode to can be, short of being drawn to. */
+static void init_format_bptc_decompress_info(struct wined3d_adapter *adapter, const struct wined3d_gl_info *gl_info)
+{
+    static const struct
+    {
+        enum wined3d_format_id id, decompressed_id;
+        void (*decompress)(const BYTE *src, BYTE *dst, unsigned int src_row_pitch, unsigned int src_slice_pitch,
+                unsigned int dst_row_pitch, unsigned int dst_slice_pitch,
+                unsigned int width, unsigned int height, unsigned int depth);
+    }
+    formats[] =
+    {
+        {WINED3DFMT_BC6H_UF16,      WINED3DFMT_R16G16B16A16_FLOAT,  wined3d_decompress_bc6h_uf16},
+        {WINED3DFMT_BC6H_SF16,      WINED3DFMT_R16G16B16A16_FLOAT,  wined3d_decompress_bc6h_sf16},
+        {WINED3DFMT_BC7_UNORM,      WINED3DFMT_B8G8R8A8_UNORM,      wined3d_decompress_bc7},
+        {WINED3DFMT_BC7_UNORM_SRGB, WINED3DFMT_B8G8R8A8_UNORM_SRGB, wined3d_decompress_bc7},
+    };
+    static const enum wined3d_gl_resource_type types[] =
+    {
+        WINED3D_GL_RES_TYPE_TEX_2D, WINED3D_GL_RES_TYPE_TEX_3D, WINED3D_GL_RES_TYPE_TEX_CUBE,
+    };
+    const struct wined3d_format *decompressed;
+    struct wined3d_format *format;
+    unsigned int i, j;
+
+    if (gl_info->supported[ARB_TEXTURE_COMPRESSION_BPTC])
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(formats); ++i)
+    {
+        if (!(format = get_format_internal(adapter, formats[i].id))
+                || !(decompressed = get_format_internal(adapter, formats[i].decompressed_id)))
+            continue;
+
+        format->decompress = formats[i].decompress;
+        format->color_fixup = COLOR_FIXUP_IDENTITY;
+        for (j = 0; j < ARRAY_SIZE(types); ++j)
+        {
+            if (!(decompressed->caps[types[j]] & WINED3D_FORMAT_CAP_TEXTURE))
+                continue;
+            format->caps[types[j]] |= WINED3D_FORMAT_CAP_DECOMPRESS | (decompressed->caps[types[j]]
+                    & (WINED3D_FORMAT_CAP_TEXTURE | WINED3D_FORMAT_CAP_FILTERING | WINED3D_FORMAT_CAP_SRGB_READ));
+        }
+    }
+}
+
 BOOL wined3d_adapter_gl_init_format_info(struct wined3d_adapter *adapter, struct wined3d_caps_gl_ctx *ctx)
 {
     struct wined3d_gl_info *gl_info = &wined3d_adapter_gl(adapter)->gl_info;
@@ -4121,6 +4169,8 @@ BOOL wined3d_adapter_gl_init_format_info(struct wined3d_adapter *adapter, struct
     init_format_filter_info(adapter, gl_info);
     init_format_gen_mipmap_info(adapter, gl_info);
     init_format_depth_bias_scale(adapter, ctx);
+
+    init_format_bptc_decompress_info(adapter, gl_info); /* WINESKIN */
 
     /* WINESKIN: see init_typeless_formats(). */
     if (!init_typeless_formats(adapter, !gl_info->supported[ARB_TEXTURE_VIEW])) goto fail;

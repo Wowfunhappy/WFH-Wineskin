@@ -140,6 +140,7 @@ struct shader_glsl_priv
     struct wine_rb_tree ffp_vertex_shaders;
     struct wine_rb_tree ffp_fragment_shaders;
     BOOL legacy_lighting;
+    GLuint empty_ps_id; /* WINESKIN: see shader_glsl_get_empty_fragment_shader() */
 };
 
 struct glsl_vs_program
@@ -252,6 +253,9 @@ struct glsl_shader_prog_link
     DWORD shader_controlled_clip_distances : 1;
     DWORD clip_distance_mask : 8; /* WINED3D_MAX_CLIP_DISTANCES, 8 */
     DWORD padding : 23;
+    /* WINESKIN: see shader_glsl_load_level_counts(). */
+    GLint levels_location[WINED3D_SHADER_TYPE_COUNT];
+    bool uses_levels;
 };
 
 struct glsl_program_key
@@ -2687,6 +2691,20 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
     if (version->major >= 4)
         shader_glsl_declare_missing_builtins(buffer, gl_info);
 
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (wined3d_settings.multiply_special == 2 && version->major < 4)
+    {
+        shader_addline(buffer, "float dot1(float v1, float v2) {return abs(v1) == 0.0 || abs(v2) == 0.0 ? 0.0 : v1 * v2;}\n");
+        shader_addline(buffer, "float dot2(vec2 v1, vec2 v2) {return dot1(v1.x, v2.x) + dot1(v1.y, v2.y);}\n");
+        shader_addline(buffer, "float dot3(vec3 v1, vec3 v2) {return dot2(v1.xy, v2.xy) + dot1(v1.z, v2.z);}\n");
+        shader_addline(buffer, "float dot4(vec4 v1, vec4 v2) {return dot2(v1.xy, v2.xy) + dot2(v1.zw, v2.zw);}\n");
+
+        shader_addline(buffer, "float mul1(float v1, float v2) {return abs(v1) == 0.0 || abs(v2) == 0.0 ? 0.0 : v1 * v2;}\n");
+        shader_addline(buffer, "vec2 mul2(vec2 v1, vec2 v2) {return vec2(mul1(v1.x, v2.x), mul1(v1.y, v2.y));}\n");
+        shader_addline(buffer, "vec3 mul3(vec3 v1, vec3 v2) {return vec3(mul2(v1.xy, v2.xy), mul1(v1.z, v2.z));}\n");
+        shader_addline(buffer, "vec4 mul4(vec4 v1, vec4 v2) {return vec4(mul2(v1.xy, v2.xy), mul2(v1.zw, v2.zw));}\n");
+    }
+
     prefix = shader_glsl_get_prefix(version->type);
 
     /* Prototype the subroutines */
@@ -2931,6 +2949,10 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
         shader_addline(buffer, "uniform %s%s %s_sampler%u;\n",
                 sampler_type_prefix, sampler_type, prefix, entry->bind_idx);
     }
+
+    /* WINESKIN: see shader_glsl_load_level_counts(). */
+    if (version->major >= 4 && !gl_info->supported[ARB_TEXTURE_QUERY_LEVELS] && reg_maps->sampler_map.count)
+        shader_addline(buffer, "uniform int %s_levels[%u];\n", prefix, (unsigned int)reg_maps->sampler_map.count);
 
     /* Declare images */
     for (i = 0; i < ARRAY_SIZE(reg_maps->uav_resource_info); ++i)
@@ -4231,6 +4253,63 @@ static void shader_glsl_fixup_position(struct wined3d_string_buffer *buffer, BOO
  * Begin processing individual instruction opcodes
  ****************************************************************************/
 
+/* WINESKIN: wine-staging's wined3d-zero-inf-shaders patch set (Paul Gofman;
+ * Wine bugs 34266 and 45375). Direct3D 8 and 9 define rsq(0) and rcp(0) as
+ * the largest float and log(0) as its negative; GLSL gives infinities, and
+ * the shader's next multiplication by zero makes a NaN, which draws as black
+ * or white blocks in bloom and specular passes. For shader model 1 to 3,
+ * HKCU\Software\Wine\Direct3D\multiply_special (or WINE_D3D_CONFIG) selects:
+ * 1, the default: rsq, rcp, log and pow results are clamped to +/-FLT_MAX;
+ * 2: mul, mad and dp2/3/4 take 0 * x as 0 instead;
+ * 0: neither. */
+static bool shader_glsl_guard_inf(const struct wined3d_shader_instruction *ins)
+{
+    return wined3d_settings.multiply_special == 1 && ins->ctx->reg_maps->shader_version.major < 4;
+}
+
+static bool shader_glsl_zero_multiply(const struct wined3d_shader_instruction *ins)
+{
+    return wined3d_settings.multiply_special == 2 && ins->ctx->reg_maps->shader_version.major < 4;
+}
+
+/* WINESKIN: the clamped form of rcp, rsq and log of "src"; false for other
+ * instructions. See shader_glsl_guard_inf(). */
+static bool shader_glsl_scalar_op_guarded(const struct wined3d_shader_instruction *ins,
+        unsigned int dst_size, const char *src)
+{
+    static const float max_float = FLT_MAX, min_float = -FLT_MAX;
+    const struct shader_glsl_ctx_priv *priv = ins->ctx->backend_data;
+    struct wined3d_string_buffer *buffer = ins->ctx->buffer;
+
+    if (dst_size > 1)
+        shader_addline(buffer, "vec%u(", dst_size);
+    switch (ins->handler_idx)
+    {
+        case WINED3DSIH_LOG:
+        case WINED3DSIH_LOGP:
+            shader_addline(buffer, "max(log2(abs(%s)), ", src);
+            shader_glsl_append_imm_vec(buffer, &min_float, 1, priv->gl_info);
+            break;
+
+        case WINED3DSIH_RCP:
+            shader_addline(buffer, "clamp(1.0 / %s, ", src);
+            shader_glsl_append_imm_vec(buffer, &min_float, 1, priv->gl_info);
+            shader_addline(buffer, ", ");
+            shader_glsl_append_imm_vec(buffer, &max_float, 1, priv->gl_info);
+            break;
+
+        case WINED3DSIH_RSQ:
+            shader_addline(buffer, "min(inversesqrt(abs(%s)), ", src);
+            shader_glsl_append_imm_vec(buffer, &max_float, 1, priv->gl_info);
+            break;
+
+        default:
+            return false;
+    }
+    shader_addline(buffer, dst_size > 1 ? ")));\n" : "));\n");
+    return true;
+}
+
 static void shader_glsl_binop(const struct wined3d_shader_instruction *ins)
 {
     struct wined3d_string_buffer *buffer = ins->ctx->buffer;
@@ -4262,6 +4341,13 @@ static void shader_glsl_binop(const struct wined3d_shader_instruction *ins)
     write_mask = shader_glsl_append_dst(buffer, ins);
     shader_glsl_add_src_param(ins, &ins->src[0], write_mask, &src0_param);
     shader_glsl_add_src_param(ins, &ins->src[1], write_mask, &src1_param);
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (ins->handler_idx == WINED3DSIH_MUL && shader_glsl_zero_multiply(ins))
+    {
+        shader_addline(buffer, "mul%d(%s, %s));\n", shader_glsl_get_write_mask_size(write_mask),
+                src0_param.param_str, src1_param.param_str);
+        return;
+    }
     shader_addline(buffer, "%s %s %s);\n", src0_param.param_str, op, src1_param.param_str);
 }
 
@@ -4491,6 +4577,19 @@ static void shader_glsl_dot(const struct wined3d_shader_instruction *ins)
     shader_glsl_add_src_param(ins, &ins->src[0], src_write_mask, &src0_param);
     shader_glsl_add_src_param(ins, &ins->src[1], src_write_mask, &src1_param);
 
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (shader_glsl_zero_multiply(ins))
+    {
+        unsigned int src_size = shader_glsl_get_write_mask_size(src_write_mask);
+
+        if (dst_size > 1)
+            shader_addline(buffer, "vec%d(dot%d(%s, %s)));\n", dst_size, src_size,
+                    src0_param.param_str, src1_param.param_str);
+        else
+            shader_addline(buffer, "dot%d(%s, %s));\n", src_size, src0_param.param_str, src1_param.param_str);
+        return;
+    }
+
     if (dst_size > 1) {
         shader_addline(buffer, "vec%d(dot(%s, %s)));\n", dst_size, src0_param.param_str, src1_param.param_str);
     } else {
@@ -4540,6 +4639,21 @@ static void shader_glsl_pow(const struct wined3d_shader_instruction *ins)
 
     shader_glsl_add_src_param(ins, &ins->src[0], WINED3DSP_WRITEMASK_0, &src0_param);
     shader_glsl_add_src_param(ins, &ins->src[1], WINED3DSP_WRITEMASK_0, &src1_param);
+
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (shader_glsl_guard_inf(ins))
+    {
+        const struct shader_glsl_ctx_priv *priv = ins->ctx->backend_data;
+        static const float max_float = FLT_MAX;
+
+        if (dst_size > 1)
+            shader_addline(buffer, "vec%u(", dst_size);
+        shader_addline(buffer, "%s == 0.0 ? 1.0 : min(pow(abs(%s), %s), ",
+                src1_param.param_str, src0_param.param_str, src1_param.param_str);
+        shader_glsl_append_imm_vec(buffer, &max_float, 1, priv->gl_info);
+        shader_addline(buffer, dst_size > 1 ? ")));\n" : "));\n");
+        return;
+    }
 
     if (dst_size > 1)
     {
@@ -4737,6 +4851,10 @@ static void shader_glsl_scalar_op(const struct wined3d_shader_instruction *ins)
         dst_write_mask = WINED3DSP_WRITEMASK_3;
 
     shader_glsl_add_src_param(ins, &ins->src[0], dst_write_mask, &src0_param);
+
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (shader_glsl_guard_inf(ins) && shader_glsl_scalar_op_guarded(ins, dst_size, src0_param.param_str))
+        return;
 
     switch (ins->handler_idx)
     {
@@ -5117,6 +5235,13 @@ static void shader_glsl_mad(const struct wined3d_shader_instruction *ins)
     shader_glsl_add_src_param(ins, &ins->src[0], write_mask, &src0_param);
     shader_glsl_add_src_param(ins, &ins->src[1], write_mask, &src1_param);
     shader_glsl_add_src_param(ins, &ins->src[2], write_mask, &src2_param);
+    /* WINESKIN: see shader_glsl_guard_inf(). */
+    if (shader_glsl_zero_multiply(ins))
+    {
+        shader_addline(ins->ctx->buffer, "mul%d(%s, %s) + %s);\n", shader_glsl_get_write_mask_size(write_mask),
+                src0_param.param_str, src1_param.param_str, src2_param.param_str);
+        return;
+    }
     shader_addline(ins->ctx->buffer, "(%s * %s) + %s);\n",
             src0_param.param_str, src1_param.param_str, src2_param.param_str);
 }
@@ -6428,8 +6553,10 @@ static void shader_glsl_resinfo(const struct wined3d_shader_instruction *ins)
         }
         else
         {
+            /* WINESKIN: see shader_glsl_load_level_counts().
             FIXME("textureQueryLevels is not supported, returning 1 level.\n");
-            shader_addline(buffer, "1");
+            shader_addline(buffer, "1"); */
+            shader_addline(buffer, "%s_levels[%u]", shader_glsl_get_prefix(version->type), bind_idx);
         }
     }
     else
@@ -10699,6 +10826,78 @@ static void set_glsl_compute_shader_program(const struct wined3d_context_gl *con
     ctx_data->glsl_program = entry;
 }
 
+/* WINESKIN: without textureQueryLevels() (OpenGL 4.3), the number of levels
+ * resinfo returns for a resource is the uniform "<stage>_levels[sampler]",
+ * loaded for each draw of a program that reads it from the level count of
+ * the view bound to that sampler. */
+static void shader_glsl_init_level_count_locations(const struct wined3d_gl_info *gl_info,
+        struct glsl_shader_prog_link *entry)
+{
+    unsigned int i;
+    char name[16];
+
+    entry->uses_levels = false;
+    for (i = 0; i < WINED3D_SHADER_TYPE_COUNT; ++i)
+    {
+        entry->levels_location[i] = -1;
+        if (gl_info->supported[ARB_TEXTURE_QUERY_LEVELS] || i == WINED3D_SHADER_TYPE_COMPUTE)
+            continue;
+        snprintf(name, sizeof(name), "%s_levels", shader_glsl_get_prefix(i));
+        if ((entry->levels_location[i] = GL_EXTCALL(glGetUniformLocation(entry->id, name))) != -1)
+            entry->uses_levels = true;
+    }
+}
+
+static void shader_glsl_load_level_counts(const struct wined3d_context_gl *context_gl,
+        const struct glsl_shader_prog_link *entry, const struct wined3d_state *state)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    const struct wined3d_shader_sampler_map_entry *map_entry;
+    const struct wined3d_shader_resource_view *view;
+    GLint levels[WINED3D_MAX_COMBINED_SAMPLERS];
+    const struct wined3d_shader *shader;
+    unsigned int i, j, count;
+
+    for (i = 0; i < WINED3D_SHADER_TYPE_COUNT; ++i)
+    {
+        if (entry->levels_location[i] == -1 || !(shader = state->shader[i]))
+            continue;
+        count = min(shader->reg_maps.sampler_map.count, ARRAY_SIZE(levels));
+        memset(levels, 0, count * sizeof(*levels));
+        for (j = 0; j < count; ++j)
+        {
+            map_entry = &shader->reg_maps.sampler_map.entries[j];
+            if (map_entry->bind_idx < count && (view = state->shader_resource_view[i][map_entry->resource_idx])
+                    && view->resource->type != WINED3D_RTYPE_BUFFER)
+                levels[map_entry->bind_idx] = view->desc.u.texture.level_count;
+        }
+        GL_EXTCALL(glUniform1iv(entry->levels_location[i], count, levels));
+    }
+    checkGLcall("load level counts");
+}
+
+/* WINESKIN: a fragment shader that writes nothing, for programs of draws
+ * without a pixel shader (Direct3D 10's depth-only draws). macOS's core
+ * profile fails every draw of a program that has no fragment shader with
+ * GL_INVALID_OPERATION ("Program does not contain fragment shader"), which
+ * leaves depth prepasses and shadow maps empty. */
+static GLuint shader_glsl_get_empty_fragment_shader(struct shader_glsl_priv *priv,
+        const struct wined3d_gl_info *gl_info)
+{
+    struct wined3d_string_buffer *buffer;
+
+    if (priv->empty_ps_id)
+        return priv->empty_ps_id;
+
+    buffer = string_buffer_get(&priv->string_buffers);
+    shader_glsl_add_version_declaration(buffer, gl_info);
+    shader_addline(buffer, "void main()\n{\n}\n");
+    priv->empty_ps_id = GL_EXTCALL(glCreateShader(GL_FRAGMENT_SHADER));
+    shader_glsl_compile(gl_info, priv->empty_ps_id, buffer->buffer);
+    string_buffer_release(&priv->string_buffers, buffer);
+    return priv->empty_ps_id;
+}
+
 /* Context activation is done by the caller. */
 static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
         struct shader_glsl_priv *priv, struct glsl_context_data *ctx_data)
@@ -10981,11 +11180,18 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
 
         list_add_head(ps_list, &entry->ps.shader_entry);
     }
+    /* WINESKIN: see shader_glsl_get_empty_fragment_shader(). */
+    else if (!gl_info->supported[WINED3D_GL_LEGACY_CONTEXT] && (vs_id || gs_id || ds_id))
+    {
+        GL_EXTCALL(glAttachShader(program_id, shader_glsl_get_empty_fragment_shader(priv, gl_info)));
+        checkGLcall("glAttachShader");
+    }
 
     /* Link the program */
     TRACE("Linking GLSL shader program %u.\n", program_id);
     GL_EXTCALL(glLinkProgram(program_id));
     shader_glsl_validate_link(gl_info, program_id);
+    shader_glsl_init_level_count_locations(gl_info, entry); /* WINESKIN */
 
     shader_glsl_init_vs_uniform_locations(gl_info, priv, program_id, &entry->vs,
             vshader ? vshader->limits->constant_float : 0);
@@ -11262,6 +11468,14 @@ static void shader_glsl_apply_draw_state(void *shader_priv, struct wined3d_conte
 
     if (context->constant_update_mask)
         shader_glsl_load_constants(priv, context, state);
+
+    /* WINESKIN */
+    {
+        const struct glsl_context_data *ctx_data = context->shader_backend_data;
+
+        if (ctx_data->glsl_program && ctx_data->glsl_program->uses_levels)
+            shader_glsl_load_level_counts(context_gl, ctx_data->glsl_program, state);
+    }
 }
 
 static void shader_glsl_update_compute_program(struct shader_glsl_priv *priv,

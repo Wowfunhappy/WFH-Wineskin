@@ -176,6 +176,7 @@ void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
 
     if (location & (WINED3D_LOCATION_TEXTURE_RGB | WINED3D_LOCATION_TEXTURE_SRGB))
         wined3d_texture_set_dirty(texture);
+    ++texture->content_serial; /* WINESKIN */
 
     sub_resource = &texture->sub_resources[sub_resource_idx];
     previous_locations = sub_resource->locations;

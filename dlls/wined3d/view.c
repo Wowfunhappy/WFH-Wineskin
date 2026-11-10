@@ -275,9 +275,21 @@ static void create_texture_view(struct wined3d_gl_view *view, GLenum view_target
 
 /* WINESKIN: copies the viewed part of the buffer to the view's own buffer;
  * see struct wined3d_gl_view. Context activation is done by the caller. */
-void wined3d_gl_view_load_buffer_range(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl)
+void wined3d_gl_view_load_buffer_range(struct wined3d_gl_view *view, const struct wined3d_bo *bo,
+        bool force, struct wined3d_context_gl *context_gl)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+
+    if (!force && view->range_serial == bo->content_serial)
+        return;
+    view->range_serial = bo->content_serial;
+
+    if (view->range_convert)
+    {
+        wined3d_context_gl_convert_buffer_elements(context_gl, view->range_convert, view->range_source,
+                view->range_offset, view->range_size / view->range_convert->f.byte_count, view->range_bo);
+        return;
+    }
 
     wined3d_context_gl_bind_bo(context_gl, GL_COPY_READ_BUFFER, view->range_source);
     wined3d_context_gl_bind_bo(context_gl, GL_COPY_WRITE_BUFFER, view->range_bo);
@@ -286,12 +298,32 @@ void wined3d_gl_view_load_buffer_range(const struct wined3d_gl_view *view, struc
     checkGLcall("copy buffer view range");
 }
 
+/* WINESKIN: the internal formats OpenGL 4.1 attaches a buffer to a buffer
+ * texture with; glTexBuffer() fails with GL_INVALID_ENUM for others. */
+static bool gl_buffer_texture_format_supported(GLenum internal)
+{
+    switch (internal)
+    {
+        case GL_R8: case GL_R16: case GL_R16F: case GL_R32F:
+        case GL_R8I: case GL_R16I: case GL_R32I: case GL_R8UI: case GL_R16UI: case GL_R32UI:
+        case GL_RG8: case GL_RG16: case GL_RG16F: case GL_RG32F:
+        case GL_RG8I: case GL_RG16I: case GL_RG32I: case GL_RG8UI: case GL_RG16UI: case GL_RG32UI:
+        case GL_RGB32F: case GL_RGB32I: case GL_RGB32UI:
+        case GL_RGBA8: case GL_RGBA16: case GL_RGBA16F: case GL_RGBA32F:
+        case GL_RGBA8I: case GL_RGBA16I: case GL_RGBA32I: case GL_RGBA8UI: case GL_RGBA16UI: case GL_RGBA32UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl,
         struct wined3d_buffer *buffer, const struct wined3d_format_gl *view_format_gl,
         unsigned int offset, unsigned int size)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     const struct wined3d_bo_gl *bo_gl;
+    bool convert; /* WINESKIN */
 
     if (!gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
     {
@@ -310,6 +342,17 @@ static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_c
         return;
     }
 
+    /* WINESKIN: see buffer_convert_gl.c. */
+    convert = !gl_info->supported[ARB_TEXTURE_BUFFER_RANGE]
+            && !gl_buffer_texture_format_supported(view_format_gl->internal);
+    if (convert && (!size || offset + size > bo_gl->size || !view_format_gl->f.byte_count
+            || !wined3d_gl_buffer_view_format_convertible(gl_info, view_format_gl)))
+    {
+        FIXME("%s (internal format %#x) is not a buffer texture format.\n",
+                debug_d3dformat(view_format_gl->f.id), view_format_gl->internal);
+        convert = false;
+    }
+
     view->target = GL_TEXTURE_BUFFER;
     if (!view->name)
     {
@@ -320,6 +363,23 @@ static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_c
     if (gl_info->supported[ARB_TEXTURE_BUFFER_RANGE])
     {
         GL_EXTCALL(glTexBufferRange(GL_TEXTURE_BUFFER, view_format_gl->internal, bo_gl->id, offset, size));
+    }
+    /* WINESKIN: see buffer_convert_gl.c. */
+    else if (convert)
+    {
+        GLsizeiptr converted_size = (GLsizeiptr)(size / view_format_gl->f.byte_count) * 4 * sizeof(float);
+
+        if (!view->range_bo)
+            GL_EXTCALL(glGenBuffers(1, &view->range_bo));
+        wined3d_context_gl_bind_bo(context_gl, GL_COPY_WRITE_BUFFER, view->range_bo);
+        if (view->range_size != size || view->range_convert != view_format_gl)
+            GL_EXTCALL(glBufferData(GL_COPY_WRITE_BUFFER, converted_size, NULL, GL_STREAM_COPY));
+        view->range_source = bo_gl->id;
+        view->range_offset = offset;
+        view->range_size = size;
+        view->range_convert = view_format_gl;
+        GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, view->range_bo));
+        wined3d_gl_view_load_buffer_range(view, &bo_gl->b, true, context_gl);
     }
     /* WINESKIN: see struct wined3d_gl_view. */
     else if (size && (offset || size != bo_gl->size) && offset + size <= bo_gl->size)
@@ -333,7 +393,7 @@ static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_c
         view->range_offset = offset;
         view->range_size = size;
         GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, view_format_gl->internal, view->range_bo));
-        wined3d_gl_view_load_buffer_range(view, context_gl);
+        wined3d_gl_view_load_buffer_range(view, &bo_gl->b, true, context_gl);
     }
     else
     {
@@ -1098,96 +1158,6 @@ void wined3d_shader_resource_view_gl_update(struct wined3d_shader_resource_view_
     list_add_head(&buffer->buffer_object->users, &srv_gl->bo_user.entry);
 }
 
-/* WINESKIN: the texture of a view whose component class differs from its
- * typeless texture's storage; see struct wined3d_gl_view. */
-static void wined3d_shader_resource_view_gl_create_copy(struct wined3d_shader_resource_view_gl *view_gl,
-        struct wined3d_texture_gl *texture_gl)
-{
-    const struct wined3d_format_gl *format_gl = wined3d_format_gl(view_gl->v.format);
-    const struct wined3d_view_desc *desc = &view_gl->v.desc;
-    struct wined3d_gl_view *view = &view_gl->gl_view;
-    const struct wined3d_gl_info *gl_info;
-    struct wined3d_context_gl *context_gl;
-    unsigned int i, level, width, height;
-    GLsizeiptr size = 0;
-
-    context_gl = wined3d_context_gl(context_acquire(texture_gl->t.resource.device, NULL, 0));
-    gl_info = context_gl->gl_info;
-
-    view->target = texture_gl->target;
-    gl_info->gl_ops.gl.p_glGenTextures(1, &view->name);
-    wined3d_context_gl_bind_texture(context_gl, view->target, view->name);
-    for (i = 0; i < desc->u.texture.level_count; ++i)
-    {
-        level = desc->u.texture.level_idx + i;
-        width = wined3d_texture_get_level_width(&texture_gl->t, level);
-        height = wined3d_texture_get_level_height(&texture_gl->t, level);
-        if (!i)
-            size = (GLsizeiptr)width * height * view_gl->v.format->byte_count;
-        if (view->target == GL_TEXTURE_1D)
-            gl_info->gl_ops.gl.p_glTexImage1D(view->target, i, format_gl->internal, width, 0,
-                    format_gl->format, format_gl->type, NULL);
-        else
-            gl_info->gl_ops.gl.p_glTexImage2D(view->target, i, format_gl->internal, width, height, 0,
-                    format_gl->format, format_gl->type, NULL);
-    }
-    gl_info->gl_ops.gl.p_glTexParameteri(view->target, GL_TEXTURE_MAX_LEVEL, desc->u.texture.level_count - 1);
-    gl_info->gl_ops.gl.p_glTexParameteri(view->target, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-    gl_info->gl_ops.gl.p_glTexParameteri(view->target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    WARN("View %p (%s of %s) is copied through a pixel buffer each time it is bound.\n", view_gl,
-            debug_d3dformat(view_gl->v.format->id), debug_d3dformat(texture_gl->t.resource.format->id));
-    GL_EXTCALL(glGenBuffers(1, &view->copy_bo));
-    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, view->copy_bo);
-    GL_EXTCALL(glBufferData(GL_PIXEL_PACK_BUFFER, size, NULL, GL_STREAM_COPY));
-    wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, 0);
-    checkGLcall("create view copy");
-
-    context_invalidate_compute_state(&context_gl->c, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
-    context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
-    context_release(&context_gl->c);
-}
-
-/* WINESKIN: carries the bits of the view's levels from the texture to the
- * view's own texture, through a pixel buffer: the two formats have the same
- * layout. Context activation is done by the caller. */
-static void wined3d_shader_resource_view_gl_load_copy(struct wined3d_shader_resource_view_gl *view_gl,
-        struct wined3d_context_gl *context_gl)
-{
-    struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(texture_from_resource(view_gl->v.resource));
-    const struct wined3d_format_gl *src_format_gl = wined3d_format_gl(texture_gl->t.resource.format);
-    const struct wined3d_format_gl *dst_format_gl = wined3d_format_gl(view_gl->v.format);
-    const struct wined3d_view_desc *desc = &view_gl->v.desc;
-    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
-    const struct wined3d_gl_view *view = &view_gl->gl_view;
-    unsigned int i, level, width, height;
-
-    gl_info->gl_ops.gl.p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    gl_info->gl_ops.gl.p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    for (i = 0; i < desc->u.texture.level_count; ++i)
-    {
-        level = desc->u.texture.level_idx + i;
-        width = wined3d_texture_get_level_width(&texture_gl->t, level);
-        height = wined3d_texture_get_level_height(&texture_gl->t, level);
-
-        wined3d_texture_gl_bind(texture_gl, context_gl, FALSE);
-        wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, view->copy_bo);
-        gl_info->gl_ops.gl.p_glGetTexImage(view->target, level, src_format_gl->format, src_format_gl->type, NULL);
-        wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_PACK_BUFFER, 0);
-
-        wined3d_context_gl_bind_texture(context_gl, view->target, view->name);
-        wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_UNPACK_BUFFER, view->copy_bo);
-        if (view->target == GL_TEXTURE_1D)
-            gl_info->gl_ops.gl.p_glTexSubImage1D(view->target, i, 0, width,
-                    dst_format_gl->format, dst_format_gl->type, NULL);
-        else
-            gl_info->gl_ops.gl.p_glTexSubImage2D(view->target, i, 0, 0, width, height,
-                    dst_format_gl->format, dst_format_gl->type, NULL);
-        wined3d_context_gl_bind_bo(context_gl, GL_PIXEL_UNPACK_BUFFER, 0);
-    }
-    checkGLcall("load view copy");
-}
-
 static void wined3d_shader_resource_view_gl_cs_init(void *object)
 {
     struct wined3d_shader_resource_view_gl *view_gl = object;
@@ -1239,16 +1209,10 @@ static void wined3d_shader_resource_view_gl_cs_init(void *object)
         {
             FIXME("Swapchain shader resource views not supported.\n");
         }
-        /* WINESKIN: see struct wined3d_gl_view. */
-        else if (!gl_info->supported[ARB_TEXTURE_VIEW] && wined3d_format_is_typeless(resource->format)
-                && resource->format->typeless_id == view_format->typeless_id
-                && !(resource->format->attrs & WINED3D_FORMAT_ATTR_INTEGER)
-                != !(view_format->attrs & WINED3D_FORMAT_ATTR_INTEGER)
-                && resource->format->byte_count == view_format->byte_count
-                && (texture_gl->target == GL_TEXTURE_1D || texture_gl->target == GL_TEXTURE_2D)
-                && view_target == texture_gl->target)
+        /* WINESKIN: see view_copy_gl.c. */
+        else if (wined3d_gl_view_needs_copy(gl_info, texture_gl, desc, view_format, view_target))
         {
-            wined3d_shader_resource_view_gl_create_copy(view_gl, texture_gl);
+            wined3d_gl_view_create_copy(&view_gl->gl_view, texture_gl, desc, view_format, view_target);
         }
         else if (resource->format->typeless_id == view_format->typeless_id
                 && resource_class == view_class)
@@ -1458,7 +1422,9 @@ static void wined3d_shader_resource_view_gl_apply_view(struct wined3d_shader_res
         struct wined3d_texture_gl *texture_gl, unsigned int unit, struct wined3d_sampler_gl *sampler_gl,
         struct wined3d_context_gl *context_gl)
 {
-    const struct wined3d_format_gl *format_gl = wined3d_format_gl(texture_gl->t.resource.format);
+    const struct wined3d_format_gl *format_gl = wined3d_format_gl(
+            (texture_gl->t.resource.format_caps & WINED3D_FORMAT_CAP_DECOMPRESS)
+            ? wined3d_resource_get_decompress_format(&texture_gl->t.resource) : texture_gl->t.resource.format);
     const struct wined3d_view_desc *desc = &view_gl->v.desc;
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct gl_texture *gl_tex;
@@ -1517,10 +1483,6 @@ void wined3d_shader_resource_view_gl_bind(struct wined3d_shader_resource_view_gl
 
     if (view_gl->gl_view.name)
     {
-        if (view_gl->gl_view.range_bo) /* WINESKIN */
-            wined3d_gl_view_load_buffer_range(&view_gl->gl_view, context_gl);
-        if (view_gl->gl_view.copy_bo) /* WINESKIN */
-            wined3d_shader_resource_view_gl_load_copy(view_gl, context_gl);
         wined3d_context_gl_bind_texture(context_gl, view_gl->gl_view.target, view_gl->gl_view.name);
         wined3d_sampler_gl_bind(sampler_gl, unit, NULL, context_gl);
         return;
@@ -1554,8 +1516,9 @@ unsigned int wined3d_gl_limits_get_uav_texture_unit(const struct wined3d_gl_limi
 }
 
 /* WINESKIN: binds the unordered access views a graphics shader reads to their
- * texture units (shader_glsl_declare_image_emulation). A view of a texture
- * reads the texture's first level and all of its layers. */
+ * texture units (shader_glsl_declare_image_emulation). A view of the first
+ * level and all layers of a texture is that texture; another view has a
+ * texture of its own (wined3d_unordered_access_view_gl_load_copy). */
 void wined3d_context_gl_bind_unordered_access_view_textures(struct wined3d_context_gl *context_gl,
         const struct wined3d_shader *shader, struct wined3d_unordered_access_view * const *views)
 {
@@ -1587,8 +1550,6 @@ void wined3d_context_gl_bind_unordered_access_view_textures(struct wined3d_conte
         {
             struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(texture_from_resource(view_gl->v.resource));
 
-            if (view_gl->v.desc.u.texture.level_idx)
-                WARN("Reading level 0 for a view of level %u.\n", view_gl->v.desc.u.texture.level_idx);
             wined3d_texture_gl_bind(texture_gl, context_gl, FALSE);
             wined3d_sampler_gl_bind(sampler_gl, unit, texture_gl, context_gl);
         }
@@ -1635,6 +1596,14 @@ void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resou
             ERR("Failed to load source layer %u.\n", base_layer + i);
     }
 
+    /* WINESKIN: a view that is a copy (view_copy_gl.c) has its mipmaps
+     * generated in its own texture and copied to the texture. */
+    if (view_gl->gl_view.copy)
+    {
+        wined3d_gl_view_copy_generate_mipmap(&view_gl->gl_view, context_gl);
+        goto generated;
+    }
+
     if (view_gl->gl_view.name)
     {
         shader_resource_view_gl_bind_and_dirtify(view_gl, context_gl);
@@ -1660,6 +1629,7 @@ void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resou
     gl_info->fbo_ops.glGenerateMipmap(texture_gl->target);
     checkGLcall("glGenerateMipMap()");
 
+generated: /* WINESKIN */
     for (i = 0; i < layer_count; ++i)
     {
         for (j = 1; j < level_count; ++j)
@@ -1669,6 +1639,9 @@ void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resou
             wined3d_texture_invalidate_location(&texture_gl->t, sub_resource_idx, ~location);
         }
     }
+
+    if (view_gl->gl_view.copy) /* WINESKIN: the view's texture and the texture hold the same. */
+        wined3d_gl_view_copy_set_current(&view_gl->gl_view);
 
     if (!view_gl->gl_view.name)
     {
