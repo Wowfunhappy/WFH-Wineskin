@@ -26,6 +26,7 @@
 #import <IOKit/graphics/IOGraphicsLib.h>
 #import <Metal/Metal.h>
 #include <dlfcn.h>
+#import "cocoa_event.h" /* WINESKIN */
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -999,4 +1000,71 @@ void macdrv_free_monitors(struct macdrv_monitor* monitors, int monitor_count)
             free(monitors[monitor_count].edid);
     if (monitors)
         free(monitors);
+}
+
+/* WINESKIN: a program's gamma ramp shows on the main display while the program is the active app.
+ * When it is not, or when the ramp is the identity, the display has its ColorSync settings
+ * (CGDisplayRestoreColorSyncSettings); Quartz also restores them when the process ends. Accessed
+ * on the main thread. */
+static CGGammaValue *program_gamma;
+static uint32_t program_gamma_count;
+static BOOL program_gamma_shown;
+
+static void show_program_gamma(BOOL show)
+{
+    if (show && program_gamma)
+    {
+        uint32_t n = program_gamma_count;
+        if (CGSetDisplayTransferByTable(CGMainDisplayID(), n, program_gamma, program_gamma + n,
+                                        program_gamma + 2 * n) == kCGErrorSuccess)
+            program_gamma_shown = YES;
+    }
+    else if (program_gamma_shown)
+    {
+        CGDisplayRestoreColorSyncSettings();
+        program_gamma_shown = NO;
+    }
+}
+
+/***********************************************************************
+ *              macdrv_set_program_gamma
+ *
+ * WINESKIN: see show_program_gamma().
+ */
+void macdrv_set_program_gamma(uint32_t count, const CGGammaValue *red, const CGGammaValue *green,
+                              const CGGammaValue *blue)
+{
+    CGGammaValue *table = NULL;
+    BOOL identity = TRUE;
+    uint32_t i;
+
+    for (i = 0; i < count && identity; i++)
+    {
+        CGGammaValue linear = count > 1 ? i / (CGGammaValue)(count - 1) : 0;
+        identity = fabs(red[i] - linear) < 1.0 / 512 && fabs(green[i] - linear) < 1.0 / 512 &&
+                   fabs(blue[i] - linear) < 1.0 / 512;
+    }
+    if (!identity && (table = malloc(count * 3 * sizeof(*table))))
+    {
+        memcpy(table, red, count * sizeof(*table));
+        memcpy(table + count, green, count * sizeof(*table));
+        memcpy(table + 2 * count, blue, count * sizeof(*table));
+    }
+
+    OnMainThread(^{
+        free(program_gamma);
+        program_gamma = table;
+        program_gamma_count = count;
+        show_program_gamma([NSApp isActive]);
+    });
+}
+
+/***********************************************************************
+ *              macdrv_show_program_gamma
+ *
+ * WINESKIN: the app became active or inactive. Main thread.
+ */
+void macdrv_show_program_gamma(int active)
+{
+    show_program_gamma(active);
 }

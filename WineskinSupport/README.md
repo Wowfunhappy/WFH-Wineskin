@@ -529,7 +529,12 @@ cursor clipping and window rects all stay in the program's coordinates. winemac 
 surface the window's size in Windows' coordinates and the window server scales it to the window
 (`kCGLCPSurfaceBackingSize`), so OpenGL, Direct3D 8 to 11 and DirectDraw, which draw through it, need
 no framebuffer copy. Emulation is `HKCU\Software\Wine\Mac Driver\EmulateModeset` (on unless set `n`;
-`win32u/sysparams.c`); gamma ramps do nothing while it is on.
+`win32u/sysparams.c`).
+
+A program's gamma ramp (`SetDeviceGammaRamp`, the gamma controls of DirectDraw and Direct3D, a game's
+brightness slider) applies to the main display while the program is the active app, emulated modes or
+not; when another app is active, when the ramp is the identity and when the program quits, the display
+has its ColorSync settings (`show_program_gamma` in `winemac.drv/cocoa_display.m`).
 
 A visible top-level window whose content covers a screen, as a fullscreen game's does, goes full screen
 in a Space of its own, as with the green button (`-[WineWindow wine_updateFullScreenSpace]`,

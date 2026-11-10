@@ -2243,6 +2243,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [self updateFullscreenWindows];
         [self adjustWindowLevels:YES];
         [self wine_updateFullScreenSpaces]; /* WINESKIN */
+        macdrv_show_program_gamma(YES); /* WINESKIN */
 
         if (beenActive)
             [self unminimizeWindowIfNoneVisible];
@@ -2272,6 +2273,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
         WineEventQueue* queue;
 
         [self invalidateGotFocusEvents];
+        macdrv_show_program_gamma(NO); /* WINESKIN */
 
         event = macdrv_create_event(APP_DEACTIVATED, nil);
 

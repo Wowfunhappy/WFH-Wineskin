@@ -1051,9 +1051,12 @@ UINT macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp)
     }
 
     /* TODO: support displays other than the main one */
-    err = CGSetDisplayTransferByTable(CGMainDisplayID(), win_entries, red, green, blue);
-    if (err != kCGErrorSuccess)
-        WARN("failed to set display gamma table: %d\n", err);
+    /* WINESKIN: shown while the program is active; see show_program_gamma() in cocoa_display.m */
+    // err = CGSetDisplayTransferByTable(CGMainDisplayID(), win_entries, red, green, blue);
+    // if (err != kCGErrorSuccess)
+    //     WARN("failed to set display gamma table: %d\n", err);
+    macdrv_set_program_gamma(win_entries, red, green, blue);
+    err = kCGErrorSuccess;
 
 done:
     free(red);

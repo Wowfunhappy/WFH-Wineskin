@@ -602,6 +602,10 @@ extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
+/* WINESKIN: see show_program_gamma() in cocoa_display.m */
+extern void macdrv_set_program_gamma(uint32_t count, const CGGammaValue *red, const CGGammaValue *green,
+                                     const CGGammaValue *blue);
+extern void macdrv_show_program_gamma(int active);
 extern bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2]);
 extern void macdrv_set_view_backing_size(WineContentView *view, const int backing_size[2]);
 extern uint32_t macdrv_window_background_color(void);

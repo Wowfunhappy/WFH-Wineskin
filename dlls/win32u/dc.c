@@ -1300,7 +1300,11 @@ BOOL WINAPI NtGdiGetDeviceGammaRamp( HDC hdc, void *ptr )
         if (get_gdi_object_type( hdc ) != NTGDI_OBJ_MEMDC)
         {
             PHYSDEV physdev = GET_DC_PHYSDEV( dc, pGetDeviceGammaRamp );
+#ifdef __APPLE__ /* WINESKIN: winemac shows a program's gamma ramp while the program is active */
+            ret = physdev->funcs->pGetDeviceGammaRamp( physdev, ptr );
+#else
             ret = emulate_modeset ? -1 : physdev->funcs->pGetDeviceGammaRamp( physdev, ptr );
+#endif /* WINESKIN */
             if (ret == -1) ret = get_global_gamma_ramp( ptr );
         }
         if (!ret) RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
@@ -1401,7 +1405,11 @@ BOOL WINAPI NtGdiSetDeviceGammaRamp( HDC hdc, void *ptr )
         if (get_gdi_object_type( hdc ) != NTGDI_OBJ_MEMDC)
         {
             PHYSDEV physdev = GET_DC_PHYSDEV( dc, pSetDeviceGammaRamp );
+#ifdef __APPLE__ /* WINESKIN: see NtGdiGetDeviceGammaRamp */
+            if (check_gamma_ramps(ptr)) ret = physdev->funcs->pSetDeviceGammaRamp( physdev, ptr );
+#else
             if (check_gamma_ramps(ptr)) ret = emulate_modeset ? -1 : physdev->funcs->pSetDeviceGammaRamp( physdev, ptr );
+#endif /* WINESKIN */
             if (ret == -1) ret = set_global_gamma_ramp( ptr );
         }
         if (!ret) RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
