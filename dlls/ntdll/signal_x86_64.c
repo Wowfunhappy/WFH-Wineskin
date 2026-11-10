@@ -166,7 +166,10 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
  */
 static NTSTATUS virtual_unwind( ULONG type, DISPATCHER_CONTEXT *dispatch, CONTEXT *context )
 {
-    LDR_DATA_TABLE_ENTRY *module;
+    /* WINESKIN: NULL for an address in no PE module, which LdrFindEntryForAddress leaves unset, so
+       the check below keeps a host library's personality routine from running as an SEH handler */
+    /* LDR_DATA_TABLE_ENTRY *module; */
+    LDR_DATA_TABLE_ENTRY *module = NULL;
     NTSTATUS status;
 
     dispatch->ImageBase = 0;
