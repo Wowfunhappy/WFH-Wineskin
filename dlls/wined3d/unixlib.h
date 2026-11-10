@@ -105,6 +105,11 @@ enum wined3d_cl_arg_type
     WINED3D_CL_ARG_NULL_BUFFER, /* a small zeroed buffer */
     WINED3D_CL_ARG_NULL_IMAGE,  /* a zeroed 1x1 image of image_type and channel */
     WINED3D_CL_ARG_SAMPLER,     /* data: struct wined3d_cl_sampler_desc */
+    /* size bytes of system memory at data's UINT64 pointer, copied for the
+     * dispatch into a buffer OpenCL owns; the argument after it is a value
+     * whose first UINT32 is a byte offset in that buffer, to which the copy's
+     * position is added. */
+    WINED3D_CL_ARG_HOST_DATA,
 };
 
 enum wined3d_cl_image_dim
@@ -159,6 +164,10 @@ struct wined3d_cl_dispatch_params
     UINT32 group_count[3];
     UINT32 group_size[3];
     UINT32 sync;  /* finish before returning */
+    /* Add the dispatch to the open batch: its kernel is enqueued at the next
+     * unix_cl_flush, with the batch's other kernels. Until then OpenGL must
+     * not touch the objects the batch uses. */
+    UINT32 batch;
 };
 
 enum wined3d_cl_object_type
@@ -208,6 +217,7 @@ enum unix_funcs
     unix_cl_finish, /* WINESKIN */
     unix_cl_release_context, /* WINESKIN */
     unix_cl_register, /* WINESKIN */
+    unix_cl_flush, /* WINESKIN */
 };
 
 #endif

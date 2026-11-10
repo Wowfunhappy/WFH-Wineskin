@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mach/mach_time.h>
 #include <OpenCL/opencl.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/CGLDevice.h>
@@ -60,6 +61,30 @@ struct cl_mem_entry
 };
 
 #define CL_MEM_HASH_SIZE 1024
+
+#define CL_HOST_RING_SIZE (8u << 20)
+#define CL_HOST_RING_SEGMENTS 8
+#define CL_HOST_SEGMENT_SIZE (CL_HOST_RING_SIZE / CL_HOST_RING_SEGMENTS)
+#define CL_HOST_ALIGN 256
+
+#define CL_BATCH_MAX_DISPATCHES 128
+#define CL_BATCH_MAX_ARGS 4096
+#define CL_BATCH_MAX_OBJECTS 256
+
+/* An argument's value as clSetKernelArg() takes it: the bytes of a value, or
+ * a memory object or sampler. */
+struct cl_batch_arg
+{
+    size_t size;
+    BYTE data[WINED3D_CL_MAX_ARG_DATA];
+};
+
+struct cl_batch_dispatch
+{
+    struct cl_kernel *kernel;
+    unsigned int arg_start, arg_count;
+    size_t global[3], local[3];
+};
 
 struct cl_sampler_entry
 {
@@ -97,6 +122,31 @@ struct cl_device_context
      * rate. Without the extension each dispatch finishes OpenGL first and
      * OpenCL afterwards. */
     BOOL implicit_sync;
+    /* The copies of WINED3D_CL_ARG_HOST_DATA: system memory is copied to
+     * host_staging and written from there to the same place in host_ring,
+     * which kernels read. Each of the ring's segments, when the copies move
+     * on to the next, gets a marker; copies come back to a segment only once
+     * its marker has completed, that is, once the writes from it and the
+     * kernels that read it have run. */
+    cl_mem host_ring;
+    BYTE *host_staging;
+    size_t host_pos;
+    unsigned int host_segment;
+    cl_event host_markers[CL_HOST_RING_SEGMENTS];
+    /* The open batch (wined3d_cl_dispatch_params.batch): dispatches whose
+     * kernels are enqueued together by batch_flush(), the values of their
+     * arguments, the OpenGL objects they use, and the range of host_staging
+     * their copies take. One acquire and one release of the OpenGL objects
+     * serve them all; each acquire or release, like each glFlush(), makes
+     * the driver walk the objects in flight, which with a frame of Bit.Trip
+     * Rerunner's costs about 0.15 ms. */
+    struct cl_batch_dispatch *batch;
+    unsigned int batch_count;
+    struct cl_batch_arg *batch_args;
+    unsigned int batch_arg_count;
+    cl_mem batch_objects[CL_BATCH_MAX_OBJECTS];
+    unsigned int batch_object_count;
+    size_t batch_host_start, batch_host_end;
     LONG refcount; /* the list's, and each kernel's */
     BOOL released; /* out of the list: no group uses it */
     /* The groups that have registered objects or built kernels. */
@@ -110,6 +160,8 @@ struct cl_kernel
     cl_program program;
     cl_kernel kernel;
 };
+
+static void batch_flush(struct cl_device_context *ctx);
 
 static pthread_mutex_t cl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct cl_device_context *cl_contexts;
@@ -221,6 +273,7 @@ static void cl_context_release(struct cl_device_context *ctx)
 {
     struct cl_sampler_entry *sampler;
     struct cl_null_image *image;
+    unsigned int i;
 
     if (--ctx->refcount)
         return;
@@ -239,6 +292,16 @@ static void cl_context_release(struct cl_device_context *ctx)
     }
     if (ctx->null_buffer)
         clReleaseMemObject(ctx->null_buffer);
+    for (i = 0; i < CL_HOST_RING_SEGMENTS; ++i)
+    {
+        if (ctx->host_markers[i])
+            clReleaseEvent(ctx->host_markers[i]);
+    }
+    if (ctx->host_ring)
+        clReleaseMemObject(ctx->host_ring);
+    free(ctx->host_staging);
+    free(ctx->batch);
+    free(ctx->batch_args);
     free(ctx->groups);
     clReleaseCommandQueue(ctx->queue);
     clReleaseContext(ctx->context);
@@ -405,12 +468,70 @@ static NTSTATUS cl_release_kernel(void *args)
     if (!kernel)
         return STATUS_SUCCESS;
     pthread_mutex_lock(&cl_mutex);
+    batch_flush(kernel->ctx);
     clReleaseKernel(kernel->kernel);
     clReleaseProgram(kernel->program);
     cl_context_release(kernel->ctx);
     pthread_mutex_unlock(&cl_mutex);
     free(kernel);
     return STATUS_SUCCESS;
+}
+
+/* WINESKIN_CL_STATS=1 prints, every 1000 dispatches, the time each part of a
+ * dispatch took on average, in microseconds. */
+enum cl_stat
+{
+    CL_STAT_ARGS,
+    CL_STAT_WRITE,
+    CL_STAT_GL_FLUSH,
+    CL_STAT_ACQUIRE,
+    CL_STAT_ENQUEUE,
+    CL_STAT_RELEASE,
+    CL_STAT_CL_FLUSH,
+    CL_STAT_REGISTER,
+    CL_STAT_COUNT
+};
+
+static int cl_stats = -1;
+static uint64_t cl_stat_time[CL_STAT_COUNT], cl_stat_last;
+static unsigned int cl_stat_dispatches, cl_stat_registers, cl_stat_host, cl_stat_gl_buffers, cl_stat_stale;
+static unsigned int cl_stat_batches;
+
+static void cl_stat(enum cl_stat stat)
+{
+    uint64_t now;
+
+    if (!cl_stats)
+        return;
+    now = mach_absolute_time();
+    if (stat < CL_STAT_COUNT)
+        cl_stat_time[stat] += now - cl_stat_last;
+    cl_stat_last = now;
+}
+
+static void cl_stats_dispatch_done(void)
+{
+    static const char *names[CL_STAT_COUNT] = {"args", "write", "glFlush", "acquire", "enqueue", "release", "clFlush", "register"};
+    mach_timebase_info_data_t tb;
+    char line[512];
+    unsigned int i, len;
+
+    if (++cl_stat_dispatches < 1000)
+        return;
+    mach_timebase_info(&tb);
+    len = snprintf(line, sizeof(line), "CLSTATS time per dispatch (us):");
+    for (i = 0; i < CL_STAT_COUNT; ++i)
+    {
+        len += snprintf(line + len, sizeof(line) - len, " %s %.1f", names[i],
+                cl_stat_time[i] * (double)tb.numer / tb.denom / 1000.0 / cl_stat_dispatches);
+        cl_stat_time[i] = 0;
+    }
+    snprintf(line + len, sizeof(line) - len, "; per dispatch: batches %.2f, registers %.2f (buffers written"
+            " since %.2f), host copies %.2f, buffers %.2f\n", cl_stat_batches / 1000.0, cl_stat_registers / 1000.0,
+            cl_stat_stale / 1000.0, cl_stat_host / 1000.0, cl_stat_gl_buffers / 1000.0);
+    fputs(line, stderr);
+    cl_stat_dispatches = cl_stat_registers = cl_stat_host = cl_stat_gl_buffers = cl_stat_stale = 0;
+    cl_stat_batches = 0;
 }
 
 static unsigned int mem_hash(UINT32 name)
@@ -425,12 +546,12 @@ static UINT32 mem_type(const struct wined3d_cl_arg *arg)
 
 /* The memory object of a registered OpenGL object, or NULL.
  *
- * A buffer's "level" is wined3d's count of the writes OpenGL made to it
- * (wined3d_bo.content_serial). The driver gives a buffer a new data store
+ * A buffer's "level" is the serial of wined3d's last write to it from the
+ * CPU side (wined3d_bo.cl_serial). The driver gives a buffer a new data store
  * when it is written while commands that use it are queued, or mapped with
  * its contents discarded, and a memory object keeps reading the store it was
- * created on: kernels then saw the constants of some earlier dispatch. A
- * buffer written since its memory object was made gets a new one. */
+ * created on. A buffer written since its memory object was made gets a new
+ * one. Writes by the GPU, kernels' included, keep the store. */
 static cl_mem get_gl_mem(struct cl_device_context *ctx, UINT64 group, const struct wined3d_cl_arg *arg)
 {
     UINT32 type = mem_type(arg);
@@ -444,6 +565,16 @@ static cl_mem get_gl_mem(struct cl_device_context *ctx, UINT64 group, const stru
         {
             if (entry->level == arg->level)
                 return entry->mem;
+            if (cl_stats > 0 && cl_stat_stale < 8)
+            {
+                size_t size = 0;
+
+                clGetMemObjectInfo(entry->mem, CL_MEM_SIZE, sizeof(size), &size, NULL);
+                fprintf(stderr, "CLSTATS buffer %u (%zu bytes) written since its memory object was made\n",
+                        arg->gl_name, size);
+            }
+            ++cl_stat_stale;
+            batch_flush(ctx);
             clReleaseMemObject(entry->mem);
             *prev = entry->next;
             free(entry);
@@ -483,10 +614,13 @@ static NTSTATUS cl_register(void *args)
     struct cl_mem_entry *entry, **bucket;
     struct cl_device_context *ctx;
     GLint host_name = 0;
+    uint64_t start = 0;
     GLenum query;
     cl_int err;
     cl_mem mem;
 
+    if (cl_stats > 0)
+        start = mach_absolute_time();
     pthread_mutex_lock(&cl_mutex);
     if (!(ctx = get_device_context()))
     {
@@ -539,6 +673,11 @@ static NTSTATUS cl_register(void *args)
     entry->next = *bucket;
     *bucket = entry;
     cl_context_add_group(ctx, params->group);
+    if (start)
+    {
+        ++cl_stat_registers;
+        cl_stat_time[CL_STAT_REGISTER] += mach_absolute_time() - start;
+    }
     pthread_mutex_unlock(&cl_mutex);
     return STATUS_SUCCESS;
 }
@@ -643,18 +782,156 @@ static cl_sampler get_sampler(struct cl_device_context *ctx, const struct wined3
     return sampler;
 }
 
+/* Room for "size" bytes of WINED3D_CL_ARG_HOST_DATA copies; see host_ring. */
+static BOOL host_reserve(struct cl_device_context *ctx, size_t size, size_t *pos)
+{
+    unsigned int segment, next;
+    cl_int err;
+
+    if (size > CL_HOST_SEGMENT_SIZE)
+        return FALSE;
+    if (!ctx->host_ring)
+    {
+        if (!(ctx->host_staging = malloc(CL_HOST_RING_SIZE)))
+            return FALSE;
+        if (!(ctx->host_ring = clCreateBuffer(ctx->context, CL_MEM_READ_ONLY, CL_HOST_RING_SIZE, NULL, &err)))
+        {
+            ERR("Failed to create a buffer for constant data, error %d.\n", err);
+            free(ctx->host_staging);
+            ctx->host_staging = NULL;
+            return FALSE;
+        }
+        ctx->host_pos = 0;
+        ctx->host_segment = 0;
+    }
+
+    segment = ctx->host_segment;
+    if (ctx->host_pos + size > (segment + 1) * (size_t)CL_HOST_SEGMENT_SIZE)
+    {
+        next = (segment + 1) % CL_HOST_RING_SEGMENTS;
+        if (ctx->host_markers[segment])
+            clReleaseEvent(ctx->host_markers[segment]);
+        if ((err = clEnqueueMarkerWithWaitList(ctx->queue, 0, NULL, &ctx->host_markers[segment])))
+        {
+            ERR("Failed to enqueue a marker, error %d.\n", err);
+            ctx->host_markers[segment] = NULL;
+            clFinish(ctx->queue);
+        }
+        if (ctx->host_markers[next])
+        {
+            clWaitForEvents(1, &ctx->host_markers[next]);
+            clReleaseEvent(ctx->host_markers[next]);
+            ctx->host_markers[next] = NULL;
+        }
+        ctx->host_segment = next;
+        ctx->host_pos = next * (size_t)CL_HOST_SEGMENT_SIZE;
+    }
+    *pos = ctx->host_pos;
+    ctx->host_pos += size;
+    return TRUE;
+}
+
+/* Enqueues the open batch's kernels; see cl_device_context.batch. Called with
+ * cl_mutex held, on the thread whose OpenGL context issued the commands the
+ * kernels must follow. */
+static void batch_flush(struct cl_device_context *ctx)
+{
+    const struct cl_batch_dispatch *dispatch;
+    unsigned int i, j;
+    cl_int err;
+
+    if (!ctx->batch_count)
+        return;
+
+    cl_stat(CL_STAT_COUNT);
+    if (ctx->batch_host_end > ctx->batch_host_start
+            && (err = clEnqueueWriteBuffer(ctx->queue, ctx->host_ring, CL_FALSE, ctx->batch_host_start,
+            ctx->batch_host_end - ctx->batch_host_start, ctx->host_staging + ctx->batch_host_start, 0, NULL, NULL)))
+        ERR("Failed to write constant data, error %d.\n", err);
+    cl_stat(CL_STAT_WRITE);
+
+    /* The kernels must run after the OpenGL commands issued so far, and
+     * OpenGL commands issued later must see their results; see implicit_sync. */
+    if (ctx->implicit_sync)
+        glFlush();
+    else
+        glFinish();
+    cl_stat(CL_STAT_GL_FLUSH);
+    if (ctx->batch_object_count && (err = clEnqueueAcquireGLObjects(ctx->queue,
+            ctx->batch_object_count, ctx->batch_objects, 0, NULL, NULL)))
+        ERR("Failed to acquire OpenGL objects, error %d.\n", err);
+    cl_stat(CL_STAT_ACQUIRE);
+
+    for (i = 0; i < ctx->batch_count; ++i)
+    {
+        dispatch = &ctx->batch[i];
+        for (j = 0; j < dispatch->arg_count; ++j)
+        {
+            const struct cl_batch_arg *arg = &ctx->batch_args[dispatch->arg_start + j];
+
+            if ((err = clSetKernelArg(dispatch->kernel->kernel, j, arg->size, arg->data)))
+                ERR("Failed to set argument %u, error %d.\n", j, err);
+        }
+        if ((err = clEnqueueNDRangeKernel(ctx->queue, dispatch->kernel->kernel, 3, NULL,
+                dispatch->global, dispatch->local, 0, NULL, NULL)))
+            ERR("Failed to enqueue the kernel (global %zux%zux%zu, local %zux%zux%zu), error %d.\n",
+                    dispatch->global[0], dispatch->global[1], dispatch->global[2],
+                    dispatch->local[0], dispatch->local[1], dispatch->local[2], err);
+    }
+    cl_stat(CL_STAT_ENQUEUE);
+
+    if (ctx->batch_object_count && (err = clEnqueueReleaseGLObjects(ctx->queue,
+            ctx->batch_object_count, ctx->batch_objects, 0, NULL, NULL)))
+        ERR("Failed to release OpenGL objects, error %d.\n", err);
+    cl_stat(CL_STAT_RELEASE);
+
+    {
+        /* WINESKIN_CL_SYNC=1 waits for every batch, to tell ordering faults from others. */
+        static int force_sync = -1;
+
+        if (force_sync < 0)
+            force_sync = getenv("WINESKIN_CL_SYNC") != NULL;
+        if (force_sync || !ctx->implicit_sync)
+        {
+            clFinish(ctx->queue);
+            ctx->pending = FALSE;
+        }
+        else
+        {
+            clFlush(ctx->queue);
+            ctx->pending = TRUE;
+        }
+    }
+    cl_stat(CL_STAT_CL_FLUSH);
+    ++cl_stat_batches;
+
+    ctx->batch_count = 0;
+    ctx->batch_arg_count = 0;
+    ctx->batch_object_count = 0;
+    ctx->batch_host_start = ctx->batch_host_end = 0;
+}
+
+static BOOL host_fits(const struct cl_device_context *ctx, size_t size)
+{
+    return ctx->host_ring && ctx->host_pos + size <= (ctx->host_segment + 1) * (size_t)CL_HOST_SEGMENT_SIZE;
+}
+
+/* Adds a dispatch to the open batch, and enqueues the batch unless the
+ * dispatch asks to wait for more. */
 static NTSTATUS cl_dispatch(void *args)
 {
     const struct wined3d_cl_dispatch_params *params = args;
     struct cl_kernel *kernel = (struct cl_kernel *)(ULONG_PTR)params->kernel;
     struct wined3d_cl_arg *cl_args = (struct wined3d_cl_arg *)(ULONG_PTR)params->args;
-    cl_mem acquire[128], mem;
-    size_t global[3], local[3];
-    unsigned int i, j, acquire_count = 0;
+    size_t host_size = 0, host_start = 0, host_pos = 0, host_offset = 0;
+    unsigned int i, j, object_args = 0;
+    struct cl_batch_dispatch *dispatch;
     struct cl_device_context *ctx;
     NTSTATUS status = STATUS_SUCCESS;
+    struct cl_batch_arg *value;
     cl_sampler sampler;
     cl_int err;
+    cl_mem mem;
 
     if (!kernel)
         return STATUS_INVALID_PARAMETER;
@@ -669,17 +946,28 @@ static NTSTATUS cl_dispatch(void *args)
         return STATUS_INVALID_PARAMETER;
     }
 
+    if (cl_stats < 0)
+        cl_stats = !!getenv("WINESKIN_CL_STATS");
+    cl_stat(CL_STAT_COUNT);
+
     /* Every OpenGL object must be registered before any argument is set. */
     for (i = 0; i < params->arg_count; ++i)
     {
         struct wined3d_cl_arg *arg = &cl_args[i];
 
         arg->status = 0;
-        if ((arg->type == WINED3D_CL_ARG_GL_BUFFER || arg->type == WINED3D_CL_ARG_GL_TEXTURE)
-                && !get_gl_mem(ctx, params->group, arg))
+        if (arg->type == WINED3D_CL_ARG_GL_BUFFER || arg->type == WINED3D_CL_ARG_GL_TEXTURE)
         {
-            arg->status = WINED3D_CL_UNREGISTERED;
-            status = STATUS_OBJECT_NAME_NOT_FOUND;
+            ++object_args;
+            if (!get_gl_mem(ctx, params->group, arg))
+            {
+                arg->status = WINED3D_CL_UNREGISTERED;
+                status = STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+        }
+        else if (arg->type == WINED3D_CL_ARG_HOST_DATA)
+        {
+            host_size += (arg->size + CL_HOST_ALIGN - 1) & ~(size_t)(CL_HOST_ALIGN - 1);
         }
     }
     if (status)
@@ -688,44 +976,110 @@ static NTSTATUS cl_dispatch(void *args)
         return status;
     }
 
+    /* Room in the batch, and for the copies in the segment of host_ring the
+     * batch's copies are in. */
+    if (ctx->batch_count && (ctx->batch_count == CL_BATCH_MAX_DISPATCHES
+            || ctx->batch_arg_count + params->arg_count > CL_BATCH_MAX_ARGS
+            || ctx->batch_object_count + object_args > CL_BATCH_MAX_OBJECTS
+            || (host_size && ctx->batch_host_end > ctx->batch_host_start && !host_fits(ctx, host_size))))
+        batch_flush(ctx);
+    if (params->arg_count > CL_BATCH_MAX_ARGS || object_args > CL_BATCH_MAX_OBJECTS)
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        ERR("Too many arguments (%u).\n", params->arg_count);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!ctx->batch && (!(ctx->batch = malloc(CL_BATCH_MAX_DISPATCHES * sizeof(*ctx->batch)))
+            || !(ctx->batch_args = malloc(CL_BATCH_MAX_ARGS * sizeof(*ctx->batch_args)))))
+    {
+        free(ctx->batch);
+        ctx->batch = NULL;
+        pthread_mutex_unlock(&cl_mutex);
+        return STATUS_NO_MEMORY;
+    }
+    if (host_size)
+    {
+        if (!host_reserve(ctx, host_size, &host_start))
+        {
+            pthread_mutex_unlock(&cl_mutex);
+            return STATUS_NO_MEMORY;
+        }
+        if (ctx->batch_host_end == ctx->batch_host_start)
+            ctx->batch_host_start = host_start;
+        ctx->batch_host_end = host_start + host_size;
+    }
+    host_pos = host_start;
+
     for (i = 0; i < params->arg_count; ++i)
     {
         struct wined3d_cl_arg *arg = &cl_args[i];
 
+        value = &ctx->batch_args[ctx->batch_arg_count + i];
+        value->size = sizeof(cl_mem);
         err = CL_SUCCESS;
         switch (arg->type)
         {
             case WINED3D_CL_ARG_VALUE:
-                err = clSetKernelArg(kernel->kernel, i, arg->size, arg->data);
+                if (arg->size > sizeof(value->data))
+                {
+                    err = CL_INVALID_ARG_SIZE;
+                    break;
+                }
+                value->size = arg->size;
+                memcpy(value->data, arg->data, arg->size);
+                if (i && cl_args[i - 1].type == WINED3D_CL_ARG_HOST_DATA && arg->size >= sizeof(UINT32))
+                {
+                    UINT32 offset;
+
+                    memcpy(&offset, arg->data, sizeof(offset));
+                    offset += host_offset;
+                    memcpy(value->data, &offset, sizeof(offset));
+                }
                 break;
+
+            case WINED3D_CL_ARG_HOST_DATA:
+            {
+                UINT64 ptr;
+
+                memcpy(&ptr, arg->data, sizeof(ptr));
+                memcpy(ctx->host_staging + host_pos, (const void *)(ULONG_PTR)ptr, arg->size);
+                host_offset = host_pos;
+                host_pos += (arg->size + CL_HOST_ALIGN - 1) & ~(size_t)(CL_HOST_ALIGN - 1);
+                memcpy(value->data, &ctx->host_ring, sizeof(cl_mem));
+                ++cl_stat_host;
+                break;
+            }
 
             case WINED3D_CL_ARG_GL_BUFFER:
             case WINED3D_CL_ARG_GL_TEXTURE:
                 mem = get_gl_mem(ctx, params->group, arg);
-                for (j = 0; j < acquire_count; ++j)
+                for (j = 0; j < ctx->batch_object_count; ++j)
                 {
-                    if (acquire[j] == mem)
+                    if (ctx->batch_objects[j] == mem)
                         break;
                 }
-                if (j == acquire_count && acquire_count < ARRAY_SIZE(acquire))
-                    acquire[acquire_count++] = mem;
-                err = clSetKernelArg(kernel->kernel, i, sizeof(mem), &mem);
+                if (j == ctx->batch_object_count)
+                    ctx->batch_objects[ctx->batch_object_count++] = mem;
+                memcpy(value->data, &mem, sizeof(mem));
+                if (arg->type == WINED3D_CL_ARG_GL_BUFFER)
+                    ++cl_stat_gl_buffers;
                 break;
 
             case WINED3D_CL_ARG_NULL_BUFFER:
-                err = clSetKernelArg(kernel->kernel, i, sizeof(ctx->null_buffer), &ctx->null_buffer);
+                memcpy(value->data, &ctx->null_buffer, sizeof(cl_mem));
                 break;
 
             case WINED3D_CL_ARG_NULL_IMAGE:
                 if (!(mem = get_null_image(ctx, arg->image_type, arg->channel, &err)))
                     break;
-                err = clSetKernelArg(kernel->kernel, i, sizeof(mem), &mem);
+                memcpy(value->data, &mem, sizeof(mem));
                 break;
 
             case WINED3D_CL_ARG_SAMPLER:
                 if (!(sampler = get_sampler(ctx, (const struct wined3d_cl_sampler_desc *)arg->data, &err)))
                     break;
-                err = clSetKernelArg(kernel->kernel, i, sizeof(sampler), &sampler);
+                value->size = sizeof(sampler);
+                memcpy(value->data, &sampler, sizeof(sampler));
                 break;
 
             default:
@@ -741,49 +1095,51 @@ static NTSTATUS cl_dispatch(void *args)
         }
     }
 
-    if (status)
+    if (!status)
     {
-        pthread_mutex_unlock(&cl_mutex);
-        return status;
+        dispatch = &ctx->batch[ctx->batch_count++];
+        dispatch->kernel = kernel;
+        dispatch->arg_start = ctx->batch_arg_count;
+        dispatch->arg_count = params->arg_count;
+        for (i = 0; i < 3; ++i)
+        {
+            dispatch->local[i] = params->group_size[i];
+            dispatch->global[i] = (size_t)params->group_count[i] * params->group_size[i];
+        }
+        ctx->batch_arg_count += params->arg_count;
     }
+    cl_stat(CL_STAT_ARGS);
 
-    for (i = 0; i < 3; ++i)
-    {
-        local[i] = params->group_size[i];
-        global[i] = (size_t)params->group_count[i] * params->group_size[i];
-    }
-
-    /* The kernel must run after the OpenGL commands issued so far, and
-     * OpenGL commands issued later must see its results; see implicit_sync. */
-    if (ctx->implicit_sync)
-        glFlush();
-    else
-        glFinish();
-    if (acquire_count && (err = clEnqueueAcquireGLObjects(ctx->queue, acquire_count, acquire, 0, NULL, NULL)))
-        ERR("Failed to acquire OpenGL objects, error %d.\n", err);
-    if ((err = clEnqueueNDRangeKernel(ctx->queue, kernel->kernel, 3, NULL, global, local, 0, NULL, NULL)))
-    {
-        ERR("Failed to enqueue the kernel (groups %ux%ux%u of %ux%ux%u), error %d.\n",
-                params->group_count[0], params->group_count[1], params->group_count[2],
-                params->group_size[0], params->group_size[1], params->group_size[2], err);
-        status = STATUS_UNSUCCESSFUL;
-    }
-    if (acquire_count && (err = clEnqueueReleaseGLObjects(ctx->queue, acquire_count, acquire, 0, NULL, NULL)))
-        ERR("Failed to release OpenGL objects, error %d.\n", err);
-
-    if (params->sync || !ctx->implicit_sync)
+    if (!params->batch || params->sync)
+        batch_flush(ctx);
+    if (params->sync && ctx->pending)
     {
         clFinish(ctx->queue);
         ctx->pending = FALSE;
     }
-    else
-    {
-        clFlush(ctx->queue);
-        ctx->pending = TRUE;
-    }
+    if (cl_stats)
+        cl_stats_dispatch_done();
 
     pthread_mutex_unlock(&cl_mutex);
     return status;
+}
+
+/* Enqueues the open batch of the current OpenGL context's share group. */
+static NTSTATUS cl_flush(void *args)
+{
+    CGLContextObj gl_context = CGLGetCurrentContext();
+    struct cl_device_context *ctx;
+
+    if (!gl_context)
+        return STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&cl_mutex);
+    for (ctx = cl_contexts; ctx; ctx = ctx->next)
+    {
+        if (ctx->share_group == CGLGetShareGroup(gl_context))
+            batch_flush(ctx);
+    }
+    pthread_mutex_unlock(&cl_mutex);
+    return STATUS_SUCCESS;
 }
 
 /* Waits for the kernels in flight; OpenGL may use their results afterwards. */
@@ -794,6 +1150,7 @@ static NTSTATUS cl_finish(void *args)
     pthread_mutex_lock(&cl_mutex);
     for (ctx = cl_contexts; ctx; ctx = ctx->next)
     {
+        batch_flush(ctx);
         if (ctx->pending)
         {
             clFinish(ctx->queue);
@@ -822,6 +1179,7 @@ static NTSTATUS cl_forget(void *args)
             {
                 TRACE("Releasing OpenCL memory %p for %s %u.\n", entry->mem,
                         params->type == WINED3D_CL_OBJECT_BUFFER ? "buffer" : "texture", params->name);
+                batch_flush(ctx);
                 if (ctx->pending)
                 {
                     clFinish(ctx->queue);
@@ -865,6 +1223,7 @@ static NTSTATUS cl_release_context(void *args)
         ctx->groups[i] = ctx->groups[--ctx->group_count];
 
         /* The group's OpenGL objects go with it: nothing may be in flight. */
+        batch_flush(ctx);
         clFinish(ctx->queue);
         ctx->pending = FALSE;
         for (i = 0; i < CL_MEM_HASH_SIZE; ++i)
@@ -917,6 +1276,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     [unix_cl_finish] = cl_finish,
     [unix_cl_release_context] = cl_release_context,
     [unix_cl_register] = cl_register,
+    [unix_cl_flush] = cl_flush,
 };
 
 /* The parameter structures hold no pointer-sized fields. */
@@ -934,6 +1294,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     [unix_cl_finish] = cl_finish,
     [unix_cl_release_context] = cl_release_context,
     [unix_cl_register] = cl_register,
+    [unix_cl_flush] = cl_flush,
 };
 
 #endif

@@ -1625,6 +1625,13 @@ struct wined3d_bo
      * contents (struct wined3d_gl_view.range_bo) is current while this is
      * the value it was made at. */
     uint32_t content_serial;
+    /* WINESKIN: OpenCL (cl_compute.c). cl_serial takes a new value, unique
+     * in the process, with every write from the CPU side, which may move the
+     * OpenGL buffer to a new data store. cl_mirror, when not NULL, is a copy
+     * of the contents in system memory, current while cl_mirror_serial
+     * equals cl_serial; a write by the GPU sets cl_mirror_serial to 0. */
+    uint32_t cl_serial, cl_mirror_serial;
+    void *cl_mirror;
 };
 
 struct wined3d_bo_user
@@ -3130,7 +3137,19 @@ struct wined3d_device
     UINT context_count;
 
     CRITICAL_SECTION bo_map_lock;
+
+    /* WINESKIN: the open batch of OpenCL dispatches, and the resources it
+     * uses through OpenGL objects (cl_compute.c). Accessed from the command
+     * stream thread. */
+    bool cl_batch;
+    unsigned int cl_batch_resource_count;
+    const struct wined3d_resource *cl_batch_resources[64];
 };
+
+/* WINESKIN: see struct wined3d_device. */
+void wined3d_cl_flush_batch(struct wined3d_device *device);
+void wined3d_cl_flush_batch_for_op(struct wined3d_device *device, unsigned int opcode);
+bool wined3d_cl_batch_uses_resource(const struct wined3d_device *device, const struct wined3d_resource *resource);
 
 void wined3d_device_cleanup(struct wined3d_device *device);
 BOOL device_context_add(struct wined3d_device *device, struct wined3d_context *context);

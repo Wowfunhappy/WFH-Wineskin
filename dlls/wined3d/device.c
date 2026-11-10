@@ -1457,6 +1457,9 @@ pooled: /* WINESKIN */
     bo->b.map_ptr = NULL;
     bo->b.client_map_count = 0;
     bo->b.refcount = 1;
+    bo->b.cl_serial = wined3d_cl_new_serial(); /* WINESKIN */
+    bo->b.cl_mirror_serial = 0; /* WINESKIN */
+    bo->b.cl_mirror = NULL; /* WINESKIN */
 
     return true;
 }

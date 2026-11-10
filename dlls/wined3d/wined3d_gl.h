@@ -1389,6 +1389,10 @@ GLuint wined3d_cl_get_shadow_name(const struct wined3d_device *device, GLuint so
         GLenum *target);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
 void wined3d_cl_release_device(struct wined3d_context_gl *context_gl);
+/* WINESKIN: see struct wined3d_bo. */
+uint32_t wined3d_cl_new_serial(void);
+void wined3d_cl_update_mirror(struct wined3d_bo *bo, size_t bo_size, uint32_t old_serial, size_t offset,
+        const void *data, unsigned int range_count, const struct wined3d_range *ranges, bool whole);
 
 /* WINESKIN: a frame capture for debugging (frame_dump_gl.c). */
 unsigned int wined3d_shader_byte_code_hash(const struct wined3d_shader *shader);

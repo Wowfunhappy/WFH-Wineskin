@@ -2902,7 +2902,10 @@ void *wined3d_context_gl_map_bo_address(struct wined3d_context_gl *context_gl,
         return data->addr;
 
     if (flags & WINED3D_MAP_WRITE) /* WINESKIN: see struct wined3d_bo */
+    {
         ++bo->content_serial;
+        bo->cl_serial = wined3d_cl_new_serial();
+    }
 
     if (!(map_ptr = wined3d_bo_gl_map(wined3d_bo_gl(bo), context_gl, flags)))
     {
@@ -2987,12 +2990,17 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
     struct wined3d_bo_gl *src_bo, *dst_bo;
     BYTE *dst_ptr, *src_ptr;
     unsigned int i;
+    uint32_t cl_serial = 0; /* WINESKIN */
 
     gl_info = context_gl->gl_info;
     src_bo = src->buffer_object ? wined3d_bo_gl(src->buffer_object) : NULL;
     dst_bo = dst->buffer_object ? wined3d_bo_gl(dst->buffer_object) : NULL;
     if (dst_bo) /* WINESKIN: see struct wined3d_bo */
+    {
         ++dst_bo->b.content_serial;
+        cl_serial = dst_bo->b.cl_serial;
+        dst_bo->b.cl_serial = wined3d_cl_new_serial();
+    }
 
     if (dst_bo && src_bo)
     {
@@ -3054,6 +3062,9 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
 
             wined3d_context_gl_reference_bo(context_gl, dst_bo);
         }
+        /* WINESKIN: see struct wined3d_bo. */
+        wined3d_cl_update_mirror(&dst_bo->b, dst_bo->size, cl_serial, (uintptr_t)dst->addr, src->addr,
+                range_count, ranges, (map_flags & WINED3D_MAP_DISCARD) && (dst_bo->flags & GL_MAP_WRITE_BIT));
     }
     else
     {
@@ -3103,6 +3114,9 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
     TRACE("context_gl %p, bo %p.\n", context_gl, bo);
 
     assert(list_empty(&bo->b.users));
+
+    free(bo->b.cl_mirror); /* WINESKIN: see struct wined3d_bo */
+    bo->b.cl_mirror = NULL; /* WINESKIN */
 
     if (bo->memory)
     {
@@ -4074,6 +4088,8 @@ static void context_gl_load_stream_output_buffers(struct wined3d_context_gl *con
 
         wined3d_buffer_load(buffer, &context_gl->c, state);
         wined3d_buffer_invalidate_location(buffer, ~WINED3D_LOCATION_BUFFER);
+        if (buffer->buffer_object) /* WINESKIN: the GPU writes it; see struct wined3d_bo */
+            buffer->buffer_object->cl_mirror_serial = 0;
         wined3d_context_gl_reference_buffer(context_gl, buffer);
         if (!buffer->bo_user.valid)
             device_invalidate_state(context_gl->c.device, STATE_STREAM_OUTPUT);

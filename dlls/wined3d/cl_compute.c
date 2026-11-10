@@ -114,6 +114,100 @@ void wined3d_cl_finish(void)
         WINE_UNIX_CALL(unix_cl_finish, NULL);
 }
 
+/* Dispatches go to the Unix side as a batch (wined3d_cl_dispatch_params.batch),
+ * enqueued when the command stream next has OpenGL touch an object the
+ * batch uses, or nothing to do: before any operation but setting state, a
+ * dispatch, or one on resources the batch does not use (cs.c), before a
+ * dispatch's own OpenGL work (copies of resources), and when the command
+ * stream waits. wined3d_device.cl_batch_resources are the resources the
+ * batch uses through OpenGL objects (constant buffers it copies are not
+ * among them); WINESKIN_CL_NOBATCH=1 enqueues each dispatch at once. */
+static int cl_batching = -1;
+static LONG cl_copy_backs;
+
+static void cl_copy_back_shadows(struct wined3d_context_gl *context_gl);
+
+void wined3d_cl_flush_batch(struct wined3d_device *device)
+{
+    struct wined3d_context *context;
+
+    if (!device->cl_batch)
+        return;
+    device->cl_batch = false;
+    device->cl_batch_resource_count = 0;
+    context = context_acquire(device, NULL, 0);
+    WINE_UNIX_CALL(unix_cl_flush, NULL);
+    cl_copy_back_shadows(wined3d_context_gl(context));
+    context_release(context);
+}
+
+/* An operation of the command stream (enum wined3d_cs_op in cs.c, or the
+ * stop operation when the stream waits), or a dispatch's own work
+ * (CL_FLUSH_FOR_*), is about to touch OpenGL objects. With WINESKIN_CL_STATS=1
+ * the reasons that end batches are counted. */
+#define CL_FLUSH_FOR_SHADOW 60
+#define CL_FLUSH_FOR_BUFFER 61
+#define CL_FLUSH_FOR_TEXTURE 62
+#define CL_FLUSH_FOR_INDIRECT 63
+
+void wined3d_cl_flush_batch_for_op(struct wined3d_device *device, unsigned int opcode)
+{
+    static unsigned int counts[64], total;
+    static int stats = -1;
+
+    if (stats < 0)
+        stats = !!getenv("WINESKIN_CL_STATS");
+    if (stats && device->cl_batch)
+    {
+        ++counts[min(opcode, ARRAY_SIZE(counts) - 1)];
+        if (++total == 2000)
+        {
+            char line[512];
+            unsigned int i, len = 0;
+
+            for (i = 0; i < ARRAY_SIZE(counts); ++i)
+            {
+                if (counts[i] && len < sizeof(line) - 16)
+                    len += snprintf(line + len, sizeof(line) - len, " op%u:%u", i, counts[i]);
+            }
+            MESSAGE("CLSTATS batches ended by operation (of 2000):%s\n", line);
+            memset(counts, 0, sizeof(counts));
+            total = 0;
+        }
+    }
+    wined3d_cl_flush_batch(device);
+}
+
+bool wined3d_cl_batch_uses_resource(const struct wined3d_device *device, const struct wined3d_resource *resource)
+{
+    unsigned int i;
+
+    if (device->cl_batch_resource_count > ARRAY_SIZE(device->cl_batch_resources))
+        return true;
+    for (i = 0; i < device->cl_batch_resource_count; ++i)
+    {
+        if (device->cl_batch_resources[i] == resource)
+            return true;
+    }
+    return false;
+}
+
+static void cl_batch_add_resource(struct wined3d_device *device, const struct wined3d_resource *resource)
+{
+    if (!resource || wined3d_cl_batch_uses_resource(device, resource))
+        return;
+    if (device->cl_batch_resource_count < ARRAY_SIZE(device->cl_batch_resources))
+        device->cl_batch_resources[device->cl_batch_resource_count] = resource;
+    ++device->cl_batch_resource_count;
+}
+
+static bool cl_batch_enabled(void)
+{
+    if (cl_batching < 0)
+        cl_batching = !getenv("WINESKIN_CL_NOBATCH");
+    return cl_batching && !wined3d_gl_frame_dump_active;
+}
+
 /* The element format of a typed buffer view (WINED3D_CL_FORMAT_*). */
 static uint32_t cl_buffer_format(const struct wined3d_format *format)
 {
@@ -247,6 +341,9 @@ struct cl_shadow
     uint32_t serial; /* the texture's content_serial the shadow is in step with */
     bool loaded;
     struct wined3d_device *device; /* whose names "source" and "name" are */
+    /* The texture a kernel of the open batch wrote the shadow for: the copy
+     * back is made when the batch is enqueued (cl_copy_back_shadows). */
+    struct wined3d_texture_gl *copy_back;
 };
 
 /* Each device's CS thread reaches its own shadows only; the lock keeps the
@@ -302,6 +399,9 @@ static struct cl_clear_kernels *cl_get_clear_kernels(struct wined3d_device *devi
 static void cl_shadow_destroy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+
+    if (shadow->copy_back)
+        wined3d_cl_flush_batch(shadow->device);
 
     wined3d_cl_forget_gl_object(true, shadow->name);
     gl_info->gl_ops.gl.p_glDeleteTextures(1, &shadow->name);
@@ -482,9 +582,67 @@ static bool cl_shadow_draw_layer(struct wined3d_context_gl *context_gl, struct c
             shadow->width, shadow->height, false);
 }
 
+static void cl_shadow_copy_gl(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow,
+        struct wined3d_texture_gl *texture_gl, bool to_shadow);
+
 /* Brings the shadow in step with the level of "texture_gl" it shadows
- * ("to_shadow"), or copies the shadow, which a kernel has written, back. */
+ * ("to_shadow"), or copies the shadow, which a kernel has written, back. The
+ * copy back of a dispatch in the open batch waits for the batch. */
 static void cl_shadow_copy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow,
+        struct wined3d_texture_gl *texture_gl, bool to_shadow)
+{
+    struct wined3d_device *device = context_gl->c.device;
+
+    if (to_shadow)
+    {
+        if (shadow->loaded && shadow->serial == texture_gl->t.content_serial)
+            return;
+        /* The copy draws to the shadow, which the open batch may use. */
+        if (wined3d_cl_batch_uses_resource(device, &texture_gl->t.resource))
+            wined3d_cl_flush_batch_for_op(device, CL_FLUSH_FOR_SHADOW);
+    }
+    else if (device->cl_batch)
+    {
+        /* The dispatch's writes have changed the texture's serial. */
+        shadow->serial = texture_gl->t.content_serial;
+        if (!shadow->copy_back)
+            InterlockedIncrement(&cl_copy_backs);
+        shadow->copy_back = texture_gl;
+        return;
+    }
+    cl_shadow_copy_gl(context_gl, shadow, texture_gl, to_shadow);
+}
+
+/* The copies back that waited for the batch just enqueued. */
+static void cl_copy_back_shadows(struct wined3d_context_gl *context_gl)
+{
+    struct cl_shadow *shadow;
+    bool copied = false;
+
+    if (!cl_copy_backs)
+        return;
+    EnterCriticalSection(&cl_shadows_cs);
+    LIST_FOR_EACH_ENTRY(shadow, &cl_shadows, struct cl_shadow, entry)
+    {
+        struct wined3d_texture_gl *texture_gl = shadow->copy_back;
+
+        if (shadow->device != context_gl->c.device || !texture_gl)
+            continue;
+        shadow->copy_back = NULL;
+        InterlockedDecrement(&cl_copy_backs);
+        cl_shadow_copy_gl(context_gl, shadow, texture_gl, false);
+        copied = true;
+    }
+    LeaveCriticalSection(&cl_shadows_cs);
+    if (copied)
+    {
+        context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+        context_gl->c.last_was_blit = FALSE;
+        context_gl->c.last_was_ffp_blit = FALSE;
+    }
+}
+
+static void cl_shadow_copy_gl(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow,
         struct wined3d_texture_gl *texture_gl, bool to_shadow)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
@@ -511,8 +669,8 @@ static void cl_shadow_copy(struct wined3d_context_gl *context_gl, struct cl_shad
     }
     else
     {
-        /* The dispatch's writes have changed the texture's serial. */
-        shadow->serial = texture_gl->t.content_serial;
+        if (!shadow->copy_back)
+            shadow->serial = texture_gl->t.content_serial;
 
         src = shadow->name;
         src_target = src_image_target = shadow->target;
@@ -806,7 +964,103 @@ static void cl_arg_gl_buffer(struct wined3d_cl_arg *arg, struct wined3d_bo_gl *b
     arg->type = WINED3D_CL_ARG_GL_BUFFER;
     arg->gl_name = bo_gl->id;
     /* See get_gl_mem() in cl.c. */
-    arg->level = bo_gl->b.content_serial;
+    arg->level = bo_gl->b.cl_serial;
+}
+
+static LONG cl_serial;
+
+uint32_t wined3d_cl_new_serial(void)
+{
+    uint32_t serial;
+
+    /* 0 is no buffer object's serial: see cl_cb_host_data(). */
+    while (!(serial = InterlockedIncrement(&cl_serial)));
+    return serial;
+}
+
+/* Constant buffers reach kernels as copies of their contents in system
+ * memory (WINED3D_CL_ARG_HOST_DATA) rather than as OpenGL buffers: games
+ * write a constant buffer before nearly every dispatch, each write may move
+ * the OpenGL buffer to a new data store, and an OpenCL memory object for the
+ * new store costs a search through all of the share group's buffers
+ * (Bit.Trip Rerunner has some 30000). A buffer object of at most this size
+ * gets a mirror of its contents (struct wined3d_bo) when a dispatch first
+ * uses it as a constant buffer; the mirror is current from the next write of
+ * the whole buffer from system memory on, and partial writes keep it so.
+ * Until then the dispatch uses the OpenGL buffer. */
+#define CL_MIRROR_MAX_SIZE 0x10000
+
+void wined3d_cl_update_mirror(struct wined3d_bo *bo, size_t bo_size, uint32_t old_serial, size_t offset,
+        const void *data, unsigned int range_count, const struct wined3d_range *ranges, bool whole)
+{
+    unsigned int i;
+
+    if (!bo->cl_mirror || offset > bo_size)
+        return;
+    if (!whole && range_count == 1 && !offset && !ranges[0].offset && ranges[0].size >= bo_size)
+        whole = true;
+    if (whole)
+    {
+        memcpy(bo->cl_mirror, (const BYTE *)data, bo_size - offset);
+        bo->cl_mirror_serial = offset ? 0 : bo->cl_serial;
+        return;
+    }
+    if (bo->cl_mirror_serial != old_serial || !old_serial)
+        return;
+    for (i = 0; i < range_count; ++i)
+    {
+        if (ranges[i].offset + ranges[i].size > bo_size - offset)
+        {
+            bo->cl_mirror_serial = 0;
+            return;
+        }
+        memcpy((BYTE *)bo->cl_mirror + offset + ranges[i].offset, (const BYTE *)data + ranges[i].offset,
+                ranges[i].size);
+    }
+    bo->cl_mirror_serial = bo->cl_serial;
+}
+
+/* The current contents of a buffer's buffer object in system memory, or NULL
+ * when the OpenGL buffer must serve. */
+static const BYTE *cl_buffer_mirror(const struct wined3d_buffer *buffer)
+{
+    struct wined3d_bo_gl *bo_gl;
+    struct wined3d_bo *bo;
+
+    if (!(bo = buffer->buffer_object))
+        return NULL;
+    bo_gl = wined3d_bo_gl(bo);
+    if (bo_gl->size > CL_MIRROR_MAX_SIZE)
+        return NULL;
+    if (!bo->cl_mirror)
+    {
+        if ((bo->cl_mirror = malloc(bo_gl->size)))
+            bo->cl_mirror_serial = 0;
+        return NULL;
+    }
+    if (bo->cl_mirror_serial != bo->cl_serial)
+        return NULL;
+    return bo->cl_mirror;
+}
+
+/* The current contents of constant buffer "slot" in system memory, and how
+ * many bytes of it a dispatch passes; NULL when the OpenGL buffer must serve. */
+static const void *cl_cb_host_data(const struct wined3d_state *state, const struct wined3d_shader_reg_maps *reg_maps,
+        unsigned int slot, uint32_t *size)
+{
+    const struct wined3d_constant_buffer_state *cb = &state->cb[WINED3D_SHADER_TYPE_COMPUTE][slot];
+    const BYTE *mirror;
+    size_t bo_size;
+
+    if (!cb->buffer || !(mirror = cl_buffer_mirror(cb->buffer)))
+        return NULL;
+    bo_size = wined3d_bo_gl(cb->buffer->buffer_object)->size;
+    if (cb->offset >= bo_size)
+        return NULL;
+    *size = min(bo_size - cb->offset, reg_maps->cb_sizes[slot] * 16);
+    if (cb->size)
+        *size = min(*size, cb->size);
+    return mirror + cb->offset;
 }
 
 static void cl_arg_value(struct wined3d_cl_arg *arg, const void *data, unsigned int size)
@@ -823,6 +1077,7 @@ static bool cl_read_indirect_args(struct wined3d_context_gl *context_gl, const s
     struct wined3d_buffer *buffer = indirect->buffer;
     struct wined3d_bo_gl *bo_gl;
 
+    wined3d_cl_flush_batch_for_op(context_gl->c.device, CL_FLUSH_FOR_INDIRECT);
     wined3d_cl_finish();
     wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
     if (!buffer->buffer_object)
@@ -837,6 +1092,31 @@ static bool cl_read_indirect_args(struct wined3d_context_gl *context_gl, const s
     wined3d_context_gl_bind_bo(context_gl, bo_gl->binding, 0);
     checkGLcall("read indirect dispatch arguments");
     return true;
+}
+
+/* The open batch is enqueued before OpenGL loads a buffer or texture for a
+ * dispatch: the batch may use it. */
+static void cl_flush_for_buffer(struct wined3d_context_gl *context_gl, const struct wined3d_buffer *buffer, bool write)
+{
+    if (!(buffer->locations & WINED3D_LOCATION_BUFFER)
+            || (write && buffer->buffer_object && buffer->buffer_object->refcount > 1))
+        wined3d_cl_flush_batch_for_op(context_gl->c.device, CL_FLUSH_FOR_BUFFER);
+}
+
+static void cl_flush_for_texture(struct wined3d_context_gl *context_gl, const struct wined3d_texture *texture)
+{
+    unsigned int i, count = texture->level_count * texture->layer_count;
+
+    if (texture->flags & WINED3D_TEXTURE_RGB_VALID)
+        return;
+    for (i = 0; i < count; ++i)
+    {
+        if (!(texture->sub_resources[i].locations & WINED3D_LOCATION_TEXTURE_RGB))
+        {
+            wined3d_cl_flush_batch_for_op(context_gl->c.device, CL_FLUSH_FOR_TEXTURE);
+            return;
+        }
+    }
 }
 
 bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
@@ -859,6 +1139,8 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     if (!wined3d_cl_available(context_gl))
         return false;
     cl_used = true;
+    if (wined3d_gl_frame_dump_active)
+        wined3d_cl_flush_batch(context_gl->c.device);
 
     reg_maps = &shader->reg_maps;
     group_size = &shader->u.cs.thread_group_size;
@@ -888,6 +1170,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     {
         if (reg_maps->cb_sizes[i] && (buffer = state->cb[WINED3D_SHADER_TYPE_COMPUTE][i].buffer))
         {
+            cl_flush_for_buffer(context_gl, buffer, false);
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_context_gl_reference_buffer(context_gl, buffer);
         }
@@ -901,12 +1184,14 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
         if (view->resource->type == WINED3D_RTYPE_BUFFER)
         {
             buffer = buffer_from_resource(view->resource);
+            cl_flush_for_buffer(context_gl, buffer, false);
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_context_gl_reference_buffer(context_gl, buffer);
             key.srv[i] = cl_buffer_key(&reg_maps->resource_info[i], &view->desc, view->format);
         }
         else
         {
+            cl_flush_for_texture(context_gl, texture_from_resource(view->resource));
             wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, FALSE);
             if (cl_get_texture_view(context_gl, view->resource, &view->desc, false, &srv_images[i]))
             {
@@ -925,6 +1210,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
         if (view->resource->type == WINED3D_RTYPE_BUFFER)
         {
             buffer = buffer_from_resource(view->resource);
+            cl_flush_for_buffer(context_gl, buffer, true);
             wined3d_buffer_acquire_bo_for_write(buffer, &context_gl->c);
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_BUFFER);
@@ -933,6 +1219,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
         }
         else
         {
+            cl_flush_for_texture(context_gl, texture_from_resource(view->resource));
             wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, FALSE);
             if (cl_get_texture_view(context_gl, view->resource, &view->desc, true, &uav_images[i]))
             {
@@ -973,8 +1260,16 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
             case WINED3D_CL_BINDING_CB:
             {
                 const struct wined3d_constant_buffer_state *cb = &state->cb[WINED3D_SHADER_TYPE_COMPUTE][slot];
+                const void *data;
+                UINT64 ptr;
 
-                if (cb->buffer && cb->buffer->buffer_object)
+                if ((data = cl_cb_host_data(state, reg_maps, slot, &arg->size)))
+                {
+                    arg->type = WINED3D_CL_ARG_HOST_DATA;
+                    ptr = (ULONG_PTR)data;
+                    memcpy(arg->data, &ptr, sizeof(ptr));
+                }
+                else if (cb->buffer && cb->buffer->buffer_object)
                     cl_arg_gl_buffer(arg, wined3d_bo_gl(cb->buffer->buffer_object));
                 else
                     arg->type = WINED3D_CL_ARG_NULL_BUFFER;
@@ -986,7 +1281,10 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
                 const struct wined3d_constant_buffer_state *cb = &state->cb[WINED3D_SHADER_TYPE_COMPUTE][slot];
                 uint32_t offset = 0;
 
-                if (cb->buffer && cb->buffer->buffer_object)
+                /* The constant buffer is the argument before; see WINED3D_CL_ARG_HOST_DATA. */
+                if (i && args[i - 1].type == WINED3D_CL_ARG_HOST_DATA)
+                    offset = 0;
+                else if (cb->buffer && cb->buffer->buffer_object)
                     offset = cb->buffer->buffer_object->buffer_offset + cb->offset;
                 cl_arg_value(arg, &offset, sizeof(offset));
                 break;
@@ -1004,11 +1302,32 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
                     if (view && view->resource->type == WINED3D_RTYPE_BUFFER
                             && (buffer = buffer_from_resource(view->resource))->buffer_object)
                     {
+                        const BYTE *mirror = cl_buffer_mirror(buffer);
+                        UINT64 ptr;
+
                         cl_buffer_view_info(buffer, &view->desc, view->format, data);
-                        if (info)
+                        /* A buffer of at most 64 KiB written from the CPU goes as a
+                         * copy of the view's range, like a constant buffer. */
+                        if (info && i && args[i - 1].type == WINED3D_CL_ARG_HOST_DATA)
+                        {
+                            data[0] = 0;
                             cl_arg_value(arg, data, sizeof(data));
+                        }
+                        else if (info)
+                        {
+                            cl_arg_value(arg, data, sizeof(data));
+                        }
+                        else if (mirror && data[1])
+                        {
+                            arg->type = WINED3D_CL_ARG_HOST_DATA;
+                            arg->size = data[1];
+                            ptr = (ULONG_PTR)(mirror + data[0] - buffer->buffer_object->buffer_offset);
+                            memcpy(arg->data, &ptr, sizeof(ptr));
+                        }
                         else
+                        {
                             cl_arg_gl_buffer(arg, wined3d_bo_gl(buffer->buffer_object));
+                        }
                     }
                     else if (info)
                         cl_arg_value(arg, data, sizeof(data));
@@ -1149,6 +1468,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     params.group_size[1] = group_size->y;
     params.group_size[2] = group_size->z;
     params.sync = 0;
+    params.batch = cl_batch_enabled();
     if ((status = cl_run_kernel(context_gl, &params)))
     {
         for (i = 0; i < kernel->binding_count; ++i)
@@ -1159,6 +1479,33 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
                         kernel->bindings[i].slot, args[i].gl_name, args[i].gl_target, (int)args[i].status);
         }
         ERR("Compute shader %p: dispatch failed, status %#lx.\n", shader, status);
+    }
+    else if (params.batch)
+    {
+        struct wined3d_device *device = context_gl->c.device;
+
+        device->cl_batch = true;
+        /* The resources it uses through OpenGL objects; copies are not among them. */
+        for (i = 0; i < kernel->binding_count; ++i)
+        {
+            const struct wined3d_cl_binding *binding = &kernel->bindings[i];
+
+            if (args[i].type != WINED3D_CL_ARG_GL_BUFFER && args[i].type != WINED3D_CL_ARG_GL_TEXTURE)
+                continue;
+            switch (binding->type)
+            {
+                case WINED3D_CL_BINDING_CB:
+                    cl_batch_add_resource(device, &state->cb[WINED3D_SHADER_TYPE_COMPUTE][binding->slot].buffer->resource);
+                    break;
+                case WINED3D_CL_BINDING_SRV:
+                    cl_batch_add_resource(device,
+                            state->shader_resource_view[WINED3D_SHADER_TYPE_COMPUTE][binding->slot]->resource);
+                    break;
+                default:
+                    cl_batch_add_resource(device, uavs[binding->slot]->resource);
+                    break;
+            }
+        }
     }
     free(args);
 
@@ -1241,7 +1588,7 @@ static uint32_t cl_round_normalised(uint32_t v, unsigned int bits, unsigned int 
     return r.u;
 }
 
-bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
+static bool cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
         struct wined3d_context_gl *context_gl, bool fp)
 {
     struct cl_clear_kernels *clear;
@@ -1271,6 +1618,7 @@ bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, cons
     {
         struct wined3d_buffer *buffer = buffer_from_resource(resource);
 
+        cl_flush_for_buffer(context_gl, buffer, true);
         wined3d_buffer_acquire_bo_for_write(buffer, &context_gl->c);
         wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
         wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_BUFFER);
@@ -1298,6 +1646,7 @@ bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, cons
         struct cl_texture_view image;
         unsigned int dim;
 
+        cl_flush_for_texture(context_gl, texture_from_resource(resource));
         wined3d_texture_load(texture_from_resource(resource), &context_gl->c, FALSE);
         if (!cl_get_texture_view(context_gl, resource, &view->desc, true, &image))
             return false;
@@ -1371,9 +1720,25 @@ bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, cons
             return true;
     }
     params.sync = 0;
+    params.batch = cl_batch_enabled();
     if ((status = cl_run_kernel(context_gl, &params)))
         ERR("Failed to clear unordered access view %p, status %#lx.\n", view, status);
+    else if (params.batch)
+    {
+        context_gl->c.device->cl_batch = true;
+        cl_batch_add_resource(context_gl->c.device, resource);
+    }
     if (shadow)
         cl_shadow_copy(context_gl, shadow, wined3d_texture_gl(texture_from_resource(resource)), false);
     return true;
+}
+
+bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
+        struct wined3d_context_gl *context_gl, bool fp)
+{
+    if (cl_clear_uav(view_gl, clear_value, context_gl, fp))
+        return true;
+    /* OpenGL clears the view instead. */
+    wined3d_cl_flush_batch(context_gl->c.device);
+    return false;
 }

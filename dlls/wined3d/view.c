@@ -1836,6 +1836,9 @@ void * CDECL wined3d_unordered_access_view_get_parent(const struct wined3d_unord
 void wined3d_unordered_access_view_invalidate_location(struct wined3d_unordered_access_view *view,
         uint32_t location)
 {
+    /* WINESKIN: the GPU writes the buffer object; see struct wined3d_bo. */
+    if (view->resource->type == WINED3D_RTYPE_BUFFER && buffer_from_resource(view->resource)->buffer_object)
+        buffer_from_resource(view->resource)->buffer_object->cl_mirror_serial = 0;
     wined3d_view_invalidate_location(view->resource, &view->desc, location);
 }
 

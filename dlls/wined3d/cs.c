@@ -3114,6 +3114,121 @@ static void wined3d_cs_reference_resource(struct wined3d_device_context *context
 
 static void wined3d_cs_exec_execute_command_list(struct wined3d_cs *cs, const void *data);
 
+/* WINESKIN: OpenGL must not touch the objects of an open batch of OpenCL
+ * dispatches (struct wined3d_device.cl_batch). Operations that set state,
+ * dispatch, issue a query, or clear, copy, write or map resources the batch
+ * does not use leave the batch open; the others enqueue it first. */
+static void wined3d_cs_cl_before_op(struct wined3d_cs *cs, const void *data)
+{
+    enum wined3d_cs_op opcode = *(const enum wined3d_cs_op *)data;
+    struct wined3d_device *device = cs->c.device;
+
+    switch (opcode)
+    {
+        case WINED3D_CS_OP_NOP:
+        case WINED3D_CS_OP_DISPATCH:
+        case WINED3D_CS_OP_CLEAR_UNORDERED_ACCESS_VIEW:
+        case WINED3D_CS_OP_SET_PREDICATION:
+        case WINED3D_CS_OP_SET_VIEWPORTS:
+        case WINED3D_CS_OP_SET_SCISSOR_RECTS:
+        case WINED3D_CS_OP_SET_RENDERTARGET_VIEWS:
+        case WINED3D_CS_OP_SET_DEPTH_STENCIL_VIEW:
+        case WINED3D_CS_OP_SET_VERTEX_DECLARATION:
+        case WINED3D_CS_OP_SET_STREAM_SOURCES:
+        case WINED3D_CS_OP_SET_STREAM_OUTPUTS:
+        case WINED3D_CS_OP_SET_INDEX_BUFFER:
+        case WINED3D_CS_OP_SET_CONSTANT_BUFFERS:
+        case WINED3D_CS_OP_SET_TEXTURE:
+        case WINED3D_CS_OP_SET_SHADER_RESOURCE_VIEWS:
+        case WINED3D_CS_OP_SET_SAMPLERS:
+        case WINED3D_CS_OP_SET_SHADER:
+        case WINED3D_CS_OP_SET_BLEND_STATE:
+        case WINED3D_CS_OP_SET_DEPTH_STENCIL_STATE:
+        case WINED3D_CS_OP_SET_RASTERIZER_STATE:
+        case WINED3D_CS_OP_SET_DEPTH_BOUNDS:
+        case WINED3D_CS_OP_SET_RENDER_STATE:
+        case WINED3D_CS_OP_SET_TEXTURE_STATE:
+            return;
+
+        case WINED3D_CS_OP_QUERY_ISSUE:
+            return;
+
+        case WINED3D_CS_OP_SET_UNORDERED_ACCESS_VIEWS:
+        {
+            const struct wined3d_cs_set_unordered_access_views *op = data;
+            unsigned int i;
+
+            /* Setting a counter writes it. */
+            for (i = 0; i < op->count; ++i)
+            {
+                if (op->uavs[i].view && op->uavs[i].initial_count != ~0u
+                        && wined3d_cl_batch_uses_resource(device, op->uavs[i].view->resource))
+                    break;
+            }
+            if (i == op->count)
+                return;
+            break;
+        }
+
+        case WINED3D_CS_OP_UPDATE_SUB_RESOURCE:
+        {
+            const struct wined3d_cs_update_sub_resource *op = data;
+
+            if (!wined3d_cl_batch_uses_resource(device, op->resource))
+                return;
+            break;
+        }
+
+        case WINED3D_CS_OP_MAP:
+        {
+            const struct wined3d_cs_map *op = data;
+
+            if (!wined3d_cl_batch_uses_resource(device, op->resource))
+                return;
+            break;
+        }
+
+        case WINED3D_CS_OP_UNMAP:
+        {
+            const struct wined3d_cs_unmap *op = data;
+
+            if (!wined3d_cl_batch_uses_resource(device, op->resource))
+                return;
+            break;
+        }
+
+        case WINED3D_CS_OP_BLT_SUB_RESOURCE:
+        {
+            const struct wined3d_cs_blt_sub_resource *op = data;
+
+            if (!wined3d_cl_batch_uses_resource(device, op->dst_resource)
+                    && (!op->src_resource || !wined3d_cl_batch_uses_resource(device, op->src_resource)))
+                return;
+            break;
+        }
+
+        case WINED3D_CS_OP_CLEAR:
+        {
+            const struct wined3d_cs_clear *op = data;
+            unsigned int i;
+
+            for (i = 0; i < op->rt_count; ++i)
+            {
+                if (op->fb.render_targets[i] && wined3d_cl_batch_uses_resource(device, op->fb.render_targets[i]->resource))
+                    break;
+            }
+            if (i == op->rt_count && (!op->fb.depth_stencil
+                    || !wined3d_cl_batch_uses_resource(device, op->fb.depth_stencil->resource)))
+                return;
+            break;
+        }
+
+        default:
+            break;
+    }
+    wined3d_cl_flush_batch_for_op(device, opcode);
+}
+
 static void (* const wined3d_cs_op_handlers[])(struct wined3d_cs *cs, const void *data) =
 {
     /* WINED3D_CS_OP_NOP                         */ wined3d_cs_exec_nop,
@@ -3232,7 +3347,11 @@ static void wined3d_cs_st_submit(struct wined3d_device_context *context, enum wi
     if (opcode >= WINED3D_CS_OP_STOP)
         ERR("Invalid opcode %#x.\n", opcode);
     else
+    {
+        if (cs->c.device->cl_batch) /* WINESKIN */
+            wined3d_cs_cl_before_op(cs, &data[start]);
         wined3d_cs_op_handlers[opcode](cs, &data[start]);
+    }
 
     if (cs->data == data)
         cs->start = cs->end = start;
@@ -3626,6 +3745,8 @@ static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d
         }
 
         wined3d_cs_command_lock(cs);
+        if (cs->c.device->cl_batch) /* WINESKIN */
+            wined3d_cs_cl_before_op(cs, packet->data);
         wined3d_cs_op_handlers[opcode](cs, packet->data);
         wined3d_cs_command_unlock(cs);
         TRACE("%s executed.\n", debug_cs_packet(packet));
@@ -3659,7 +3780,11 @@ static void wined3d_cs_exec_execute_command_list(struct wined3d_cs *cs, const vo
         if (opcode >= WINED3D_CS_OP_STOP)
             ERR("Invalid opcode %#x.\n", opcode);
         else
+        {
+            if (cs->c.device->cl_batch) /* WINESKIN */
+                wined3d_cs_cl_before_op(cs, packet->data);
             wined3d_cs_op_handlers[opcode](cs, packet->data);
+        }
         TRACE("%s executed.\n", debug_cs_op(opcode));
     }
 }
@@ -3698,6 +3823,12 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
             queue = &cs->queue[WINED3D_CS_QUEUE_DEFAULT];
             if (wined3d_cs_queue_is_empty(cs, queue))
             {
+                if (cs->c.device->cl_batch) /* WINESKIN: nothing more to add to the batch for now */
+                {
+                    wined3d_cs_command_lock(cs);
+                    wined3d_cl_flush_batch_for_op(cs->c.device, WINED3D_CS_OP_STOP);
+                    wined3d_cs_command_unlock(cs);
+                }
                 YieldProcessor();
                 if (++spin_count >= WINED3D_CS_SPIN_COUNT)
                 {

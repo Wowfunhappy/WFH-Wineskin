@@ -237,8 +237,8 @@ in place.
   `int4` of 1s and 0s, `mix()` with a boolean selects, and so on). Resources, thread group shared memory
   (`__local` arrays), atomics, UAV counters and barriers have handlers of their own. A kernel is generated
   per combination of OpenCL image kinds bound to the shader's texture views.
-- Kernel arguments: constant buffers and buffer views are OpenGL buffers with a byte offset (typed buffer
-  views decode their format in the kernel); texture views are images of the view's first level, with
+- Kernel arguments: constant buffers and buffer views are OpenGL buffers, or copies of them (below), with
+  a byte offset (typed buffer views decode their format in the kernel); texture views are images of the view's first level, with
   out-of-bounds reads returning 0 and writes dropped; samplers take the view's address mode and filter.
   A texture UAV the shader reads is bound twice, as a write-only and a read-only image.
 - Wine's opengl32 gives each group of contexts that share objects (a wined3d device) object names of its
@@ -268,12 +268,35 @@ in place.
 - OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
   view's first level only; cube textures are read one face at a time; subroutines (`call`) don't
   translate, and the shader's dispatches then do nothing.
-- The driver gives an OpenGL buffer a new data store when the buffer is written while commands that use
-  it are queued, and a memory object made with `clCreateFromGLBuffer` keeps reading the old store. Unreal
-  Engine rewrites one constant buffer before every dispatch, so its kernels would run with the constants
-  of an earlier dispatch (its temporal upscaler then draws 2x2 blocks). A dispatch passes each buffer
-  object's write count (`wined3d_bo.content_serial`), and `cl.c` makes the memory object of a buffer
-  written since again (`get_gl_mem`).
+- The driver gives an OpenGL buffer a new data store when the buffer is written from the CPU while
+  commands that use it are queued, and a memory object made with `clCreateFromGLBuffer` keeps reading the
+  old store. A dispatch passes the serial of each buffer object's last write from the CPU side
+  (`wined3d_bo.cl_serial`, unique in the process), and `cl.c` makes the memory object of a buffer written
+  since again (`get_gl_mem`); writes by the GPU, kernels' included, keep the store. Making a memory object
+  costs a search through all of the share group's buffers, about 0.2 ms with Bit.Trip Rerunner's 30000.
+- Constant buffers, and buffer views of buffers the CPU writes, reach kernels as copies, not as OpenGL
+  buffers: Unreal Engine rewrites a constant buffer before nearly every dispatch, and dynamic buffers of
+  64 KiB every frame. A buffer object of at most 64 KiB that a dispatch reads gets a mirror of its contents
+  in system memory (`wined3d_bo.cl_mirror`), which `wined3d_context_gl_copy_bo_address` keeps current
+  from the next write of the whole buffer on, and which a write by the GPU (an unordered access view,
+  stream output) makes stale; the dispatch passes the mirror (`WINED3D_CL_ARG_HOST_DATA`) and `cl.c`
+  copies it into a ring of host memory and writes that to a ring buffer OpenCL owns. A copy's memory stays untouched until a marker enqueued
+  after its write has completed: a non-blocking `clEnqueueWriteBuffer` reads its source late, and from
+  memory that changes meanwhile it gives wrong data in about one dispatch in twenty
+  (`~/WineskinTests/d3d11tools/probe/clwrite.c`). Constants as a by-value kernel argument are a hundred
+  times slower on the GPU (`clbyval2.c`).
+- Every command buffer the driver submits (a `glFlush`, an OpenCL write, an acquire or release of OpenGL
+  objects) walks the objects in flight, which in a frame of Rerunner costs 0.1-0.2 ms. Dispatches
+  therefore go to `cl.c` as a batch (`wined3d_cl_dispatch_params.batch`): their copies, arguments and
+  OpenGL objects are recorded, and one write, one `glFlush`, one acquire and one release serve the whole
+  batch when it is enqueued (`unix_cl_flush`). OpenGL must not touch an object of an open batch, so the
+  command stream enqueues it before any operation but those that set state, dispatch, issue a query, or
+  clear, copy, write or map resources the batch does not use (`wined3d_cs_cl_before_op` in `cs.c`, with
+  the resources in `wined3d_device.cl_batch_resources`); a dispatch enqueues it before loading a resource
+  through OpenGL or copying a texture the batch uses to its shadow, and the command stream thread before
+  it waits for work. The copy of a shadow a batched kernel wrote back to its texture is made when the
+  batch is enqueued (`cl_copy_back_shadows`); until then the texture is among the batch's resources.
+  `WINESKIN_CL_NOBATCH=1` enqueues each dispatch on its own.
 - NVIDIA's OpenCL on 10.9 has one coordinate mode per image in a kernel: once a kernel samples an image
   with normalised coordinates, a load from that image with integer coordinates, or without a sampler,
   returns texel (0, 0) at (0, 0) and zero elsewhere. Loads from resource views therefore address texel
@@ -292,7 +315,9 @@ in place.
   dispatches with shaders, bound textures, samples passed, OpenGL state and errors, and each pass's render
   targets, each dispatch's unordered access views, shadow textures and buffers are written as images and
   files (`frame_dump_gl.c`). `~/WineskinTests/d3d11tools/probe/clrun.c` runs a dumped kernel natively with
-  those files as inputs, and `clbuild.c` times a kernel's build.
+  those files as inputs, and `clbuild.c` times a kernel's build. `WINESKIN_CL_STATS=1` prints the time
+  each part of a dispatch takes, the batches, memory objects made again, and the operations that end
+  batches.
 - `HKCU\Software\Wine\Direct3D\OpenCLCompute` = `n` (or `WINE_D3D_CONFIG=OpenCLCompute=n`) turns it off;
   dispatches then do nothing. `WINEDEBUG=+d3d_cl` logs each kernel's source and build log.
 
