@@ -1121,6 +1121,18 @@ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
     close( data->wait_fd[1] );
     close( data->reply_fd );
     close( data->request_fd );
+
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* WINESKIN: from marzent/winecx 0a3e723e47 (signal_x86_64.c wineskin_init_teb_slots). The PEB and
+     * the TLS pointer sit in the TSD slots of libc's localtime and ttyname keys, whose destructor,
+     * once libc has registered the key, is free(). */
+    if (!wineskin_gsbase_switch)
+    {
+        __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (NULL), "n" (FIELD_OFFSET(TEB, Peb)));
+        __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (NULL), "n" (FIELD_OFFSET(TEB, ThreadLocalStoragePointer)));
+    }
+#endif
+
     pthread_exit( UIntToPtr(status) );
 }
 

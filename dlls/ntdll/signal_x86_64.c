@@ -499,7 +499,10 @@ __ASM_GLOBAL_FUNC( KiUserCallbackDispatcher,
                    "movl 0x28(%rsp),%edx\n\t"  /* len */
                    "movl 0x2c(%rsp),%r8d\n\t"  /* id */
 #ifdef __WINE_PE_BUILD
-                   "movq %gs:0x60,%rax\n\t"     /* peb */
+                   /* WINESKIN: the PEB through the TEB (unix/signal_x86_64.c wineskin_init_teb_slots) */
+                   /* "movq %gs:0x60,%rax\n\t" */     /* peb */
+                   "movq %gs:0x30,%rax\n\t"     /* NtCurrentTeb() */
+                   "movq 0x60(%rax),%rax\n\t"   /* peb */
                    "movq 0x58(%rax),%rax\n\t"   /* peb->KernelCallbackTable */
                    "call *(%rax,%r8,8)\n\t"     /* KernelCallbackTable[id] */
                    ".seh_handler " __ASM_NAME("user_callback_handler") ", @except\n\t"
@@ -909,7 +912,10 @@ __ASM_GLOBAL_FUNC( RtlRaiseException,
                    "movq %rax,0xf8(%rdx)\n\t"   /* context->Rip */
                    "movq %rax,0x10(%rcx)\n\t"   /* rec->ExceptionAddress */
                    "movl $1,%r8d\n\t"
-                   "movq %gs:0x60,%rax\n\t"     /* Peb */
+                   /* WINESKIN: the PEB through the TEB (unix/signal_x86_64.c wineskin_init_teb_slots) */
+                   /* "movq %gs:0x60,%rax\n\t" */     /* Peb */
+                   "movq %gs:0x30,%rax\n\t"   /* Teb */
+                   "movq 0x60(%rax),%rax\n\t"   /* Peb */
                    "cmpb $0,0x02(%rax)\n\t"     /* BeingDebugged */
                    "jne 1f\n\t"
                    "call " __ASM_NAME("dispatch_exception") "\n"
@@ -1153,7 +1159,10 @@ __ASM_GLOBAL_FUNC( DbgUiRemoteBreakin,
                    ".seh_stackalloc 0x28\n\t"
                    ".seh_endprologue\n\t"
                    ".seh_handler DbgUiRemoteBreakin_handler, @except\n\t"
-                   "mov %gs:0x60,%rax\n\t"
+                   /* WINESKIN: the PEB through the TEB (unix/signal_x86_64.c wineskin_init_teb_slots) */
+                   /* "mov %gs:0x60,%rax\n\t" */
+                   "mov %gs:0x30,%rax\n\t"
+                   "mov 0x60(%rax),%rax\n\t"
                    "cmpb $0,2(%rax)\n\t"
                    "je 1f\n\t"
                    "call " __ASM_NAME("DbgBreakPoint") "\n"

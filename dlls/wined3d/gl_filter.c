@@ -2,8 +2,9 @@
  * WINESKIN: redundant OpenGL state call filter.
  *
  * Every OpenGL call wined3d makes crosses from Windows code to the Unix
- * library, and on 64-bit macOS each crossing switches the %gs base twice
- * through the kernel, about 0.3 microseconds a call. wined3d applies Direct3D
+ * library, 0.15 to 0.2 microseconds a call in a 64-bit process before OpenGL
+ * does anything (0.5 where the %gs base is switched, see
+ * wineskin_init_teb_slots in ntdll's unix/signal_x86_64.c). wined3d applies Direct3D
  * state an object at a time, so a game that sets the same state for every draw
  * makes it reissue the same OpenGL calls: binding the uniform buffers,
  * textures and samplers that are bound already, disabling what is disabled.

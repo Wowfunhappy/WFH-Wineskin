@@ -1825,6 +1825,71 @@ static ULONG_PTR get_image_address(void)
     return 0;
 }
 
+#if defined(__APPLE__) && defined(__x86_64__)
+/* WINESKIN: support for Windows code on the pthread %gs base (signal_x86_64.c
+ * wineskin_init_teb_slots), after marzent/winecx 0a3e723e47. */
+static __thread struct tm wineskin_localtime_buffer;
+static __thread char wineskin_ttyname_buffer[128];
+
+static struct tm *wineskin_localtime( const time_t *timep )
+{
+    return localtime_r( timep, &wineskin_localtime_buffer );
+}
+
+static char *wineskin_ttyname( int fd )
+{
+    if ((errno = ttyname_r( fd, wineskin_ttyname_buffer, sizeof(wineskin_ttyname_buffer) ))) return NULL;
+    return wineskin_ttyname_buffer;
+}
+
+/* make a libc function jump to a replacement: jmp *0x2(%rip), two filler bytes, the address */
+static void wineskin_replace_function( void *func, const void *replacement )
+{
+    struct { unsigned char jmp[8]; const void *dst; } code = { { 0xff, 0x25, 0x02, 0, 0, 0, 0xcc, 0xcc }, replacement };
+    vm_address_t page = (vm_address_t)func & ~(vm_address_t)0xfff;
+    vm_size_t size = (vm_address_t)func + sizeof(code) - page;
+
+    if (vm_protect( mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY ))
+    {
+        ERR( "can't write to %p\n", func );
+        return;
+    }
+    memcpy( func, &code, sizeof(code) );
+    vm_protect( mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE );
+}
+
+/* own the pthread key whose TSD slot is %gs:0x1780, so that no library is given it */
+static void wineskin_reserve_tsd_slot( unsigned int slot )
+{
+    pthread_key_t keys[1024], key;
+    unsigned int count = 0;
+    BOOL found = FALSE;
+
+    while (count < ARRAY_SIZE(keys) && !pthread_key_create( &key, NULL ))
+    {
+        if (key == slot) { found = TRUE; break; }
+        keys[count++] = key;
+        if (key > slot) break;
+    }
+    while (count) pthread_key_delete( keys[--count] );
+    if (!found) ERR( "pthread key %u is taken\n", slot );
+}
+
+static void wineskin_init_gsbase(void)
+{
+    const char *env = getenv( "WINESKIN_GSBASE_SWITCH" );
+
+    if (env && atoi( env ))
+    {
+        wineskin_gsbase_switch = 1;
+        return;
+    }
+    wineskin_replace_function( localtime, wineskin_localtime );
+    wineskin_replace_function( ttyname, wineskin_ttyname );
+    wineskin_reserve_tsd_slot( FIELD_OFFSET( TEB, TlsExpansionSlots ) / sizeof(void *) );
+}
+#endif
+
 /***********************************************************************
  *           start_main_thread
  */
@@ -1846,6 +1911,9 @@ static void start_main_thread(void)
     load_ntdll();
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
+#if defined(__APPLE__) && defined(__x86_64__)
+    wineskin_init_gsbase();  /* WINESKIN */
+#endif
     server_init_process_done();
 }
 

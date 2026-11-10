@@ -73,6 +73,8 @@
  * Note that the dispatchers do the syscall directly to avoid using the stack.
  */
 extern void _thread_set_tsd_base(uint64_t);
+/* WINESKIN: see wineskin_init_teb_slots() */
+int wineskin_gsbase_switch = 0;
 #endif
 
 #include "ntstatus.h"
@@ -783,6 +785,7 @@ static inline void leave_handler( struct thread_data *data, ucontext_t *sigconte
         if (fs32_sel) __asm__ volatile( "movw %0,%%fs" :: "r" (fs32_sel) );
     }
 #elif defined __APPLE__
+    if (!wineskin_gsbase_switch) {} else  /* WINESKIN */
     if (!is_inside_signal_stack( data, (void *)RSP_sig(sigcontext )) &&
         !is_inside_syscall( data, RSP_sig(sigcontext )))
         _thread_set_tsd_base( (uint64_t)data->teb );
@@ -1643,12 +1646,15 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
                    "movw %ax,%fs\n"
                    "1:\n\t"
 #elif defined __APPLE__
+                   "cmpb $0," __ASM_NAME("wineskin_gsbase_switch") "(%rip)\n\t"  /* WINESKIN */
+                   "je 7f\n\t"
                    "movq %rcx,%r10\n\t"
                    "movq %r13,%rdi\n\t"
                    "xorl %esi,%esi\n\t"
                    "movl $0x3000003,%eax\n\t"  /* _thread_set_tsd_base */
                    "syscall\n\t"
                    "movq %r10,%rcx\n\t"
+                   "7:\n\t"  /* WINESKIN */
 #endif
                    "movq 0x330(%r13),%r10\n\t" /* amd64_thread_data()->instrumentation_callback */
                    "movq (%r10),%r10\n\t"
@@ -2733,6 +2739,31 @@ static void *mac_thread_gsbase(void)
     if (kr == KERN_SUCCESS) return (void*)tiinfo.thread_handle;
     return NULL;
 }
+
+/**********************************************************************
+ *		wineskin_init_teb_slots
+ *
+ * WINESKIN: Windows code without a %gs base of its own, from marzent/winecx (branch ff-wine-11.17,
+ * commit 0a3e723e47, "HACK: ntdll: Restore x86_64 Mac-specific TEB access workarounds", LGPL 2.1+);
+ * CrossOver does the same. Unless wineskin_gsbase_switch is set (WINESKIN_GSBASE_SWITCH=1 in the
+ * environment), %gs keeps the pthread base while Windows code runs, so a syscall or unix call
+ * makes no thread_fast_set_cthread_self64 trap on the way in and out. Compiled Windows code finds
+ * what it reads from %gs because the thread's pthread TSD slots at the same offsets hold it:
+ * %gs:0x30 the TEB (slot 6), %gs:0x58 the TLS pointer (slot 11, libc's ttyname key), %gs:0x60 the
+ * PEB (slot 12, libc's localtime key), %gs:0x1780 the TLS expansion slots (slot 752, a pthread key
+ * reserved at startup; the PE loader sets it). The Unix loader replaces ttyname() and localtime()
+ * with versions that use no key. Any other TEB field read straight from %gs is pthread data.
+ * A program that loads the %gs selector loses the base; the next access faults, and the signal
+ * handler's entry (init_handler) sets the pthread base again, as it does when the base is switched.
+ */
+static void wineskin_init_teb_slots( TEB *teb, struct amd64_thread_data *thread_data )
+{
+    __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (teb->Tib.Self), "n" (FIELD_OFFSET(TEB, Tib.Self)));
+    __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (teb->ThreadLocalStoragePointer), "n" (FIELD_OFFSET(TEB, ThreadLocalStoragePointer)));
+    __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (teb->Peb), "n" (FIELD_OFFSET(TEB, Peb)));
+    /* the PE loader sets the TLS pointer of other threads; it finds their pthread base here */
+    teb->Instrumentation[0] = thread_data->pthread_teb;
+}
 #endif
 
 #ifdef __linux__
@@ -2874,6 +2905,7 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
     sysarch( X86_64_SET_GSBASE, &teb );
 #elif defined (__APPLE__)
     thread_data->pthread_teb = mac_thread_gsbase();
+    if (!wineskin_gsbase_switch) wineskin_init_teb_slots( teb, thread_data );  /* WINESKIN */
 #else
 # error Please define setting %gs for your architecture
 #endif
@@ -2982,7 +3014,12 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
  */
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_gs_load") ":\n\t"
+#ifdef __APPLE__  /* WINESKIN: only %gs:0x30 is the TEB on the pthread base (marzent/winecx 0a3e723e47) */
+                   "movq %gs:0x30,%rcx\n\t"
+                   "movq 0x378(%rcx),%rcx\n\t"
+#else
                    "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
+#endif  /* WINESKIN */
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
@@ -3107,11 +3144,14 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "leaq -0x98(%rbp),%rcx\n"
                    "2:\n\t"
 #elif defined __APPLE__
+                   "cmpb $0," __ASM_NAME("wineskin_gsbase_switch") "(%rip)\n\t"  /* WINESKIN */
+                   "je 7f\n\t"
                    "movq 0x320(%r13),%rdi\n\t"     /* amd64_thread_data()->pthread_teb */
                    "xorl %esi,%esi\n\t"
                    "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
                    "syscall\n\t"
                    "leaq -0x98(%rbp),%rcx\n"
+                   "7:\n\t"  /* WINESKIN */
 #endif
                    "ldmxcsr 0x33c(%r13)\n\t"       /* amd64_thread_data()->mxcsr */
                    "movl 0xb0(%rcx),%eax\n\t"      /* frame->syscall_id */
@@ -3165,6 +3205,8 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
 # endif
                    "1:\n\t"
 #elif defined __APPLE__
+                   "cmpb $0," __ASM_NAME("wineskin_gsbase_switch") "(%rip)\n\t"  /* WINESKIN */
+                   "je 7f\n\t"
                    "movq %rax,%r8\n\t"
                    "movq %rcx,%rdx\n\t"
                    "movq %r13,%rdi\n\t"            /* teb */
@@ -3173,6 +3215,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "syscall\n\t"
                    "movq %rdx,%rcx\n\t"
                    "movq %r8,%rax\n\t"
+                   "7:\n\t"  /* WINESKIN */
 #endif
                    "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
                    "testl $0x48,%edx\n\t"          /* CONTEXT_FLOATING_POINT | CONTEXT_XSTATE */
@@ -3261,7 +3304,12 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "popfq\n\t"
                    "iretq\n"
                    /* RESTORE_FLAGS_INSTRUMENTATION */
+#ifdef __APPLE__  /* WINESKIN: only %gs:0x30 is the TEB on the pthread base (marzent/winecx 0a3e723e47) */
+                   "2:\tmovq %gs:0x30,%r10\n\t"
+                   "movq 0x330(%r10),%r10\n\t"
+#else
                    "2:\tmovq %gs:0x330,%r10\n\t"  /* amd64_thread_data()->instrumentation_callback */
+#endif  /* WINESKIN */
                    "movq (%r10),%r10\n\t"
                    "test %r10,%r10\n\t"
                    "jz 3b\n\t"
@@ -3320,7 +3368,12 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_return,
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_instrumentation,
+#ifdef __APPLE__  /* WINESKIN: only %gs:0x30 is the TEB on the pthread base (marzent/winecx 0a3e723e47) */
+                   "movq %gs:0x30,%rcx\n\t"
+                   "movq 0x378(%rcx),%rcx\n\t"
+#else
                    "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
+#endif  /* WINESKIN */
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
@@ -3338,7 +3391,12 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_instrumentation,
 __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "movq %rcx,%r10\n\t"
                    __ASM_LOCAL_LABEL("__wine_unix_call_dispatcher_gs_load") ":\n\t"
+#ifdef __APPLE__  /* WINESKIN: only %gs:0x30 is the TEB on the pthread base (marzent/winecx 0a3e723e47) */
+                   "movq %gs:0x30,%rcx\n\t"
+                   "movq 0x378(%rcx),%rcx\n\t"
+#else
                    "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
+#endif  /* WINESKIN */
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
@@ -3423,10 +3481,13 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "popq %r8\n\t"
                    "2:\n\t"
 #elif defined __APPLE__
+                   "cmpb $0," __ASM_NAME("wineskin_gsbase_switch") "(%rip)\n\t"  /* WINESKIN */
+                   "je 7f\n\t"
                    "movq 0x320(%r13),%rdi\n\t"     /* amd64_thread_data()->pthread_teb */
                    "xorl %esi,%esi\n\t"
                    "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
                    "syscall\n\t"
+                   "7:\n\t"  /* WINESKIN */
 #endif
                    "ldmxcsr 0x33c(%r13)\n\t"       /* amd64_thread_data()->mxcsr */
                    "movq %r8,%rdi\n\t"             /* args */
@@ -3461,6 +3522,8 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
 # endif
                    "1:\n\t"
 #elif defined __APPLE__
+                   "cmpb $0," __ASM_NAME("wineskin_gsbase_switch") "(%rip)\n\t"  /* WINESKIN */
+                   "je 7f\n\t"
                    "movq %rax,%rdx\n\t"
                    "movq %rcx,%r14\n\t"
                    "movq %r13,%rdi\n\t"            /* teb */
@@ -3470,6 +3533,7 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "movq %r14,%rcx\n\t"
                    "movq %rdx,%rax\n\t"
                    "movq 0x60(%rcx),%r14\n\t"
+                   "7:\n\t"  /* WINESKIN */
 #endif
                    "movq 0x58(%rcx),%r13\n\t"
                    "movq 0x28(%rcx),%rdi\n\t"
