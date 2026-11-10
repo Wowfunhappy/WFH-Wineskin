@@ -304,15 +304,20 @@ directly. 10.9 has no persistent mapping, so upstream's code makes each `Map(DIS
 `Map(NOOVERWRITE)` wait for the command stream to reach the buffer's last use and map it there, and
 replaces a buffer the GPU still reads with a new OpenGL buffer. Two files change that:
 
-- `dlls/wined3d/map_shadow.c`: a `DISCARD` or `NOOVERWRITE` map of a dynamic buffer of at most 64 KiB (a
-  constant buffer, typically) returns system memory at once, the buffer's *shadow*, and the unmap queues
-  its contents. The command stream writes them with `glBufferSubData` into the same OpenGL buffer, which
-  10.9's driver copies into its own command stream: per update and draw that takes 0.2 microseconds,
-  against 1 for mapping a spare buffer and 7 for creating a buffer and deleting the old one
-  (`~/WineskinTests/perf/tools/ubobench.c` measures it). Larger buffers, such as an engine's vertex
-  scratch buffer of megabytes, keep upstream's path: a map's writes are not known, so a shadow would be
-  copied whole at every unmap. `HKCU\Software\Wine\Direct3D\MapShadows` = `n` (or
-  `WINE_D3D_CONFIG=MapShadows=n`) turns shadows off.
+- `dlls/wined3d/map_shadow.c`: a `DISCARD` or `NOOVERWRITE` map of a dynamic buffer of at most 16 MiB
+  returns system memory at once, the buffer's *shadow*, and the unmap queues its contents. The command
+  stream writes them with `glBufferSubData` into the same OpenGL buffer, which 10.9's driver copies into
+  its own command stream: per update and draw that takes 0.2 microseconds, against 1 for mapping a spare
+  buffer and 7 for creating a buffer and deleting the old one (`~/WineskinTests/perf/tools/ubobench.c`
+  measures it). A map's writes are not known (Direct3D 10 and later map whole buffers), so the shadow
+  of a buffer of at most 64 KiB, a constant buffer typically, is written whole. The shadow of a larger
+  buffer, such as an engine's vertex or index scratch buffer to which each map appends a few kilobytes,
+  is write-watched memory (`VirtualAlloc` with `MEM_WRITE_WATCH`), and the unmap queues the pages written
+  since the previous one. A page's first write costs a fault, about 7 microseconds
+  (`~/WineskinTests/perf/tools/wwbench.c`); a map through the command stream costs the wait for the
+  draws queued before it, and Ori and the Will of the Wisps makes 32 such maps a frame.
+  `HKCU\Software\Wine\Direct3D\MapShadows` = `n` (or `WINE_D3D_CONFIG=MapShadows=n`) turns shadows
+  off, `small` the write-watched ones.
 - `dlls/wined3d/bo_pool_gl.c`: an OpenGL buffer that is replaced or destroyed goes to a pool, and a new
   buffer of the same size and usage takes one from it once the GPU has finished with it, instead of
   `glGenBuffers`/`glDeleteBuffers` each time. A reused buffer keeps its name and its OpenCL memory
@@ -356,6 +361,24 @@ so a game that sets the same state before every draw otherwise has it reissued: 
 the Wisps' title screen the filter takes 71 OpenGL calls per draw down to 31. Deleting an object forgets
 the bindings that name it, in every context. `HKCU\Software\Wine\Direct3D\GLStateFilter` = `n` (or
 `WINE_D3D_CONFIG=GLStateFilter=n`) turns the filter off.
+
+A disabled vertex attribute array keeps pointing into the buffer it last read, and 10.9's OpenGL brings
+every buffer a vertex array object names up to date before each draw. When the GPU has written that
+buffer since (stream output, an OpenCL kernel), each draw submits the command buffer to the kernel, used
+or not: a game that skins meshes on the GPU and draws its full-screen passes without vertex buffers paid
+that 77 times a frame. wined3d points disabled arrays at no buffer
+(`wined3d_context_gl_drop_stale_attrib_pointers`).
+
+`glEndTransformFeedback` and `glPauseTransformFeedback` wait until the GPU has finished everything it
+was given (`~/WineskinTests/perf/tools/xfbstall.c`), so a game that uses stream output once a frame runs
+its CPU and GPU work one after the other. Nothing avoids it within one context; in a second context of
+the share group the call returns at once.
+
+`HKCU\Software\Wine\Mac Driver\MultithreadedOpenGL` = `y` turns on the multithreaded OpenGL engine
+(`kCGLCEMPEngine`) for every context: the driver's work for each call runs on a thread of its own, and
+the thread that makes the calls, wined3d's command stream, only queues them. It is off unless set. Calls
+that ask OpenGL for something wait for that thread, which is why winemac remembers whether the surface
+backing size is enabled instead of asking at every buffer swap (`backingSizeEnabled`).
 
 10.9's OpenGL offers no program binary formats (`GL_NUM_PROGRAM_BINARY_FORMATS` is 0), so linked shader
 programs can't be kept on disk: a shader is compiled the first time each run draws with it.
