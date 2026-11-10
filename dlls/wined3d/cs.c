@@ -1848,6 +1848,26 @@ static void wined3d_cs_exec_set_shader(struct wined3d_cs *cs, const void *data)
         device_invalidate_state(cs->c.device, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
     else
         device_invalidate_state(cs->c.device, STATE_COMPUTE_SHADER_RESOURCE_BINDING);
+
+    /* WINESKIN: without a geometry shader of the application's, the geometry
+     * shader is the layer_gs of the last shader before it, if it has one
+     * (wined3d_shader.layer_gs). */
+    if (op->type == WINED3D_SHADER_TYPE_GEOMETRY)
+        cs->state.app_geometry_shader = op->shader;
+    if (op->type != WINED3D_SHADER_TYPE_PIXEL && op->type != WINED3D_SHADER_TYPE_COMPUTE)
+    {
+        struct wined3d_shader *last = cs->state.shader[WINED3D_SHADER_TYPE_DOMAIN], *gs;
+
+        if (!last || !cs->state.shader[WINED3D_SHADER_TYPE_HULL])
+            last = cs->state.shader[WINED3D_SHADER_TYPE_VERTEX];
+        if (!(gs = cs->state.app_geometry_shader))
+            gs = last ? last->layer_gs : NULL;
+        if (cs->state.shader[WINED3D_SHADER_TYPE_GEOMETRY] != gs)
+        {
+            cs->state.shader[WINED3D_SHADER_TYPE_GEOMETRY] = gs;
+            device_invalidate_state(cs->c.device, STATE_SHADER(WINED3D_SHADER_TYPE_GEOMETRY));
+        }
+    }
 }
 
 void wined3d_device_context_emit_set_shader(struct wined3d_device_context *context,

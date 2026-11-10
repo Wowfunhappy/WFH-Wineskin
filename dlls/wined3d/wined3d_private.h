@@ -226,6 +226,7 @@ struct wined3d_d3d_info
     uint32_t shader_double_precision : 1;
     uint32_t shader_output_interpolation : 1;
     uint32_t viewport_array_index_any_shader : 1;
+    uint32_t layer_gs : 1; /* WINESKIN: see wined3d_shader.layer_gs. */
     uint32_t simple_instancing : 1;
     uint32_t min_max_filtering : 1;
     uint32_t stencil_export : 1;
@@ -3028,6 +3029,10 @@ struct wined3d_state
     bool depth_bounds_enable;
     float depth_bounds_min, depth_bounds_max;
     struct wined3d_rasterizer_state *rasterizer_state;
+
+    /* WINESKIN: the geometry shader the application set, where shader[] can
+     * hold a vertex or domain shader's layer_gs (wined3d_shader.layer_gs). */
+    struct wined3d_shader *app_geometry_shader;
 };
 
 void state_cleanup(struct wined3d_state *state);
@@ -4424,6 +4429,14 @@ struct wined3d_shader
     /* Pointer to the parent device */
     struct wined3d_device *device;
     struct list shader_list_entry;
+
+    /* WINESKIN: OpenGL 4.1 writes gl_Layer and gl_ViewportIndex only in
+     * geometry shaders. A vertex or domain shader that writes
+     * SV_RenderTargetArrayIndex or SV_ViewportArrayIndex, where the adapter
+     * sets d3d_info.layer_gs, gets a geometry shader without a function that
+     * passes its primitives through, and the command stream binds it while the
+     * application binds no geometry shader (wined3d_cs_exec_set_shader). */
+    struct wined3d_shader *layer_gs;
 
     union
     {

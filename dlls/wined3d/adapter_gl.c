@@ -4967,7 +4967,13 @@ static void wined3d_adapter_gl_init_d3d_info(struct wined3d_adapter_gl *adapter_
     d3d_info->ffp_alpha_test = !!gl_info->supported[WINED3D_GL_LEGACY_CONTEXT];
     d3d_info->shader_double_precision = !!(shader_caps.wined3d_caps & WINED3D_SHADER_CAP_DOUBLE_PRECISION);
     d3d_info->shader_output_interpolation = !!(shader_caps.wined3d_caps & WINED3D_SHADER_CAP_OUTPUT_INTERPOLATION);
+    /* WINESKIN: see wined3d_shader.layer_gs.
     d3d_info->viewport_array_index_any_shader = !!gl_info->supported[ARB_SHADER_VIEWPORT_LAYER_ARRAY];
+    (WINESKIN) */
+    d3d_info->layer_gs = !gl_info->supported[ARB_SHADER_VIEWPORT_LAYER_ARRAY]
+            && shader_caps.gs_version >= 4 && !gl_info->supported[WINED3D_GL_LEGACY_CONTEXT];
+    d3d_info->viewport_array_index_any_shader = gl_info->supported[ARB_SHADER_VIEWPORT_LAYER_ARRAY]
+            || d3d_info->layer_gs;
     d3d_info->stencil_export = !!gl_info->supported[ARB_SHADER_STENCIL_EXPORT];
     d3d_info->simple_instancing = !!gl_info->supported[ARB_INSTANCED_ARRAYS];
     d3d_info->min_max_filtering = !!gl_info->supported[ARB_TEXTURE_FILTER_MINMAX];

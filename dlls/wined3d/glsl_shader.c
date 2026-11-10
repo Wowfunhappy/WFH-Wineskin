@@ -8987,6 +8987,103 @@ static GLuint shader_glsl_generate_domain_shader(const struct wined3d_context_gl
     return shader_id;
 }
 
+/* WINESKIN: the geometry shader of a vertex or domain shader that writes the
+ * layer or viewport index (wined3d_shader.layer_gs): it emits each primitive
+ * as it comes, and its rasterizer setup writes gl_Layer and gl_ViewportIndex.
+ * Context activation is done by the caller. */
+static GLuint shader_glsl_generate_layer_geometry_shader(const struct wined3d_context_gl *context_gl,
+        struct shader_glsl_priv *priv, const struct wined3d_shader *shader, const struct gs_compile_args *args)
+{
+    static const unsigned int list[] = {0, 1, 2}, lines_adj[] = {1, 2}, triangles_adj[] = {0, 2, 4};
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_string_buffer *buffer = &priv->shader_buffer;
+    const char *input_type, *output_type;
+    const unsigned int *vertices;
+    unsigned int count, i, reg;
+    uint32_t map;
+    GLuint shader_id;
+
+    switch (args->primitive_type)
+    {
+        case WINED3D_PT_POINTLIST:
+            input_type = "points";
+            output_type = "points";
+            vertices = list;
+            count = 1;
+            break;
+        case WINED3D_PT_LINELIST:
+        case WINED3D_PT_LINESTRIP:
+            input_type = "lines";
+            output_type = "line_strip";
+            vertices = list;
+            count = 2;
+            break;
+        case WINED3D_PT_LINELIST_ADJ:
+        case WINED3D_PT_LINESTRIP_ADJ:
+            input_type = "lines_adjacency";
+            output_type = "line_strip";
+            vertices = lines_adj;
+            count = 2;
+            break;
+        case WINED3D_PT_TRIANGLELIST_ADJ:
+        case WINED3D_PT_TRIANGLESTRIP_ADJ:
+            input_type = "triangles_adjacency";
+            output_type = "triangle_strip";
+            vertices = triangles_adj;
+            count = 3;
+            break;
+        default:
+            if (args->primitive_type != WINED3D_PT_TRIANGLELIST && args->primitive_type != WINED3D_PT_TRIANGLESTRIP
+                    && args->primitive_type != WINED3D_PT_TRIANGLEFAN)
+                FIXME("Unhandled primitive type %s.\n", debug_d3dprimitivetype(args->primitive_type));
+            input_type = "triangles";
+            output_type = "triangle_strip";
+            vertices = list;
+            count = 3;
+            break;
+    }
+
+    shader_glsl_add_version_declaration(buffer, gl_info);
+    shader_glsl_enable_extensions(buffer, gl_info);
+
+    shader_addline(buffer, "layout(%s) in;\n", input_type);
+    shader_addline(buffer, "layout(%s, max_vertices = %u) out;\n", output_type, count);
+    shader_addline(buffer, "in shader_in_out { vec4 reg[%u]; } shader_in[];\n", shader->limits->packed_input);
+    if (!gl_info->supported[ARB_CLIP_CONTROL])
+    {
+        shader_addline(buffer, "uniform vec4 pos_fixup");
+        if (shader->reg_maps.viewport_array)
+            shader_addline(buffer, "[%u]", WINED3D_MAX_VIEWPORTS);
+        shader_addline(buffer, ";\n");
+    }
+
+    shader_glsl_generate_sm4_output_setup(priv, shader, args->output_count, gl_info, TRUE, args->interpolation_mode);
+
+    shader_addline(buffer, "void main()\n{\n");
+    shader_addline(buffer, "vec4 gs_out[%u];\n", shader->limits->packed_output);
+    for (i = 0; i < count; ++i)
+    {
+        map = shader->reg_maps.output_registers;
+        while (map)
+        {
+            reg = wined3d_bit_scan(&map);
+            if (reg < shader->limits->packed_input)
+                shader_addline(buffer, "gs_out[%u] = shader_in[%u].reg[%u];\n", reg, vertices[i], reg);
+        }
+        shader_addline(buffer, "setup_gs_output(gs_out);\n");
+        if (!gl_info->supported[ARB_CLIP_CONTROL])
+            shader_glsl_fixup_position(buffer, shader->reg_maps.viewport_array);
+        shader_addline(buffer, "EmitVertex();\n");
+    }
+    shader_addline(buffer, "}\n");
+
+    shader_id = GL_EXTCALL(glCreateShader(GL_GEOMETRY_SHADER));
+    TRACE("Compiling shader object %u.\n", shader_id);
+    shader_glsl_compile(gl_info, shader_id, buffer->buffer);
+
+    return shader_id;
+}
+
 /* Context activation is done by the caller. */
 static GLuint shader_glsl_generate_geometry_shader(const struct wined3d_context_gl *context_gl,
         struct shader_glsl_priv *priv, const struct wined3d_shader *shader, const struct gs_compile_args *args)
@@ -9004,6 +9101,10 @@ static GLuint shader_glsl_generate_geometry_shader(const struct wined3d_context_
 
     if (shader->function && priv->use_vkd3d)
         return shader_glsl_generate_vkd3d_shader(context_gl, priv, shader, GL_GEOMETRY_SHADER);
+
+    /* WINESKIN: see wined3d_shader.layer_gs. */
+    if (!shader->function && !shader->u.gs.so_desc)
+        return shader_glsl_generate_layer_geometry_shader(context_gl, priv, shader, args);
 
     memset(&priv_ctx, 0, sizeof(priv_ctx));
     priv_ctx.gl_info = gl_info;

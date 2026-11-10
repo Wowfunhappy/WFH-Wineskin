@@ -2633,6 +2633,8 @@ ULONG CDECL wined3d_shader_decref(struct wined3d_shader *shader)
     {
         wined3d_mutex_lock();
         shader->parent_ops->wined3d_object_destroyed(shader->parent);
+        if (shader->layer_gs) /* WINESKIN */
+            wined3d_shader_decref(shader->layer_gs);
         wined3d_cs_destroy_object(shader->device->cs, wined3d_shader_destroy_object, shader);
         wined3d_mutex_unlock();
     }
@@ -2898,6 +2900,24 @@ void find_gs_compile_args(const struct wined3d_state *state, const struct wined3
 
     if (!(args->primitive_type = shader->u.gs.input_type))
         args->primitive_type = state->primitive_type;
+
+    /* WINESKIN: a layer_gs (wined3d_shader.layer_gs) after a domain shader
+     * takes the tessellator's primitives. */
+    if (!shader->function && !shader->u.gs.so_desc && state->shader[WINED3D_SHADER_TYPE_HULL])
+    {
+        switch (state->shader[WINED3D_SHADER_TYPE_HULL]->u.hs.tessellator_output_primitive)
+        {
+            case WINED3D_TESSELLATOR_OUTPUT_POINT:
+                args->primitive_type = WINED3D_PT_POINTLIST;
+                break;
+            case WINED3D_TESSELLATOR_OUTPUT_LINE:
+                args->primitive_type = WINED3D_PT_LINELIST;
+                break;
+            default:
+                args->primitive_type = WINED3D_PT_TRIANGLELIST;
+                break;
+        }
+    }
 
     init_interpolation_compile_args(args->interpolation_mode, pixel_shader, context->d3d_info);
 }
@@ -3295,6 +3315,50 @@ HRESULT CDECL wined3d_shader_create_cs(struct wined3d_device *device, const stru
     return WINED3D_OK;
 }
 
+/* WINESKIN: see wined3d_shader.layer_gs. The stream output description
+ * only makes shader_set_function() take the shader's output signature for a
+ * geometry shader without a function; the layer_gs has no stream output. */
+static void wined3d_shader_create_layer_gs(struct wined3d_shader *shader, const struct wined3d_shader_desc *desc)
+{
+    static const struct wined3d_stream_output_desc so_desc;
+    const struct wined3d_shader_signature *signature = &shader->output_signature;
+    struct wined3d_device *device = shader->device;
+    struct wined3d_shader *object;
+    unsigned int i;
+
+    if (!device->adapter->d3d_info.layer_gs || shader->reg_maps.shader_version.major < 4)
+        return;
+
+    for (i = 0; i < signature->element_count; ++i)
+    {
+        const struct wined3d_shader_signature_element *e = &signature->elements[i];
+
+        if (!e->stream_idx && (e->sysval_semantic == WINED3D_SV_RENDER_TARGET_ARRAY_INDEX
+                || e->sysval_semantic == WINED3D_SV_VIEWPORT_ARRAY_INDEX))
+            break;
+    }
+    if (i == signature->element_count)
+        return;
+
+    if (!(object = calloc(1, sizeof(*object))))
+        return;
+
+    shader_init(object, device, NULL, &wined3d_null_parent_ops);
+    if (FAILED(shader_set_function(object, desc, WINED3D_SHADER_TYPE_GEOMETRY, &so_desc, 0)) || object->function)
+    {
+        WARN("Failed to create a geometry shader for the layer of shader %p.\n", shader);
+        shader_cleanup(object);
+        free(object);
+        return;
+    }
+    object->u.gs.so_desc = NULL;
+
+    wined3d_cs_init_object(device->cs, wined3d_shader_init_object, object);
+
+    TRACE("Created geometry shader %p for the layer of shader %p.\n", object, shader);
+    shader->layer_gs = object;
+}
+
 HRESULT CDECL wined3d_shader_create_ds(struct wined3d_device *device, const struct wined3d_shader_desc *desc,
         void *parent, const struct wined3d_parent_ops *parent_ops, struct wined3d_shader **shader)
 {
@@ -3317,6 +3381,7 @@ HRESULT CDECL wined3d_shader_create_ds(struct wined3d_device *device, const stru
     }
 
     wined3d_cs_init_object(device->cs, wined3d_shader_init_object, object);
+    wined3d_shader_create_layer_gs(object, desc); /* WINESKIN */
 
     TRACE("Created domain shader %p.\n", object);
     *shader = object;
@@ -3428,6 +3493,7 @@ HRESULT CDECL wined3d_shader_create_vs(struct wined3d_device *device, const stru
     }
 
     wined3d_cs_init_object(device->cs, wined3d_shader_init_object, object);
+    wined3d_shader_create_layer_gs(object, desc); /* WINESKIN */
 
     TRACE("Created vertex shader %p.\n", object);
     *shader = object;
