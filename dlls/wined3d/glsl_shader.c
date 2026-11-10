@@ -261,6 +261,9 @@ struct glsl_shader_prog_link
     GLint so_emu_scale_location;
     unsigned int so_emu_components;
     unsigned int so_emu_state; /* 0 not built yet, 1 built, 2 not possible */
+    /* WINESKIN: constant buffers as uniform arrays, of the program and of
+     * its stream output program; see cb_uniforms_gl.c. */
+    struct wined3d_cb_uniforms cb_uniforms, so_emu_cb_uniforms;
 };
 
 struct glsl_program_key
@@ -875,6 +878,8 @@ static void shader_glsl_init_uniform_block_bindings(const struct wined3d_gl_info
     for (i = 0; i < count; ++i)
     {
         if (!reg_maps->cb_sizes[i])
+            continue;
+        if (wined3d_shader_cb_is_uniform(gl_info, reg_maps, i)) /* WINESKIN */
             continue;
 
         string_buffer_sprintf(name, "block_%s_cb%u", prefix, i);
@@ -2827,6 +2832,10 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
             &uniform_block_base, &uniform_block_count);
     for (i = 0; i < min(uniform_block_count, WINED3D_MAX_CBS); ++i)
     {
+        /* WINESKIN: see cb_uniforms_gl.c. */
+        if (wined3d_shader_cb_is_uniform(gl_info, reg_maps, i))
+            shader_addline(buffer, "uniform uvec4 %s_cb%u[%u];\n", prefix, i, reg_maps->cb_sizes[i]);
+        else
         if (reg_maps->cb_sizes[i])
         {
             shader_addline(buffer, "layout(std140");
@@ -3505,6 +3514,13 @@ static void shader_glsl_get_register_name(const struct wined3d_shader_register *
             break;
 
         case WINED3DSPR_CONSTBUFFER:
+            /* WINESKIN: an unsigned uniform array keeps the bits; see cb_uniforms_gl.c. */
+            if (wined3d_shader_cb_is_uniform(gl_info, reg_maps, reg->idx[0].offset))
+            {
+                string_buffer_sprintf(register_name, "uintBitsToFloat(%s_cb%u[%u])",
+                        prefix, reg->idx[0].offset, reg->idx[1].offset);
+                break;
+            }
             if (reg->idx[1].rel_addr)
                 string_buffer_sprintf(register_name, "%s_cb%u[%s + %u]",
                         prefix, reg->idx[0].offset, rel_param1.param_str, reg->idx[1].offset);
@@ -7548,6 +7564,8 @@ static void delete_glsl_program_entry(struct shader_glsl_priv *priv, const struc
     GL_EXTCALL(glDeleteProgram(entry->id));
     if (entry->so_emu_id) /* WINESKIN */
         GL_EXTCALL(glDeleteProgram(entry->so_emu_id));
+    wined3d_cb_uniforms_cleanup(&entry->cb_uniforms); /* WINESKIN */
+    wined3d_cb_uniforms_cleanup(&entry->so_emu_cb_uniforms); /* WINESKIN */
     if (entry->vs.id)
         list_remove(&entry->vs.shader_entry);
     if (entry->hs.id)
@@ -10882,6 +10900,9 @@ static HRESULT shader_glsl_compile_compute_shader(struct shader_glsl_priv *priv,
     entry->cs.id = shader_id;
     entry->constant_version = 0;
     entry->shader_controlled_clip_distances = 0;
+    entry->so_emu_id = 0; /* WINESKIN */
+    memset(&entry->cb_uniforms, 0, sizeof(entry->cb_uniforms)); /* WINESKIN */
+    memset(&entry->so_emu_cb_uniforms, 0, sizeof(entry->so_emu_cb_uniforms)); /* WINESKIN */
     add_glsl_program_entry(priv, entry);
 
     TRACE("Attaching GLSL shader object %u to program %u.\n", shader_id, program_id);
@@ -11173,6 +11194,8 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
     entry->shader_controlled_clip_distances = 0;
     entry->so_emu_id = 0; /* WINESKIN */
     entry->so_emu_state = 0; /* WINESKIN */
+    memset(&entry->cb_uniforms, 0, sizeof(entry->cb_uniforms)); /* WINESKIN */
+    memset(&entry->so_emu_cb_uniforms, 0, sizeof(entry->so_emu_cb_uniforms)); /* WINESKIN */
     /* Add the hash table entry */
     add_glsl_program_entry(priv, entry);
 
@@ -11319,6 +11342,7 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
     GL_EXTCALL(glLinkProgram(program_id));
     shader_glsl_validate_link(gl_info, program_id);
     shader_glsl_init_level_count_locations(gl_info, entry); /* WINESKIN */
+    wined3d_cb_uniforms_init(&entry->cb_uniforms, gl_info, program_id, vshader, pshader); /* WINESKIN */
 
     shader_glsl_init_vs_uniform_locations(gl_info, priv, program_id, &entry->vs,
             vshader ? vshader->limits->constant_float : 0);
@@ -11602,6 +11626,9 @@ static void shader_glsl_apply_draw_state(void *shader_priv, struct wined3d_conte
 
         if (ctx_data->glsl_program && ctx_data->glsl_program->uses_levels)
             shader_glsl_load_level_counts(context_gl, ctx_data->glsl_program, state);
+        if (ctx_data->glsl_program && ctx_data->glsl_program->cb_uniforms.count)
+            wined3d_cb_uniforms_load(&ctx_data->glsl_program->cb_uniforms, context_gl,
+                    ctx_data->glsl_program->id, state);
     }
 }
 
@@ -12072,11 +12099,14 @@ GLuint wined3d_glsl_so_emu_program(struct wined3d_context_gl *context_gl, const 
         shader_glsl_load_program_resources(context_gl, priv, id, vshader);
         GL_EXTCALL(glUseProgram(entry->id));
         checkGLcall("stream output program resources");
+        wined3d_cb_uniforms_init(&entry->so_emu_cb_uniforms, gl_info, id, vshader, NULL); /* WINESKIN */
         entry->so_emu_id = id;
         entry->so_emu_state = 1;
     }
     if (entry->so_emu_state != 1)
         return 0;
+    if (entry->so_emu_cb_uniforms.count) /* WINESKIN: see cb_uniforms_gl.c */
+        wined3d_cb_uniforms_load(&entry->so_emu_cb_uniforms, context_gl, entry->so_emu_id, state);
     *components = entry->so_emu_components;
     *scale_location = entry->so_emu_scale_location;
     return entry->so_emu_id;

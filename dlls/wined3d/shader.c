@@ -1160,6 +1160,8 @@ static HRESULT shader_get_registers_used(struct wined3d_shader *shader, DWORD co
             {
                 reg_maps->cb_sizes[reg->idx[0].offset] = reg->idx[1].offset;
                 wined3d_bitmap_set(&reg_maps->cb_map, reg->idx[0].offset);
+                if (ins.flags & WINED3DSI_INDEXED_DYNAMIC) /* WINESKIN: see cb_uniforms_gl.c */
+                    wined3d_bitmap_set(&reg_maps->cb_dynamic_map, reg->idx[0].offset);
             }
         }
         else if (ins.handler_idx == WINED3DSIH_DCL_GLOBAL_FLAGS)

@@ -990,6 +990,33 @@ struct wined3d_device_gl
     struct wined3d_gl_buffer_convert_state *buffer_convert_state; /* WINESKIN: see buffer_convert_gl.c */
 };
 
+/* WINESKIN: cb_uniforms_gl.c */
+struct wined3d_cb_uniform
+{
+    GLint location;
+    uint8_t shader_type, idx;
+    uint16_t count; /* vectors declared */
+    bool loaded;
+    /* What was loaded: the buffer object, its serials, the range. */
+    const struct wined3d_bo *bo;
+    uint32_t cl_serial, content_serial, mirror_serial;
+    unsigned int offset, size;
+};
+
+struct wined3d_cb_uniforms
+{
+    unsigned int count;
+    struct wined3d_cb_uniform *uniforms;
+};
+
+bool wined3d_shader_cb_is_uniform(const struct wined3d_gl_info *gl_info,
+        const struct wined3d_shader_reg_maps *reg_maps, unsigned int idx);
+void wined3d_cb_uniforms_init(struct wined3d_cb_uniforms *u, const struct wined3d_gl_info *gl_info,
+        GLuint program, const struct wined3d_shader *vs, const struct wined3d_shader *ps);
+void wined3d_cb_uniforms_load(struct wined3d_cb_uniforms *u, struct wined3d_context_gl *context_gl,
+        GLuint program, const struct wined3d_state *state);
+void wined3d_cb_uniforms_cleanup(struct wined3d_cb_uniforms *u);
+
 /* WINESKIN: gl_filter.c */
 void wined3d_gl_filter_install(struct wined3d_gl_info *gl_info);
 void wined3d_gl_filter_add_context(HGLRC rc);

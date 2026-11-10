@@ -367,6 +367,28 @@ replaces a buffer the GPU still reads with a new OpenGL buffer. Two files change
   `glGenBuffers`/`glDeleteBuffers` each time. A reused buffer keeps its name and its OpenCL memory
   object.
 
+#### Constant buffers as uniform arrays
+
+On 10.9's NVIDIA driver a program switch costs much more when the programs read uniform blocks. Switching
+between two of Ori and the Will of the Wisps' programs costs 5.4 microseconds of CPU time per draw and stalls
+the GPU for 9.7; with the same programs reading plain uniform arrays it costs 3.3 and 1.0
+(`~/WineskinTests/perf/tools/drawcost2.c`, which replays a game's GLSL natively). One block is enough. The
+blocks' size and number, the buffers' usage and binding ranges, and program pipelines change nothing.
+
+So a shader model 4 or 5 vertex or pixel shader declares a constant buffer as `uniform uvec4 vs_cb0[n]` and
+reads it through `uintBitsToFloat()` (`dlls/wined3d/cb_uniforms_gl.c`): unsigned uniforms keep every bit, where
+float ones may lose NaN payloads and the denormals that integer constants are as floats. This applies while the
+stage's constant buffers fit its uniform storage (1024 vectors for vertex shaders and 512 for pixel shaders on
+this GPU, less a reserve). A constant buffer that the shader indexes dynamically stays a uniform block, because
+Direct3D reads past its declared size as far as the bound buffer goes; so do those that don't fit. Before each
+draw, the program loads each such constant buffer whose binding, range or contents changed since it last loaded
+it, with `glProgramUniform4uiv`. The contents come from the system memory copy that CPU writes keep of each
+small buffer object (`struct wined3d_bo`'s `cl_mirror`, which OpenCL dispatches use too). After a GPU write or a
+buffer-to-buffer copy, the buffer is read back first. A bound range shorter than the declared array is padded
+with zeros. The stream output emulation program loads its vertex shader's constant buffers the same way.
+`HKCU\Software\Wine\Direct3D\ConstantBufferUniforms` = `n` (or `WINE_D3D_CONFIG=ConstantBufferUniforms=n`) keeps
+them all uniform blocks.
+
 #### The cost of an OpenGL call, and the state filter
 
 A 64-bit Windows thread keeps its TEB in `%gs`, which macOS's libraries use for their own thread data.

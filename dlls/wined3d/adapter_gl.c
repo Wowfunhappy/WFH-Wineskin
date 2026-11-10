@@ -2731,6 +2731,7 @@ static void load_gl_funcs(struct wined3d_gl_info *gl_info)
     USE_GL_FUNC(glUniform3iv)                                  /* OpenGL 2.0 */
     USE_GL_FUNC(glUniform4f)                                   /* OpenGL 2.0 */
     USE_GL_FUNC(glUniform4fv)                                  /* OpenGL 2.0 */
+    USE_GL_FUNC(glProgramUniform4uiv) /* WINESKIN: OpenGL 4.1, cb_uniforms_gl.c */
     USE_GL_FUNC(glUniform4i)                                   /* OpenGL 2.0 */
     USE_GL_FUNC(glUniform4iv)                                  /* OpenGL 2.0 */
     USE_GL_FUNC(glUniformMatrix2fv)                            /* OpenGL 2.0 */

@@ -501,6 +501,7 @@ struct wined3d_settings
     bool map_shadow_watch; /* WINESKIN: write-watched shadows for buffers above 64 KiB (map_shadow.c) */
     bool gl_state_filter; /* WINESKIN: redundant OpenGL state call filter (gl_filter.c) */
     bool stream_output_emulation; /* WINESKIN: stream output without transform feedback (so_emu_gl.c) */
+    bool cb_uniforms; /* WINESKIN: constant buffers as uniform arrays (cb_uniforms_gl.c) */
 };
 
 extern struct wined3d_settings wined3d_settings;
@@ -1140,6 +1141,7 @@ struct wined3d_shader_reg_maps
     WORD local_bool_consts;                         /* WINED3D_MAX_CONSTS_B, 16 */
     UINT cb_sizes[WINED3D_MAX_CBS];
     uint32_t cb_map;                                /* WINED3D_MAX_CBS, 15 */
+    uint32_t cb_dynamic_map; /* WINESKIN: constant buffers indexed dynamically (cb_uniforms_gl.c) */
 
     struct wined3d_shader_resource_info resource_info[MAX_SHADER_RESOURCE_VIEWS];
     uint32_t resource_map[WINED3D_BITMAP_SIZE(MAX_SHADER_RESOURCE_VIEWS)];
