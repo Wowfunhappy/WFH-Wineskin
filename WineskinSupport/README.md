@@ -303,6 +303,10 @@ in place.
   returns texel (0, 0) at (0, 0) and zero elsewhere. Loads from resource views therefore address texel
   centres with normalised coordinates and a nearest filter (`wsmp_ldn` in `shader_cl_ld`). Unreal's
   motion blur loads and samples one texture, and draws black where it only loads.
+- NVIDIA's OpenCL on 10.9 reads an `image2d_depth_t` at the wrong texel through a sampler with normalised
+  coordinates (it reads them as texel indices); an `image2d_t` of the same OpenGL depth texture reads the
+  depth into x at the right texel. Sampled depth views are therefore declared as colour images
+  (`shader_cl_image_type`). Unreal builds its hierarchical Z buffer with such reads.
 - A typed buffer view of a format of 32-bit components is read and written as words: the kernel key
   holds its component count (`WINED3D_CL_BUFFER_KEY_32`). The path for any format (`wfmt_ld`, `wfmt_st`)
   is large, and the driver's compiler gives up on a kernel that has hundreds of them ("Error getting

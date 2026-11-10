@@ -419,6 +419,10 @@ static void shader_cl_unhandled(const struct wined3d_shader_instruction *ins)
     shader_cl_unsupported(ins, "instruction");
 }
 
+/* Depth images that are sampled are declared as colour images: NVIDIA's
+ * OpenCL on macOS 10.9 reads an image2d_depth_t at the wrong texel with a
+ * normalised-coordinate sampler, and an image2d_t of an OpenGL depth texture
+ * returns the depth in x (~/WineskinTests/d3d11tools/probe/cldepth.c). */
 static const char *shader_cl_image_type(uint8_t kind)
 {
     bool depth = WINED3D_CL_IMAGE_KIND_CHANNEL(kind) == WINED3D_CL_CHANNEL_DEPTH;
@@ -427,8 +431,8 @@ static const char *shader_cl_image_type(uint8_t kind)
     {
         case WINED3D_CL_IMAGE_1D: return "image1d_t";
         case WINED3D_CL_IMAGE_1D_ARRAY: return "image1d_array_t";
-        case WINED3D_CL_IMAGE_2D: return depth ? "image2d_depth_t" : "image2d_t";
-        case WINED3D_CL_IMAGE_2D_ARRAY: return depth ? "image2d_array_depth_t" : "image2d_array_t";
+        case WINED3D_CL_IMAGE_2D: return "image2d_t";
+        case WINED3D_CL_IMAGE_2D_ARRAY: return "image2d_array_t";
         case WINED3D_CL_IMAGE_3D: return "image3d_t";
         case WINED3D_CL_IMAGE_2D_MSAA: return depth ? "image2d_msaa_depth_t" : "image2d_msaa_t";
         case WINED3D_CL_IMAGE_2D_ARRAY_MSAA: return depth ? "image2d_array_msaa_depth_t" : "image2d_array_msaa_t";
@@ -516,7 +520,11 @@ static void shader_cl_append_image_read(struct wined3d_string_buffer *buffer, co
             shader_addline(buffer, "read_imageui(%s)", args);
             break;
         case WINED3D_CL_CHANNEL_DEPTH:
-            shader_addline(buffer, "as_uint4((float4)(read_imagef(%s), 0.0f, 0.0f, 1.0f))", args);
+            /* See shader_cl_image_type(). */
+            if (sample)
+                shader_addline(buffer, "as_uint4((float4)(read_imagef(%s), 0.0f, 0.0f, 1.0f))", args);
+            else
+                shader_addline(buffer, "as_uint4((float4)(read_imagef(%s).x, 0.0f, 0.0f, 1.0f))", args);
             break;
         default:
             shader_addline(buffer, "as_uint4(%s(%s))", read[channel], args);
