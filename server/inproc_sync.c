@@ -223,6 +223,10 @@ static int get_obj_inproc_sync( struct object *obj, int *type )
     return fd;
 }
 
+#elif defined(__APPLE__)  /* WINESKIN: in-process synchronization on msync */
+
+#include "msync_inproc.h"
+
 #else /* NTSYNC_IOC_EVENT_READ */
 
 int get_inproc_device_fd(void)
@@ -284,6 +288,9 @@ DECL_HANDLER(get_inproc_sync_fd)
     reply->access = get_handle_access( current->process, req->handle );
 
     if ((fd = get_obj_inproc_sync( obj, &reply->type )) < 0) set_error( STATUS_NOT_IMPLEMENTED );
+#ifdef __APPLE__  /* WINESKIN: an msync object is an index, which reply->type carries (msync_inproc.h) */
+    else if (do_msync()) {}
+#endif
     else send_client_fd( current->process, fd, req->handle );
 
     release_object( obj );

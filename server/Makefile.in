@@ -1,6 +1,8 @@
 PROGRAMS = wineserver
 
+# WINESKIN: msync.c is in-process synchronization on macOS (see msync_inproc.h).
 SOURCES = \
+	msync.c \
 	alpc.c \
 	async.c \
 	atom.c \

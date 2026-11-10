@@ -2395,6 +2395,9 @@ DECL_HANDLER(get_inproc_alert_fd)
     int fd;
 
     if ((fd = get_inproc_sync_fd( current->alert_sync )) < 0) set_error( STATUS_INVALID_PARAMETER );
+#ifdef __APPLE__  /* WINESKIN: on msync (msync_inproc.h) the alert object's index, and no descriptor */
+    else if (fd >= 0) reply->handle = fd;
+#endif
     else
     {
         reply->handle = get_thread_id( current ) | 1; /* arbitrary token */

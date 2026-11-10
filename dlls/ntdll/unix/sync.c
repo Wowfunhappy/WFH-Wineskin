@@ -449,6 +449,10 @@ static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_
     return errno_to_status( errno );
 }
 
+#elif defined(__APPLE__)  /* WINESKIN: in-process synchronization on msync */
+
+#include "msync_inproc.h"
+
 #else /* NTSYNC_IOC_EVENT_READ */
 
 static NTSTATUS linux_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
@@ -634,7 +638,11 @@ static void release_inproc_sync( struct inproc_sync *sync )
     LONG ref = InterlockedDecrement( &sync->refcount );
 
     assert( ref >= 0 );
+#ifdef __APPLE__  /* WINESKIN: an msync object (msync_inproc.h) */
+    if (!ref) msync_close( fd );
+#else
     if (!ref) close( fd );
+#endif  /* WINESKIN */
 }
 
 static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
@@ -675,10 +683,17 @@ static NTSTATUS get_server_inproc_sync( HANDLE handle, struct inproc_sync *sync 
         {
             obj_handle_t fd_handle;
             sync->refcount = 1;
+#ifdef __APPLE__  /* WINESKIN: an msync object, whose index comes in the reply's type (msync_inproc.h) */
+            (void)fd_handle;
+            sync->fd = msync_inproc_reply_obj( reply->type );
+            sync->access = reply->access;
+            sync->type = msync_inproc_reply_type( reply->type );
+#else
             sync->fd = wine_server_receive_fd( &fd_handle );
             assert( wine_server_ptr_handle(fd_handle) == handle );
             sync->access = reply->access;
             sync->type = reply->type;
+#endif  /* WINESKIN */
             sync->closed = 0;
         }
     }
@@ -876,6 +891,9 @@ static int get_inproc_alert_fd(void)
     sigset_t sigset;
     int fd;
 
+#ifdef __APPLE__  /* WINESKIN: an msync object; data->alert_fd, which thread exit closes, stays -1 */
+    return msync_inproc_alert_obj();
+#endif
     if ((fd = data->alert_fd) < 0)
     {
         server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
