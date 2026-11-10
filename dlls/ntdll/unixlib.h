@@ -66,6 +66,15 @@ struct unwind_builtin_dll_params
     CONTEXT                    *context;
 };
 
+/* WINESKIN: how RtlQueryPerformanceCounter() reads the host's clock without a system call.
+ * nanotime is the address of macOS's commpage nanotime data, or 0 where there is no such way;
+ * offset is what the performance counter runs ahead of mach_absolute_time(), in nanoseconds. */
+struct wineskin_qpc_params
+{
+    UINT64 nanotime;
+    UINT64 offset;
+};
+
 enum ntdll_unix_funcs
 {
     unix_load_so_dll,
@@ -76,6 +85,7 @@ enum ntdll_unix_funcs
     unix_wine_server_handle_to_fd,
     unix_wine_spawnvp,
     unix_system_time_precise,
+    unix_wineskin_qpc_params, /* WINESKIN: see RtlQueryPerformanceCounter() */
 };
 
 extern unixlib_handle_t __wine_unixlib_handle;

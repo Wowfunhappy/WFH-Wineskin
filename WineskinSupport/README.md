@@ -249,6 +249,11 @@ user-mode `wrgsbase`: each switch is a kernel trap, and a call costs about 0.3 m
 does anything (`~/WineskinTests/perf/tools/ucall.c` measures it). 32-bit programs keep their TEB in `%fs`
 and pay nothing. wined3d makes one such call per OpenGL function, tens per draw.
 
+`QueryPerformanceCounter` makes no such call in a 64-bit program: `RtlQueryPerformanceCounter`
+(`dlls/ntdll/time.c`) scales the TSC with the nanotime data of macOS's commpage, as
+`mach_absolute_time()` does, once the Unix side (`wineskin_qpc_params` in `unix/sync.c`) has checked
+that this gives the same clock. It takes 19 ns, against 300 through `NtQueryPerformanceCounter`.
+
 `dlls/wined3d/gl_filter.c` replaces the state setting entries of wined3d's OpenGL function table
 (`glEnable`/`glDisable`, texture, sampler and uniform buffer bindings, vertex attribute divisors, face,
 depth and colour mask state) with functions that remember, per OpenGL context, what was last set and

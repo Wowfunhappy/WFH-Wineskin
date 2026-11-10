@@ -2595,6 +2595,61 @@ ULONG WINAPI NtGetTickCount(void)
 
 
 /******************************************************************************
+ *              wineskin_qpc_params
+ *
+ * WINESKIN: on x86-64 macOS a call into this library costs two kernel traps for the %gs base, and
+ * programs read the performance counter thousands of times a frame. mach_absolute_time() itself
+ * makes no system call: it scales the TSC with the nanotime data of the commpage, which is mapped
+ * at the same address in every process. RtlQueryPerformanceCounter() does the same from the PE
+ * side with the parameters returned here, when that data proves to give mach_absolute_time().
+ */
+NTSTATUS wineskin_qpc_params( void *args )
+{
+    struct wineskin_qpc_params *params = args;
+
+    params->nanotime = 0;
+    params->offset = 0;
+#if defined(__APPLE__) && defined(__x86_64__)
+    {
+        /* _COMM_PAGE_TIME_DATA_START: nt_tsc_base, nt_scale, nt_shift, nt_ns_base, nt_generation */
+        const volatile struct { uint64_t tsc_base; uint32_t scale, shift; uint64_t ns_base; uint32_t generation; }
+                *nt = (void *)0x7fffffe00050;
+        mach_timebase_info_data_t timebase;
+        uint64_t offset = ~(uint64_t)0, before, after, tsc, ns;
+        unsigned int i, generation, lo, hi;
+
+        if (mach_timebase_info( &timebase ) || timebase.numer != timebase.denom) return STATUS_SUCCESS;
+
+        /* the clock by the commpage's data must fall between two readings of the real one */
+        before = mach_absolute_time();
+        do
+        {
+            if (!(generation = nt->generation)) return STATUS_SUCCESS;
+            __asm__ __volatile__( "lfence; rdtsc; lfence" : "=a" (lo), "=d" (hi) );
+            tsc = (((uint64_t)hi << 32) | lo) - nt->tsc_base;
+            tsc <<= nt->shift & 31;
+            ns = (uint64_t)(((unsigned __int128)tsc * nt->scale) >> 32) + nt->ns_base;
+        } while (generation != nt->generation);
+        after = mach_absolute_time();
+        if (ns < before || ns > after) return STATUS_SUCCESS;
+
+        /* monotonic_counter() counts mach_continuous_time(), a constant ahead of
+         * mach_absolute_time(); the smallest difference of two readings is the closest to it */
+        for (i = 0; i < 64; i++)
+        {
+            before = mach_absolute_time();
+            after = mach_continuous_time();
+            if (after - before < offset) offset = after - before;
+        }
+        params->nanotime = (UINT_PTR)nt;
+        params->offset = offset;
+    }
+#endif
+    return STATUS_SUCCESS;
+}
+
+
+/******************************************************************************
  *              RtlGetSystemTimePrecise (NTDLL.@)
  */
 NTSTATUS system_time_precise( void *args )

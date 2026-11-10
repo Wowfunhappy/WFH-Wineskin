@@ -626,7 +626,11 @@ void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
         --new.s.owners;
     } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
 
-    if (!new.s.owners)
+    /* if (!new.s.owners) */
+    /* WINESKIN: only an exclusive waiter waits for the owners to leave, and it counts itself in
+     * exclusive_waiters before it looks at them: with none, there is nobody to wake, and
+     * RtlWakeAddressSingle() need not search its queue on every release of an uncontended lock. */
+    if (!new.s.owners && new.s.exclusive_waiters)
         RtlWakeAddressSingle( &u.s->owners );
 }
 

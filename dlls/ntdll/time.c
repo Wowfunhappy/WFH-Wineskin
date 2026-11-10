@@ -381,6 +381,44 @@ LONGLONG WINAPI RtlGetSystemTimePrecise( void )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter )
 {
+#ifdef __x86_64__
+    /* WINESKIN: read the host's clock as its own mach_absolute_time() does, without a system
+     * call, where the Unix side says how (see wineskin_qpc_params() in unix/sync.c). The result
+     * is NtQueryPerformanceCounter()'s to within a tick. */
+    static struct wineskin_qpc_params params;
+    static LONG state; /* 0: not asked, 1: usable, -1: not usable */
+
+    if (!state)
+    {
+        struct wineskin_qpc_params p;
+
+        if (WINE_UNIX_CALL( unix_wineskin_qpc_params, &p ) || !p.nanotime) state = -1;
+        else
+        {
+            params = p;
+            MemoryBarrier();
+            state = 1;
+        }
+    }
+    if (state > 0)
+    {
+        const volatile struct { UINT64 tsc_base; UINT32 scale, shift; UINT64 ns_base; UINT32 generation; }
+                *nt = (void *)(ULONG_PTR)params.nanotime;
+        unsigned int generation, lo, hi;
+        UINT64 tsc, ns;
+
+        do
+        {
+            while (!(generation = nt->generation)) YieldProcessor();
+            __asm__ __volatile__( "lfence; rdtsc; lfence" : "=a" (lo), "=d" (hi) );
+            tsc = (((UINT64)hi << 32) | lo) - nt->tsc_base;
+            tsc <<= nt->shift & 31;
+            ns = (UINT64)(((unsigned __int128)tsc * nt->scale) >> 32) + nt->ns_base;
+        } while (generation != nt->generation);
+        counter->QuadPart = (ns + params.offset) / 100;
+        return TRUE;
+    }
+#endif /* WINESKIN */
     NtQueryPerformanceCounter( counter, NULL );
     return TRUE;
 }
