@@ -1402,6 +1402,7 @@ struct wined3d_cl_kernel
 #define WINED3D_CL_FORMAT_BGRA   (1u << 7)
 
 bool wined3d_cl_available(struct wined3d_context_gl *context_gl);
+uint32_t wined3d_cl_get_caps(void);
 bool wined3d_cl_build_kernel(const char *source, const unsigned int *group_size, uint64_t *handle);
 bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
         struct wined3d_context_gl *context_gl, bool fp);

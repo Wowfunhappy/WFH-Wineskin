@@ -37,8 +37,39 @@ static LONG cl_state; /* 0: not initialised, 1: available, -1: unavailable */
 static struct wined3d_cl_init_params cl_caps;
 static bool cl_used;
 
+/* The formats OpenCL may make images of, as cl.c tries them
+ * (test_shareable_formats): those a kernel reads and writes in place. A level
+ * of any other format, or of one of these the driver doesn't share, reaches
+ * kernels through a shadow of one of the last five. */
+static const struct wined3d_cl_format cl_share_formats[] =
+{
+    {GL_R8, GL_RED, GL_UNSIGNED_BYTE}, {GL_RG8, GL_RG, GL_UNSIGNED_BYTE},
+    {GL_RGB8, GL_RGB, GL_UNSIGNED_BYTE}, {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE},
+    {GL_R16, GL_RED, GL_UNSIGNED_SHORT}, {GL_RG16, GL_RG, GL_UNSIGNED_SHORT}, {GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},
+    {GL_R16F, GL_RED, GL_HALF_FLOAT}, {GL_RG16F, GL_RG, GL_HALF_FLOAT}, {GL_RGB16F, GL_RGB, GL_HALF_FLOAT},
+    {GL_RG32F, GL_RG, GL_FLOAT}, {GL_RGB32F, GL_RGB, GL_FLOAT},
+    {GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE}, {GL_RG8UI, GL_RG_INTEGER, GL_UNSIGNED_BYTE},
+    {GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE}, {GL_R8I, GL_RED_INTEGER, GL_BYTE},
+    {GL_RG8I, GL_RG_INTEGER, GL_BYTE}, {GL_RGBA8I, GL_RGBA_INTEGER, GL_BYTE},
+    {GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT}, {GL_RG16UI, GL_RG_INTEGER, GL_UNSIGNED_SHORT},
+    {GL_RGBA16UI, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT}, {GL_R16I, GL_RED_INTEGER, GL_SHORT},
+    {GL_RG16I, GL_RG_INTEGER, GL_SHORT}, {GL_RGBA16I, GL_RGBA_INTEGER, GL_SHORT},
+    {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT}, {GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT},
+    {GL_R32I, GL_RED_INTEGER, GL_INT}, {GL_RG32I, GL_RG_INTEGER, GL_INT},
+    {GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, 1},
+    {GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT, 1},
+    {GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, 1},
+    {GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, 1},
+    /* The shadows' formats (cl_get_shadow). */
+    {GL_R32F, GL_RED, GL_FLOAT}, {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT}, {GL_RGBA32F, GL_RGBA, GL_FLOAT},
+    {GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT}, {GL_RGBA32I, GL_RGBA_INTEGER, GL_INT},
+};
+#define CL_SHADOW_FORMATS 5
+C_ASSERT(ARRAY_SIZE(cl_share_formats) <= WINED3D_CL_MAX_FORMATS);
+
 bool wined3d_cl_available(struct wined3d_context_gl *context_gl)
 {
+    UINT64 shadow_mask;
     NTSTATUS status;
 
     if (cl_state)
@@ -51,6 +82,8 @@ bool wined3d_cl_available(struct wined3d_context_gl *context_gl)
         return false;
     }
 
+    cl_caps.format_count = ARRAY_SIZE(cl_share_formats);
+    memcpy(cl_caps.formats, cl_share_formats, sizeof(cl_share_formats));
     if ((status = __wine_init_unix_call()) || (status = WINE_UNIX_CALL(unix_cl_init, &cl_caps)))
     {
         ERR_(winediag)("Compute shaders need OpenCL with OpenGL sharing (status %#lx); dispatches do nothing.\n",
@@ -58,10 +91,25 @@ bool wined3d_cl_available(struct wined3d_context_gl *context_gl)
         cl_state = -1;
         return false;
     }
-    TRACE("OpenCL compute: work group size %u, local memory %u, caps %#x.\n",
-            cl_caps.max_work_group_size, cl_caps.local_mem_size, cl_caps.caps);
+    shadow_mask = (((UINT64)1 << CL_SHADOW_FORMATS) - 1) << (ARRAY_SIZE(cl_share_formats) - CL_SHADOW_FORMATS);
+    if ((cl_caps.shareable & shadow_mask) != shadow_mask)
+    {
+        ERR_(winediag)("OpenCL shares too few OpenGL formats (%#llx); compute shader dispatches do nothing.\n",
+                (unsigned long long)cl_caps.shareable);
+        cl_state = -1;
+        return false;
+    }
+    TRACE("OpenCL compute: work group size %u, local memory %u, caps %#x, shareable formats %#llx.\n",
+            cl_caps.max_work_group_size, cl_caps.local_mem_size, cl_caps.caps, (unsigned long long)cl_caps.shareable);
     cl_state = 1;
     return true;
+}
+
+/* The WINED3D_CL_CAP_* of the device; 0 before wined3d_cl_available() has
+ * found OpenCL. */
+uint32_t wined3d_cl_get_caps(void)
+{
+    return cl_state > 0 ? cl_caps.caps : 0;
 }
 
 /* The group the names of the current context's OpenGL objects belong to: its
@@ -414,21 +462,14 @@ static enum wined3d_cl_channel cl_texture_channel(const struct wined3d_texture *
 /* Whether OpenCL makes images of OpenGL textures of an internal format. */
 static bool cl_gl_format_shareable(GLenum internal)
 {
-    switch (internal)
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(cl_share_formats); ++i)
     {
-        case GL_R8: case GL_RG8: case GL_RGB8: case GL_RGBA8:
-        case GL_R16: case GL_RG16: case GL_RGBA16:
-        case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
-        case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
-        case GL_R8UI: case GL_RG8UI: case GL_RGBA8UI: case GL_R8I: case GL_RG8I: case GL_RGBA8I:
-        case GL_R16UI: case GL_RG16UI: case GL_RGBA16UI: case GL_R16I: case GL_RG16I: case GL_RGBA16I:
-        case GL_R32UI: case GL_RG32UI: case GL_RGBA32UI: case GL_R32I: case GL_RG32I: case GL_RGBA32I:
-        case GL_DEPTH_COMPONENT16: case GL_DEPTH_COMPONENT32F:
-        case GL_DEPTH24_STENCIL8: case GL_DEPTH32F_STENCIL8:
-            return true;
-        default:
-            return false;
+        if (cl_share_formats[i].internal == internal)
+            return !!(cl_caps.shareable & ((UINT64)1 << i));
     }
+    return false;
 }
 
 /* A texture level of a format OpenCL can't share has a shadow texture of one
@@ -1576,7 +1617,12 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
     params.group_size[2] = group_size->z;
     params.sync = 0;
     params.batch = cl_batch_enabled();
-    if ((status = cl_run_kernel(context_gl, &params)))
+    if ((status = cl_run_kernel(context_gl, &params)) == STATUS_PENDING)
+    {
+        /* The kernel's build is still running in the background, or failed. */
+        TRACE("Compute shader %p: no kernel to run yet.\n", shader);
+    }
+    else if (status)
     {
         for (i = 0; i < kernel->binding_count; ++i)
         {
@@ -1828,7 +1874,7 @@ static bool cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const
     }
     params.sync = 0;
     params.batch = cl_batch_enabled();
-    if ((status = cl_run_kernel(context_gl, &params)))
+    if ((status = cl_run_kernel(context_gl, &params)) && status != STATUS_PENDING)
         ERR("Failed to clear unordered access view %p, status %#lx.\n", view, status);
     else if (params.batch)
     {

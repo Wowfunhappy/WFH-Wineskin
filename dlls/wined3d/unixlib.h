@@ -71,12 +71,26 @@ struct va_decoder_decode_params
  * context shares the host OpenGL share group of that context. */
 #define WINED3D_CL_MAX_ARG_DATA 32
 
+#define WINED3D_CL_MAX_FORMATS 64
+
+/* An OpenGL texture format, as glTexImage2D() takes it. */
+struct wined3d_cl_format
+{
+    UINT32 internal, format, type;
+    UINT32 depth; /* a depth or depth/stencil format */
+};
+
 struct wined3d_cl_init_params
 {
     UINT32 max_work_group_size;
     UINT32 local_mem_size;
     UINT32 max_write_images;
     UINT32 caps; /* WINED3D_CL_CAP_* */
+    /* In: the formats wined3d would share. Out: bit i of "shareable" is set
+     * if OpenCL makes a 2D image of an OpenGL texture of formats[i]. */
+    UINT32 format_count;
+    struct wined3d_cl_format formats[WINED3D_CL_MAX_FORMATS];
+    UINT64 shareable;
 };
 
 #define WINED3D_CL_CAP_DEPTH_IMAGES 0x1u

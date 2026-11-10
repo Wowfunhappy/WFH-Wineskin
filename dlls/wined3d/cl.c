@@ -32,7 +32,10 @@
 
 #ifdef __APPLE__
 
+#include <errno.h>
+#include <math.h>
 #include <pthread.h>
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,13 +161,55 @@ struct cl_kernel
 {
     struct cl_device_context *ctx;
     cl_program program;
-    cl_kernel kernel;
+    cl_kernel kernel; /* NULL until a build in the background has finished */
+    struct cl_build_job *job; /* that build */
+    unsigned int group_threads;
 };
 
 static void batch_flush(struct cl_device_context *ctx);
 
 static pthread_mutex_t cl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct cl_device_context *cl_contexts;
+
+/* Whether the OpenCL device CGL names for the OpenGL context can run
+ * wined3d's kernels: a GPU (a Mac whose GPU has no OpenCL, such as one with
+ * Intel HD Graphics 3000, can name the CPU, which copies every shared
+ * object through system memory), with images, OpenCL C 1.2, and OpenGL
+ * sharing. WINESKIN_CL_ANY_DEVICE=1 accepts a device of any type. */
+static BOOL device_usable(cl_device_id device, const char *name)
+{
+    char version[128], extensions[4096];
+    cl_device_type type = 0;
+    cl_bool images = CL_FALSE;
+    const char *why = NULL;
+    int major = 0, minor = 0;
+
+    version[0] = extensions[0] = 0;
+    clGetDeviceInfo(device, CL_DEVICE_TYPE, sizeof(type), &type, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_IMAGE_SUPPORT, sizeof(images), &images, NULL);
+    clGetDeviceInfo(device, CL_DEVICE_OPENCL_C_VERSION, sizeof(version), version, NULL);
+    version[sizeof(version) - 1] = 0;
+    if (clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, NULL))
+        extensions[0] = 0;
+    extensions[sizeof(extensions) - 1] = 0;
+    sscanf(version, "OpenCL C %d.%d", &major, &minor);
+
+    if (!(type & CL_DEVICE_TYPE_GPU) && !getenv("WINESKIN_CL_ANY_DEVICE"))
+        why = "it is not a GPU";
+    else if (!images)
+        why = "it has no images";
+    else if (major < 1 || (major == 1 && minor < 2))
+        why = "its OpenCL C is older than 1.2";
+    else if (!strstr(extensions, "cl_APPLE_gl_sharing") && !strstr(extensions, "cl_khr_gl_sharing"))
+        why = "it has no OpenGL sharing";
+    if (why)
+    {
+        ERR("The OpenCL device for the OpenGL context, %s (%s), can't run compute shaders: %s.\n",
+                debugstr_a(name), debugstr_a(version), why);
+        return FALSE;
+    }
+    return TRUE;
+}
 
 /* The OpenCL context for the current OpenGL context's host share group. */
 static struct cl_device_context *get_device_context(void)
@@ -217,6 +262,13 @@ static struct cl_device_context *get_device_context(void)
     clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(name), name, NULL);
     name[sizeof(name) - 1] = 0;
     TRACE("Using OpenCL device %s.\n", debugstr_a(name));
+
+    if (!device_usable(device, name))
+    {
+        clReleaseContext(ctx->context);
+        free(ctx);
+        return NULL;
+    }
 
     if (!(ctx->queue = clCreateCommandQueue(ctx->context, device, 0, &err)))
     {
@@ -308,6 +360,177 @@ static void cl_context_release(struct cl_device_context *ctx)
     free(ctx);
 }
 
+/* OpenGL 3.0 framebuffer functions, which 10.9's OpenGL/gl.h declares only as EXT ones. */
+extern void glGenFramebuffers(GLsizei n, GLuint *framebuffers);
+extern void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers);
+extern void glBindFramebuffer(GLenum target, GLuint framebuffer);
+extern void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+#define WINED3D_GL_DRAW_FRAMEBUFFER 0x8ca9
+#define WINED3D_GL_DRAW_FRAMEBUFFER_BINDING 0x8ca6
+#define WINED3D_GL_DEPTH_ATTACHMENT 0x8d00
+#define WINED3D_GL_DEPTH_STENCIL_ATTACHMENT 0x821a
+#define WINED3D_GL_RASTERIZER_DISCARD 0x8c89
+
+/* Whether a kernel reads the depth OpenGL rendered into a texture, through
+ * an image2d_t with normalised coordinates, as wined3d's kernels read it
+ * (shader_cl_image_type() and shader_cl_ld() in glsl_cl.h). The texture's
+ * quadrants are cleared to four depths, and each is read at a texel centre.
+ * A depth texture shares as an image of CL_DEPTH channel order, which OpenCL
+ * C reads as an image2d_depth_t (cl_khr_depth_images); NVIDIA's OpenCL on
+ * 10.9 reads it as an image2d_t, and its image2d_depth_t reads the wrong
+ * texel (~/WineskinTests/d3d11tools/probe/cldepth.c). Intel's for HD Graphics
+ * 5000 returns 0 either way (~/WineskinTests/probe-air). */
+static BOOL test_depth_read(struct cl_device_context *ctx, GLuint texture, BOOL stencil, cl_mem mem)
+{
+    static const char source[] =
+        "__constant sampler_t s = CLK_NORMALIZED_COORDS_TRUE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;\n"
+        "__kernel void k(read_only image2d_t img, __global float *o)\n"
+        "{\n"
+        "    int i = get_global_id(0);\n"
+        "    o[i] = read_imagef(img, s, (float2)(i & 1 ? 0.875f : 0.125f, i & 2 ? 0.875f : 0.125f)).x;\n"
+        "}\n";
+    static const float depths[4] = {0.125f, 0.375f, 0.625f, 0.875f};
+    GLint old_fbo = 0, old_box[4], old_mask = 0;
+    GLboolean old_scissor, old_discard;
+    const char *src = source;
+    GLfloat old_clear = 0.0f;
+    float result[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+    size_t four = 4;
+    BOOL ok = FALSE;
+    cl_program program;
+    cl_kernel kernel;
+    cl_mem out;
+    GLuint fbo;
+    cl_int err;
+    int i;
+
+    glGetIntegerv(WINED3D_GL_DRAW_FRAMEBUFFER_BINDING, &old_fbo);
+    glGetIntegerv(GL_SCISSOR_BOX, old_box);
+    glGetIntegerv(GL_DEPTH_WRITEMASK, &old_mask);
+    glGetFloatv(GL_DEPTH_CLEAR_VALUE, &old_clear);
+    old_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    old_discard = glIsEnabled(WINED3D_GL_RASTERIZER_DISCARD);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(WINED3D_GL_DRAW_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(WINED3D_GL_DRAW_FRAMEBUFFER,
+            stencil ? WINED3D_GL_DEPTH_STENCIL_ATTACHMENT : WINED3D_GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
+    glDepthMask(GL_TRUE);
+    glDisable(WINED3D_GL_RASTERIZER_DISCARD);
+    glEnable(GL_SCISSOR_TEST);
+    for (i = 0; i < 4; ++i)
+    {
+        glScissor(i & 1 ? 2 : 0, i & 2 ? 2 : 0, 2, 2);
+        glClearDepth(depths[i]);
+        glClear(GL_DEPTH_BUFFER_BIT);
+    }
+    glFinish();
+
+    glBindFramebuffer(WINED3D_GL_DRAW_FRAMEBUFFER, old_fbo);
+    glDeleteFramebuffers(1, &fbo);
+    glScissor(old_box[0], old_box[1], old_box[2], old_box[3]);
+    if (!old_scissor)
+        glDisable(GL_SCISSOR_TEST);
+    if (old_discard)
+        glEnable(WINED3D_GL_RASTERIZER_DISCARD);
+    glDepthMask(old_mask ? GL_TRUE : GL_FALSE);
+    glClearDepth(old_clear);
+
+    if (!(program = clCreateProgramWithSource(ctx->context, 1, &src, NULL, &err)))
+        return FALSE;
+    if (!clBuildProgram(program, 1, &ctx->device, NULL, NULL, NULL)
+            && (kernel = clCreateKernel(program, "k", &err)))
+    {
+        if ((out = clCreateBuffer(ctx->context, CL_MEM_READ_WRITE, sizeof(result), NULL, &err)))
+        {
+            clSetKernelArg(kernel, 0, sizeof(mem), &mem);
+            clSetKernelArg(kernel, 1, sizeof(out), &out);
+            if (!clEnqueueAcquireGLObjects(ctx->queue, 1, &mem, 0, NULL, NULL))
+            {
+                clEnqueueNDRangeKernel(ctx->queue, kernel, 1, NULL, &four, NULL, 0, NULL, NULL);
+                clEnqueueReleaseGLObjects(ctx->queue, 1, &mem, 0, NULL, NULL);
+                if (!clEnqueueReadBuffer(ctx->queue, out, CL_TRUE, 0, sizeof(result), result, 0, NULL, NULL))
+                {
+                    ok = TRUE;
+                    for (i = 0; i < 4; ++i)
+                    {
+                        if (fabsf(result[i] - depths[i]) > 1.0e-3f)
+                            ok = FALSE;
+                    }
+                }
+            }
+            clFinish(ctx->queue);
+            clReleaseMemObject(out);
+        }
+        clReleaseKernel(kernel);
+    }
+    clReleaseProgram(program);
+    TRACE("Depth read through OpenCL: %.4f %.4f %.4f %.4f (expected 0.125 0.375 0.625 0.875).\n",
+            result[0], result[1], result[2], result[3]);
+    return ok;
+}
+
+/* Which of the formats OpenCL makes images of: each is tried on a 4x4 OpenGL
+ * texture, made and deleted on the host with the current context's bindings
+ * and the state its tests change restored. Drivers differ: the OpenCL
+ * specification lists RGBA, BGRA and, with OpenCL 1.2, R and RG formats, and
+ * each driver adds some of its own. A depth format counts only if a kernel
+ * reads what OpenGL rendered (test_depth_read()); a depth texture of another
+ * reaches kernels through an R32F shadow. WINESKIN_CL_NO_DEPTH=1 shares no
+ * depth format. */
+static UINT64 test_shareable_formats(struct cl_device_context *ctx, const struct wined3d_cl_init_params *params)
+{
+    GLint old_texture = 0, old_unpack = 0;
+    BOOL depth_tested = FALSE, depth_ok = FALSE, no_depth = !!getenv("WINESKIN_CL_NO_DEPTH");
+    UINT64 mask = 0;
+    unsigned int i;
+    GLuint texture;
+    cl_int err;
+    cl_mem mem;
+
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &old_unpack);
+    if (old_unpack)
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    for (i = 0; i < params->format_count && i < WINED3D_CL_MAX_FORMATS; ++i)
+    {
+        const struct wined3d_cl_format *f = &params->formats[i];
+
+        if (f->depth && (no_depth || (depth_tested && !depth_ok)))
+            continue;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        while (glGetError());
+        glTexImage2D(GL_TEXTURE_2D, 0, f->internal, 4, 4, 0, f->format, f->type, NULL);
+        if (!glGetError() && (mem = clCreateFromGLTexture(ctx->context, CL_MEM_READ_WRITE, GL_TEXTURE_2D, 0, texture, &err)))
+        {
+            if (!f->depth || test_depth_read(ctx, texture, f->format != GL_DEPTH_COMPONENT, mem))
+                mask |= (UINT64)1 << i;
+            else
+                TRACE("OpenCL reads no depth from internal format %#x.\n", f->internal);
+            if (f->depth && !depth_tested)
+            {
+                depth_tested = TRUE;
+                depth_ok = !!(mask & ((UINT64)1 << i));
+            }
+            clReleaseMemObject(mem);
+        }
+        else
+        {
+            TRACE("OpenCL makes no image of internal format %#x.\n", f->internal);
+        }
+        glBindTexture(GL_TEXTURE_2D, old_texture);
+        glDeleteTextures(1, &texture);
+    }
+    if (old_unpack)
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, old_unpack);
+    while (glGetError());
+    TRACE("Shareable formats %#llx.\n", (unsigned long long)mask);
+    return mask;
+}
+
 static NTSTATUS cl_init(void *args)
 {
     struct wined3d_cl_init_params *params = args;
@@ -330,6 +553,7 @@ static NTSTATUS cl_init(void *args)
     if (clGetDeviceInfo(ctx->device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, NULL))
         extensions[0] = 0;
     extensions[sizeof(extensions) - 1] = 0;
+    params->shareable = test_shareable_formats(ctx, params);
     pthread_mutex_unlock(&cl_mutex);
 
     params->max_work_group_size = wg_size;
@@ -348,58 +572,139 @@ static NTSTATUS cl_init(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS cl_build(void *args)
+/* Kernel builds run on a thread of their own. Apple's clBuildProgram()
+ * builds before it returns, callback or not, and a driver's compiler can take
+ * minutes over a large kernel and then fail: NVIDIA's on 10.9 says "Error
+ * getting function data from server" after two, Intel's for HD Graphics 5000
+ * gives up after 14 s on a kernel of 256 inlined format decodes
+ * (~/WineskinTests/probe-air). The command stream waits for a build at most
+ * WINESKIN_CL_BUILD_WAIT seconds (10 by default; 0 waits for every build to
+ * end). A build still running then goes on in the background, and the
+ * kernel's dispatches do nothing until it has finished. The driver's compile
+ * server keeps finished builds by source, so a later run has them at once. */
+static const char cl_build_options[] = "-cl-single-precision-constant -cl-denorms-are-zero";
+
+struct cl_build_job
 {
-    struct wined3d_cl_build_params *params = args;
-    const char *source = (const char *)(ULONG_PTR)params->source;
-    static const char options[] = "-cl-single-precision-constant -cl-denorms-are-zero";
-    struct cl_device_context *ctx;
-    struct cl_kernel *kernel;
-    cl_program program;
-    size_t log_size, wg;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    cl_program program; /* a reference of the job's own */
+    cl_device_id device;
     cl_int err;
+    BOOL done;
+    BOOL abandoned; /* the kernel was released first; the thread frees the job */
+};
+
+static void build_job_free(struct cl_build_job *job)
+{
+    clReleaseProgram(job->program);
+    pthread_cond_destroy(&job->cond);
+    pthread_mutex_destroy(&job->mutex);
+    free(job);
+}
+
+static void *build_thread(void *arg)
+{
+    struct cl_build_job *job = arg;
+    BOOL abandoned;
+
+    job->err = clBuildProgram(job->program, 1, &job->device, cl_build_options, NULL, NULL);
+    pthread_mutex_lock(&job->mutex);
+    job->done = TRUE;
+    abandoned = job->abandoned;
+    pthread_cond_broadcast(&job->cond);
+    pthread_mutex_unlock(&job->mutex);
+    if (abandoned)
+        build_job_free(job);
+    return NULL;
+}
+
+/* Builds "program", waiting for the build at most WINESKIN_CL_BUILD_WAIT
+ * seconds. Returns NULL with the build's result in *err when the build has
+ * ended, or the job of a build still running. Called with cl_mutex held,
+ * which is released while the build runs. */
+static struct cl_build_job *build_program(cl_program program, cl_device_id device, cl_int *err)
+{
+    static double wait = -1.0;
+    struct cl_build_job *job;
+    struct timespec deadline;
+    struct timeval now;
+    pthread_attr_t attr;
+    pthread_t thread;
+    BOOL done;
+
+    if (wait < 0.0)
+    {
+        const char *env = getenv("WINESKIN_CL_BUILD_WAIT");
+
+        wait = env ? strtod(env, NULL) : 10.0;
+        if (wait < 0.0)
+            wait = 0.0;
+    }
+
+    if (!(job = calloc(1, sizeof(*job))))
+    {
+        *err = clBuildProgram(program, 1, &device, cl_build_options, NULL, NULL);
+        return NULL;
+    }
+    pthread_mutex_init(&job->mutex, NULL);
+    pthread_cond_init(&job->cond, NULL);
+    clRetainProgram(program);
+    job->program = program;
+    job->device = device;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    /* The drivers' compilers recurse deeply over large kernels. */
+    pthread_attr_setstacksize(&attr, 16 << 20);
+    if (pthread_create(&thread, &attr, build_thread, job))
+    {
+        pthread_attr_destroy(&attr);
+        build_job_free(job);
+        *err = clBuildProgram(program, 1, &device, cl_build_options, NULL, NULL);
+        return NULL;
+    }
+    pthread_attr_destroy(&attr);
+
+    pthread_mutex_unlock(&cl_mutex);
+    gettimeofday(&now, NULL);
+    deadline.tv_sec = now.tv_sec + (time_t)wait;
+    deadline.tv_nsec = now.tv_usec * 1000 + (long)((wait - (time_t)wait) * 1e9);
+    if (deadline.tv_nsec >= 1000000000)
+    {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&job->mutex);
+    while (!job->done)
+    {
+        if (wait == 0.0)
+            pthread_cond_wait(&job->cond, &job->mutex);
+        else if (pthread_cond_timedwait(&job->cond, &job->mutex, &deadline) == ETIMEDOUT)
+            break;
+    }
+    done = job->done;
+    pthread_mutex_unlock(&job->mutex);
+    pthread_mutex_lock(&cl_mutex);
+
+    if (!done)
+    {
+        WARN("A kernel build has taken %g s; the kernel's dispatches do nothing until it has finished.\n", wait);
+        return job;
+    }
+    *err = job->err;
+    build_job_free(job);
+    return NULL;
+}
+
+static void print_build_log(cl_program program, cl_device_id device, cl_int err)
+{
+    size_t log_size;
     char *log;
 
-    params->kernel = 0;
-
-    pthread_mutex_lock(&cl_mutex);
-    if (!(ctx = get_device_context()))
-    {
-        pthread_mutex_unlock(&cl_mutex);
-        return STATUS_NOT_SUPPORTED;
-    }
-
-    if (!(program = clCreateProgramWithSource(ctx->context, 1, &source, NULL, &err)))
-    {
-        pthread_mutex_unlock(&cl_mutex);
-        ERR("Failed to create an OpenCL program, error %d.\n", err);
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    err = clBuildProgram(program, 1, &ctx->device, options, NULL, NULL);
-    {
-        /* WINESKIN_CL_DUMP names a directory that receives the source of
-         * every kernel; the first line of a compute shader's kernel
-         * names the shader. */
-        const char *dir = getenv("WINESKIN_CL_DUMP");
-        static unsigned int count;
-        char path[1024];
-        FILE *f;
-
-        if (dir && strlen(dir) < sizeof(path) - 40)
-        {
-            snprintf(path, sizeof(path), "%s/kernel-%u%s.cl", dir, count++, err ? "-failed" : "");
-            if ((f = fopen(path, "w")))
-            {
-                fputs(source, f);
-                fclose(f);
-            }
-        }
-    }
-    if (!clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size)
+    if (!clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size)
             && log_size > 1 && (log = malloc(log_size + 1)))
     {
-        clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         log[log_size] = 0;
         if (err)
             ERR("Failed to build an OpenCL kernel, error %d:\n", err);
@@ -425,6 +730,112 @@ static NTSTATUS cl_build(void *args)
     {
         ERR("Failed to build an OpenCL kernel, error %d.\n", err);
     }
+}
+
+/* Makes the kernel of a built program; false if it has none, or a work
+ * group smaller than the shader's thread group. */
+static BOOL create_kernel(struct cl_kernel *kernel, size_t *wg)
+{
+    cl_int err;
+
+    if (!(kernel->kernel = clCreateKernel(kernel->program, "wined3d_cs", &err)))
+    {
+        ERR("Failed to create the OpenCL kernel, error %d.\n", err);
+        return FALSE;
+    }
+    if (clGetKernelWorkGroupInfo(kernel->kernel, kernel->ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(*wg), wg, NULL))
+        *wg = 0;
+    return TRUE;
+}
+
+/* Whether a kernel can run: one whose build went on in the background is
+ * made once the build has finished. Called with cl_mutex held. */
+static BOOL kernel_ready(struct cl_kernel *kernel)
+{
+    struct cl_build_job *job = kernel->job;
+    size_t wg;
+    BOOL done;
+
+    if (kernel->kernel)
+        return TRUE;
+    if (!job)
+        return FALSE;
+    pthread_mutex_lock(&job->mutex);
+    done = job->done;
+    pthread_mutex_unlock(&job->mutex);
+    if (!done)
+        return FALSE;
+
+    kernel->job = NULL;
+    print_build_log(kernel->program, kernel->ctx->device, job->err);
+    if (!job->err && create_kernel(kernel, &wg))
+    {
+        if (wg >= kernel->group_threads)
+        {
+            TRACE("Kernel %p built in the background.\n", kernel);
+        }
+        else
+        {
+            FIXME("The kernel's work group size %zu is smaller than its thread group (%u threads).\n",
+                    wg, kernel->group_threads);
+            clReleaseKernel(kernel->kernel);
+            kernel->kernel = NULL;
+        }
+    }
+    build_job_free(job);
+    return !!kernel->kernel;
+}
+
+static NTSTATUS cl_build(void *args)
+{
+    struct wined3d_cl_build_params *params = args;
+    const char *source = (const char *)(ULONG_PTR)params->source;
+    struct cl_build_job *job = NULL;
+    struct cl_device_context *ctx;
+    struct cl_kernel *kernel;
+    cl_program program;
+    cl_int err = 0;
+    size_t wg;
+
+    params->kernel = 0;
+
+    pthread_mutex_lock(&cl_mutex);
+    if (!(ctx = get_device_context()))
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (!(program = clCreateProgramWithSource(ctx->context, 1, &source, NULL, &err)))
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        ERR("Failed to create an OpenCL program, error %d.\n", err);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    job = build_program(program, ctx->device, &err);
+    {
+        /* WINESKIN_CL_DUMP names a directory that receives the source of
+         * every kernel; the first line of a compute shader's kernel
+         * names the shader. */
+        const char *dir = getenv("WINESKIN_CL_DUMP");
+        static unsigned int count;
+        char path[1024];
+        FILE *f;
+
+        if (dir && strlen(dir) < sizeof(path) - 40)
+        {
+            snprintf(path, sizeof(path), "%s/kernel-%u%s.cl", dir, count++,
+                    job ? "-slow" : err ? "-failed" : "");
+            if ((f = fopen(path, "w")))
+            {
+                fputs(source, f);
+                fclose(f);
+            }
+        }
+    }
+    if (!job)
+        print_build_log(program, ctx->device, err);
     if (err)
     {
         clReleaseProgram(program);
@@ -434,26 +845,40 @@ static NTSTATUS cl_build(void *args)
 
     if (!(kernel = calloc(1, sizeof(*kernel))))
     {
+        if (job)
+        {
+            BOOL done;
+
+            pthread_mutex_lock(&job->mutex);
+            done = job->done;
+            job->abandoned = !done;
+            pthread_mutex_unlock(&job->mutex);
+            if (done)
+                build_job_free(job);
+        }
         clReleaseProgram(program);
         pthread_mutex_unlock(&cl_mutex);
         return STATUS_NO_MEMORY;
     }
     kernel->ctx = ctx;
-    ++ctx->refcount;
-    cl_context_add_group(ctx, params->group);
     kernel->program = program;
-    if (!(kernel->kernel = clCreateKernel(program, "wined3d_cs", &err)))
+    kernel->job = job;
+    kernel->group_threads = params->group_size[0] * params->group_size[1] * params->group_size[2];
+    if (job)
     {
-        ERR("Failed to create the OpenCL kernel, error %d.\n", err);
+        /* Checked when the build has finished (kernel_ready()). */
+        clGetDeviceInfo(ctx->device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(wg), &wg, NULL);
+    }
+    else if (!create_kernel(kernel, &wg))
+    {
         clReleaseProgram(program);
         free(kernel);
         pthread_mutex_unlock(&cl_mutex);
         return STATUS_UNSUCCESSFUL;
     }
-    if (!clGetKernelWorkGroupInfo(kernel->kernel, ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(wg), &wg, NULL))
-        params->work_group_size = wg;
-    else
-        params->work_group_size = 0;
+    ++ctx->refcount;
+    cl_context_add_group(ctx, params->group);
+    params->work_group_size = wg;
     pthread_mutex_unlock(&cl_mutex);
 
     params->kernel = (ULONG_PTR)kernel;
@@ -464,12 +889,25 @@ static NTSTATUS cl_release_kernel(void *args)
 {
     const struct wined3d_cl_release_kernel_params *params = args;
     struct cl_kernel *kernel = (struct cl_kernel *)(ULONG_PTR)params->kernel;
+    struct cl_build_job *job;
 
     if (!kernel)
         return STATUS_SUCCESS;
     pthread_mutex_lock(&cl_mutex);
     batch_flush(kernel->ctx);
-    clReleaseKernel(kernel->kernel);
+    if ((job = kernel->job))
+    {
+        BOOL done;
+
+        pthread_mutex_lock(&job->mutex);
+        done = job->done;
+        job->abandoned = !done;
+        pthread_mutex_unlock(&job->mutex);
+        if (done)
+            build_job_free(job);
+    }
+    if (kernel->kernel)
+        clReleaseKernel(kernel->kernel);
     clReleaseProgram(kernel->program);
     cl_context_release(kernel->ctx);
     pthread_mutex_unlock(&cl_mutex);
@@ -927,6 +1365,13 @@ static NTSTATUS cl_dispatch(void *args)
         pthread_mutex_unlock(&cl_mutex);
         WARN("The kernel's OpenCL context is released.\n");
         return STATUS_INVALID_PARAMETER;
+    }
+
+    /* A kernel still building, or whose build failed, runs nothing. */
+    if (!kernel_ready(kernel))
+    {
+        pthread_mutex_unlock(&cl_mutex);
+        return STATUS_PENDING;
     }
 
     if (cl_stats < 0)

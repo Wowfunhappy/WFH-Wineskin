@@ -1696,6 +1696,51 @@ static void shader_cl_dump_source(const char *source)
     }
 }
 
+/* Whether the device's OpenCL declares the shader's images of the kinds in
+ * "key": writes to 3D images need cl_khr_3d_image_writes, which Intel's
+ * OpenCL for HD Graphics 5000 lacks, and multisample images
+ * cl_khr_gl_msaa_sharing, which only NVIDIA's has on 10.9. */
+static bool shader_cl_image_kind_supported(uint8_t kind, bool write)
+{
+    unsigned int dim = WINED3D_CL_IMAGE_KIND_DIM(kind), caps = wined3d_cl_get_caps();
+
+    if (write && dim == WINED3D_CL_IMAGE_3D && !(caps & WINED3D_CL_CAP_3D_WRITES))
+    {
+        FIXME_(d3d_cl)("Writes to 3D images need cl_khr_3d_image_writes.\n");
+        return false;
+    }
+    if ((dim == WINED3D_CL_IMAGE_2D_MSAA || dim == WINED3D_CL_IMAGE_2D_ARRAY_MSAA) && !(caps & WINED3D_CL_CAP_MSAA_IMAGES))
+    {
+        FIXME_(d3d_cl)("Multisample images need cl_khr_gl_msaa_sharing.\n");
+        return false;
+    }
+    return true;
+}
+
+static bool shader_cl_kinds_supported(const struct wined3d_shader *shader, const struct wined3d_cl_kernel_key *key)
+{
+    const struct wined3d_shader_reg_maps *reg_maps = &shader->reg_maps;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(reg_maps->resource_info); ++i)
+    {
+        if (reg_maps->resource_info[i].type > WINED3D_SHADER_RESOURCE_BUFFER
+                && !shader_cl_image_kind_supported(key->srv[i], false))
+            goto unsupported;
+    }
+    for (i = 0; i < ARRAY_SIZE(reg_maps->uav_resource_info); ++i)
+    {
+        if (reg_maps->uav_resource_info[i].type > WINED3D_SHADER_RESOURCE_BUFFER
+                && !shader_cl_image_kind_supported(key->uav[i], true))
+            goto unsupported;
+    }
+    return true;
+
+unsupported:
+    FIXME_(d3d_cl)("Compute shader %p: its dispatches do nothing on this OpenCL device.\n", shader);
+    return false;
+}
+
 /* The kernel of a compute shader for the image kinds in "key", generated and
  * built the first time it is asked for. A shader without a translation gives
  * NULL, every time. */
@@ -1735,6 +1780,8 @@ const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_contex
     memset(kernel, 0, sizeof(*kernel));
     kernel->key = *key;
 
+    if (!shader_cl_kinds_supported(shader, key))
+        return NULL;
     TRACE_(d3d_cl)("Generating the OpenCL kernel for compute shader %p.\n", shader);
     if (!shader_glsl_generate_cl_kernel(context_gl, priv, shader, key, kernel))
     {
@@ -1796,6 +1843,12 @@ bool wined3d_glsl_build_cl_clear_kernel(uint8_t kind, const unsigned int *group_
     {
         dim = WINED3D_CL_IMAGE_KIND_DIM(kind);
         type = dim < ARRAY_SIZE(types) ? types[dim] : WINED3D_SHADER_RESOURCE_NONE;
+        if (!shader_cl_image_kind_supported(kind, true))
+        {
+            string_buffer_free(&coord);
+            string_buffer_free(&buffer);
+            return false;
+        }
         if (!type || WINED3D_CL_IMAGE_KIND_CHANNEL(kind) == WINED3D_CL_CHANNEL_DEPTH)
         {
             FIXME_(d3d_cl)("Unhandled image kind %#x.\n", kind);
