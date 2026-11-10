@@ -637,7 +637,7 @@ void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const
             fprintf(dump.log, "      s%u: address %u %u %u, filter min %u mag %u mip %u, compare %u\n", i,
                     sampler->desc.address_u, sampler->desc.address_v, sampler->desc.address_w,
                     sampler->desc.min_filter, sampler->desc.mag_filter, sampler->desc.mip_filter,
-                    sampler->desc.compare);
+                    (unsigned int)sampler->desc.comparison_func);
     }
     for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
     {
