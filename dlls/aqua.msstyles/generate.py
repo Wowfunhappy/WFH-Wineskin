@@ -1412,6 +1412,16 @@ def build_ini(color_name):
     ini.section('Status.GripperPane', 'BgType = None')
     ini.section('Status.Gripper', 'BgType = None')
 
+    # TaskDialog: a Mac alert is one plain window background, with no white
+    # message panel above the buttons. Qt draws its message boxes and input
+    # dialogs with these two panels.
+    for part in ('PrimaryPanel', 'SecondaryPanel'):
+        ini.section('TaskDialog.' + part,
+                    'BgType = BorderFill',
+                    'BorderSize = 0',
+                    'FillColor = 236 236 236',
+                    comment='TaskDialog' if part == 'PrimaryPanel' else None)
+
     # Tab: segments sit on the top edge of the pane; comctl32 draws the selected
     # one 2 pixels larger at the top and the sides, and every tab 3 pixels into the pane.
     ini.section('Tab', 'BgType = None', comment='Tab')

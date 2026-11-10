@@ -386,7 +386,9 @@ limit on every wait.
 - **Aqua theme.** `dlls/aqua.msstyles`, the default theme, draws common controls as OS X 10.9 draws them,
   with Lucida Grande for menus, captions, message boxes and status bars. `generate.py` in that directory
   draws every bitmap. Dialogs use Lucida Grande too: `wine.inf` substitutes it for "MS Shell Dlg" and
-  "MS Shell Dlg 2", and dialog templates size their controls from it.
+  "MS Shell Dlg 2", and dialog templates size their controls from it. Its TaskDialog panels are the plain
+  window background of a Mac alert; Qt's Windows style paints message boxes and input dialogs with them,
+  and a theme without them leaves those dialogs black.
 - **Text smoothing.** The wrapper sets the prefix's Windows text smoothing to match the Mac's: ClearType
   (subpixel) when the Mac uses LCD font smoothing, standard (grayscale) when "Use LCD font smoothing when
   available" is off. `MatchFontSmoothing` writes `HKCU\Control Panel\Desktop` only when the Mac's setting
