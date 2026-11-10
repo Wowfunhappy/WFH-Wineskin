@@ -117,7 +117,8 @@ void wined3d_cl_finish(void)
 /* Dispatches go to the Unix side as a batch (wined3d_cl_dispatch_params.batch),
  * enqueued when the command stream next has OpenGL touch an object the
  * batch uses, or nothing to do: before any operation but setting state, a
- * dispatch, or one on resources the batch does not use (cs.c), before a
+ * dispatch, or a draw or other operation on resources the batch does not
+ * use (cs.c), before a
  * dispatch's own OpenGL work (copies of resources), and when the command
  * stream waits. wined3d_device.cl_batch_resources are the resources the
  * batch uses through OpenGL objects (constant buffers it copies are not
@@ -188,6 +189,114 @@ bool wined3d_cl_batch_uses_resource(const struct wined3d_device *device, const s
     {
         if (device->cl_batch_resources[i] == resource)
             return true;
+    }
+    return false;
+}
+
+static bool cl_batch_uses_buffer(const struct wined3d_device *device, const struct wined3d_buffer *buffer)
+{
+    return buffer && wined3d_cl_batch_uses_resource(device, &buffer->resource);
+}
+
+/* Whether a draw touches a resource the open batch uses: its render targets
+ * and depth buffer, vertex, index and stream output buffers, the constant
+ * buffers and resource views its shaders declare, the graphics unordered
+ * access views, and the buffer of an indirect draw. A draw that touches none
+ * leaves the batch open: its kernels then run after the draw, which neither
+ * reads what they write nor writes what they read. */
+/* WINESKIN_CL_STATS=1: what draws that end a batch share with it. */
+enum cl_draw_conflict
+{
+    CL_DRAW_OVERFLOW, CL_DRAW_INDEX, CL_DRAW_RT, CL_DRAW_DS, CL_DRAW_VB, CL_DRAW_SO, CL_DRAW_UAV, CL_DRAW_CB,
+    CL_DRAW_SRV_BUFFER, CL_DRAW_SRV, CL_DRAW_COUNT
+};
+
+static bool cl_draw_conflict(enum cl_draw_conflict reason)
+{
+    static const char *names[CL_DRAW_COUNT] = {"overflow", "index/indirect", "rt", "ds", "vb", "so", "uav", "cb",
+            "srv-buffer", "srv-texture"};
+    static unsigned int counts[CL_DRAW_COUNT], total;
+    static int stats = -1;
+
+    if (stats < 0)
+        stats = !!getenv("WINESKIN_CL_STATS");
+    if (stats)
+    {
+        ++counts[reason];
+        if (++total == 1000)
+        {
+            char line[256];
+            unsigned int i, len = 0;
+
+            for (i = 0; i < CL_DRAW_COUNT; ++i)
+                len += snprintf(line + len, sizeof(line) - len, " %s %u", names[i], counts[i]);
+            MESSAGE("CLSTATS draws ending batches share (of 1000):%s\n", line);
+            memset(counts, 0, sizeof(counts));
+            total = 0;
+        }
+    }
+    return true;
+}
+
+bool wined3d_cl_batch_uses_draw_resources(const struct wined3d_device *device, const struct wined3d_state *state,
+        const struct wined3d_buffer *indirect_buffer)
+{
+    static const enum wined3d_shader_type stages[] =
+    {
+        WINED3D_SHADER_TYPE_VERTEX, WINED3D_SHADER_TYPE_HULL, WINED3D_SHADER_TYPE_DOMAIN,
+        WINED3D_SHADER_TYPE_GEOMETRY, WINED3D_SHADER_TYPE_PIXEL,
+    };
+    unsigned int i, j;
+
+    if (device->cl_batch_resource_count > ARRAY_SIZE(device->cl_batch_resources))
+        return cl_draw_conflict(CL_DRAW_OVERFLOW);
+    if (cl_batch_uses_buffer(device, indirect_buffer) || cl_batch_uses_buffer(device, state->index_buffer))
+        return cl_draw_conflict(CL_DRAW_INDEX);
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets); ++i)
+    {
+        if (state->fb.render_targets[i]
+                && wined3d_cl_batch_uses_resource(device, state->fb.render_targets[i]->resource))
+            return cl_draw_conflict(CL_DRAW_RT);
+    }
+    if (state->fb.depth_stencil && wined3d_cl_batch_uses_resource(device, state->fb.depth_stencil->resource))
+        return cl_draw_conflict(CL_DRAW_DS);
+    for (i = 0; i < ARRAY_SIZE(state->streams); ++i)
+    {
+        if (cl_batch_uses_buffer(device, state->streams[i].buffer))
+            return cl_draw_conflict(CL_DRAW_VB);
+    }
+    for (i = 0; i < ARRAY_SIZE(state->stream_output); ++i)
+    {
+        if (cl_batch_uses_buffer(device, state->stream_output[i].buffer))
+            return cl_draw_conflict(CL_DRAW_SO);
+    }
+    for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
+    {
+        const struct wined3d_unordered_access_view *view = state->unordered_access_view[WINED3D_PIPELINE_GRAPHICS][i];
+
+        if (view && wined3d_cl_batch_uses_resource(device, view->resource))
+            return cl_draw_conflict(CL_DRAW_UAV);
+    }
+    for (i = 0; i < ARRAY_SIZE(stages); ++i)
+    {
+        const struct wined3d_shader *shader = state->shader[stages[i]];
+        const struct wined3d_shader_reg_maps *reg_maps;
+
+        if (!shader)
+            continue;
+        reg_maps = &shader->reg_maps;
+        for (j = 0; j < WINED3D_MAX_CBS; ++j)
+        {
+            if (reg_maps->cb_sizes[j] && cl_batch_uses_buffer(device, state->cb[stages[i]][j].buffer))
+                return cl_draw_conflict(CL_DRAW_CB);
+        }
+        for (j = 0; j < ARRAY_SIZE(reg_maps->resource_info); ++j)
+        {
+            const struct wined3d_shader_resource_view *view = state->shader_resource_view[stages[i]][j];
+
+            if (reg_maps->resource_info[j].type && view && wined3d_cl_batch_uses_resource(device, view->resource))
+                return cl_draw_conflict(view->resource->type == WINED3D_RTYPE_BUFFER ? CL_DRAW_SRV_BUFFER : CL_DRAW_SRV);
+        }
     }
     return false;
 }
@@ -963,8 +1072,6 @@ static void cl_arg_gl_buffer(struct wined3d_cl_arg *arg, struct wined3d_bo_gl *b
 {
     arg->type = WINED3D_CL_ARG_GL_BUFFER;
     arg->gl_name = bo_gl->id;
-    /* See get_gl_mem() in cl.c. */
-    arg->level = bo_gl->b.cl_serial;
 }
 
 static LONG cl_serial;

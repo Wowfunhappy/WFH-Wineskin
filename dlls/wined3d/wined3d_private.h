@@ -1627,10 +1627,10 @@ struct wined3d_bo
      * the value it was made at. */
     uint32_t content_serial;
     /* WINESKIN: OpenCL (cl_compute.c). cl_serial takes a new value, unique
-     * in the process, with every write from the CPU side, which may move the
-     * OpenGL buffer to a new data store. cl_mirror, when not NULL, is a copy
-     * of the contents in system memory, current while cl_mirror_serial
-     * equals cl_serial; a write by the GPU sets cl_mirror_serial to 0. */
+     * in the process, with every write from the CPU side. cl_mirror, when not
+     * NULL, is a copy of the contents in system memory, current while
+     * cl_mirror_serial equals cl_serial; a write by the GPU sets
+     * cl_mirror_serial to 0. */
     uint32_t cl_serial, cl_mirror_serial;
     void *cl_mirror;
 };
@@ -3151,6 +3151,9 @@ struct wined3d_device
 void wined3d_cl_flush_batch(struct wined3d_device *device);
 void wined3d_cl_flush_batch_for_op(struct wined3d_device *device, unsigned int opcode);
 bool wined3d_cl_batch_uses_resource(const struct wined3d_device *device, const struct wined3d_resource *resource);
+extern LONGLONG wined3d_cs_stat_upload_bytes; /* WINESKIN: see cs_stat() in cs.c */
+bool wined3d_cl_batch_uses_draw_resources(const struct wined3d_device *device, const struct wined3d_state *state,
+        const struct wined3d_buffer *indirect_buffer);
 
 void wined3d_device_cleanup(struct wined3d_device *device);
 BOOL device_context_add(struct wined3d_device *device, struct wined3d_context *context);

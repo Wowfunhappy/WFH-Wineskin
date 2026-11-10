@@ -317,6 +317,7 @@ void wined3d_buffer_upload_map_shadow(struct wined3d_buffer *buffer,
         offset = 0;
         size = resource->size;
     }
+    wined3d_cs_stat_upload_bytes += size;
     TRACE("Buffer %p, size %u, bind flags %#x: writing %u bytes at %u%s.\n", buffer,
             resource->size, resource->bind_flags, size, offset, discard ? ", discard" : "");
 

@@ -3116,8 +3116,8 @@ static void wined3d_cs_exec_execute_command_list(struct wined3d_cs *cs, const vo
 
 /* WINESKIN: OpenGL must not touch the objects of an open batch of OpenCL
  * dispatches (struct wined3d_device.cl_batch). Operations that set state,
- * dispatch, issue a query, or clear, copy, write or map resources the batch
- * does not use leave the batch open; the others enqueue it first. */
+ * dispatch, issue a query, or draw with, clear, copy, write or map resources
+ * the batch does not use leave the batch open; the others enqueue it first. */
 static void wined3d_cs_cl_before_op(struct wined3d_cs *cs, const void *data)
 {
     enum wined3d_cs_op opcode = *(const enum wined3d_cs_op *)data;
@@ -3152,6 +3152,16 @@ static void wined3d_cs_cl_before_op(struct wined3d_cs *cs, const void *data)
 
         case WINED3D_CS_OP_QUERY_ISSUE:
             return;
+
+        case WINED3D_CS_OP_DRAW:
+        {
+            const struct wined3d_cs_draw *op = data;
+
+            if (!wined3d_cl_batch_uses_draw_resources(device, &cs->state,
+                    op->parameters.indirect ? op->parameters.u.indirect.buffer : NULL))
+                return;
+            break;
+        }
 
         case WINED3D_CS_OP_SET_UNORDERED_ACCESS_VIEWS:
         {
@@ -3723,6 +3733,79 @@ static void wined3d_cs_command_unlock(const struct wined3d_cs *cs)
         LeaveCriticalSection(&wined3d_command_cs);
 }
 
+/* WINESKIN: WINESKIN_CS_STATS=1 prints, every 300 presents, how many
+ * milliseconds a frame the command stream thread spends in each operation,
+ * in enqueuing OpenCL batches before operations, in polling queries, and
+ * waiting for work. */
+enum
+{
+    CS_STAT_BATCH = WINED3D_CS_OP_STOP + 1,
+    CS_STAT_POLL,
+    CS_STAT_IDLE,
+    CS_STAT_COUNT
+};
+
+static int cs_stats = -1;
+LONGLONG wined3d_cs_stat_upload_bytes;
+static LONGLONG cs_stat_time[CS_STAT_COUNT], cs_stat_last, cs_stat_freq;
+static unsigned int cs_stat_ops[CS_STAT_COUNT], cs_stat_frames, cs_stat_slow;
+static const void *cs_stat_slow_op; /* the operation being timed; the first 60 copies taking over half a millisecond are named */
+
+static void cs_stat(unsigned int bucket)
+{
+    LARGE_INTEGER now, freq;
+    unsigned int i, j, order[CS_STAT_COUNT];
+    LONGLONG total = 0;
+    char line[1024];
+    int len;
+
+    QueryPerformanceCounter(&now);
+    if (cs_stat_slow_op && bucket == WINED3D_CS_OP_BLT_SUB_RESOURCE && cs_stat_slow < 60
+            && (now.QuadPart - cs_stat_last) * 2000 > cs_stat_freq)
+    {
+        const struct wined3d_cs_blt_sub_resource *blt = cs_stat_slow_op;
+
+        ++cs_stat_slow;
+        if (bucket == WINED3D_CS_OP_BLT_SUB_RESOURCE)
+            MESSAGE("CSSTATS slow %s %.2f ms: %s %s %u -> %s %s %u, box %s, flags %#x\n", debug_cs_op(bucket),
+                    (now.QuadPart - cs_stat_last) * 1000.0 / cs_stat_freq,
+                    debug_d3dresourcetype(blt->src_resource->type), debug_d3dformat(blt->src_resource->format->id),
+                    blt->src_sub_resource_idx, debug_d3dresourcetype(blt->dst_resource->type),
+                    debug_d3dformat(blt->dst_resource->format->id), blt->dst_sub_resource_idx,
+                    debug_box(&blt->src_box), blt->flags);
+        else
+            MESSAGE("CSSTATS slow %s %.2f ms\n", debug_cs_op(bucket), (now.QuadPart - cs_stat_last) * 1000.0 / cs_stat_freq);
+    }
+    cs_stat_time[bucket] += now.QuadPart - cs_stat_last;
+    cs_stat_last = now.QuadPart;
+    ++cs_stat_ops[bucket];
+    if (bucket != WINED3D_CS_OP_PRESENT || ++cs_stat_frames < 300)
+        return;
+    QueryPerformanceFrequency(&freq);
+    for (i = 0; i < CS_STAT_COUNT; ++i)
+    {
+        total += cs_stat_time[i];
+        for (j = i; j && cs_stat_time[order[j - 1]] < cs_stat_time[i]; --j)
+            order[j] = order[j - 1];
+        order[j] = i;
+    }
+    len = snprintf(line, sizeof(line), "CSSTATS ms/frame %.2f:", total * 1000.0 / freq.QuadPart / cs_stat_frames);
+    for (i = 0; i < 12 && len < sizeof(line) - 80; ++i)
+    {
+        unsigned int b = order[i];
+
+        len += snprintf(line + len, sizeof(line) - len, " %s %.2f (%.1f)",
+                b == CS_STAT_BATCH ? "cl_batch" : b == CS_STAT_POLL ? "poll" : b == CS_STAT_IDLE ? "idle"
+                : debug_cs_op(b) + 14, cs_stat_time[b] * 1000.0 / freq.QuadPart / cs_stat_frames,
+                (double)cs_stat_ops[b] / cs_stat_frames);
+    }
+    MESSAGE("%s; map shadow uploads %.0f KiB/frame\n", line, wined3d_cs_stat_upload_bytes / 1024.0 / cs_stat_frames);
+    wined3d_cs_stat_upload_bytes = 0;
+    memset(cs_stat_time, 0, sizeof(cs_stat_time));
+    memset(cs_stat_ops, 0, sizeof(cs_stat_ops));
+    cs_stat_frames = 0;
+}
+
 static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d_cs_queue *queue)
 {
     struct wined3d_cs_packet *packet;
@@ -3745,9 +3828,22 @@ static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d
         }
 
         wined3d_cs_command_lock(cs);
+        if (cs_stats > 0) /* WINESKIN */
+            cs_stat(CS_STAT_IDLE);
         if (cs->c.device->cl_batch) /* WINESKIN */
+        {
             wined3d_cs_cl_before_op(cs, packet->data);
+            if (cs_stats > 0)
+                cs_stat(CS_STAT_BATCH);
+        }
+        if (cs_stats > 0) /* WINESKIN */
+            cs_stat_slow_op = packet->data;
         wined3d_cs_op_handlers[opcode](cs, packet->data);
+        if (cs_stats > 0) /* WINESKIN */
+        {
+            cs_stat(opcode);
+            cs_stat_slow_op = NULL;
+        }
         wined3d_cs_command_unlock(cs);
         TRACE("%s executed.\n", debug_cs_packet(packet));
     }
@@ -3807,12 +3903,24 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
 
     list_init(&cs->query_poll_list);
     cs->thread_id = GetCurrentThreadId();
+    if (cs_stats < 0) /* WINESKIN */
+    {
+        LARGE_INTEGER freq;
+
+        cs_stats = !!getenv("WINESKIN_CS_STATS");
+        QueryPerformanceFrequency(&freq);
+        cs_stat_freq = freq.QuadPart;
+    }
     while (run)
     {
         if (++poll == WINED3D_CS_QUERY_POLL_INTERVAL)
         {
             wined3d_cs_command_lock(cs);
+            if (cs_stats > 0) /* WINESKIN */
+                cs_stat(CS_STAT_IDLE);
             poll_queries(cs);
+            if (cs_stats > 0) /* WINESKIN */
+                cs_stat(CS_STAT_POLL);
             wined3d_cs_command_unlock(cs);
             poll = 0;
         }
@@ -3826,7 +3934,11 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
                 if (cs->c.device->cl_batch) /* WINESKIN: nothing more to add to the batch for now */
                 {
                     wined3d_cs_command_lock(cs);
+                    if (cs_stats > 0)
+                        cs_stat(CS_STAT_IDLE);
                     wined3d_cl_flush_batch_for_op(cs->c.device, WINED3D_CS_OP_STOP);
+                    if (cs_stats > 0)
+                        cs_stat(CS_STAT_BATCH);
                     wined3d_cs_command_unlock(cs);
                 }
                 YieldProcessor();

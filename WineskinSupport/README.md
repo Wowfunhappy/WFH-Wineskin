@@ -268,12 +268,11 @@ in place.
 - OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
   view's first level only; cube textures are read one face at a time; subroutines (`call`) don't
   translate, and the shader's dispatches then do nothing.
-- The driver gives an OpenGL buffer a new data store when the buffer is written from the CPU while
-  commands that use it are queued, and a memory object made with `clCreateFromGLBuffer` keeps reading the
-  old store. A dispatch passes the serial of each buffer object's last write from the CPU side
-  (`wined3d_bo.cl_serial`, unique in the process), and `cl.c` makes the memory object of a buffer written
-  since again (`get_gl_mem`); writes by the GPU, kernels' included, keep the store. Making a memory object
-  costs a search through all of the share group's buffers, about 0.2 ms with Bit.Trip Rerunner's 30000.
+- A memory object made with `clCreateFromGLBuffer` reads what the buffer holds when it is acquired, however
+  the buffer was written since (`glBufferSubData`, `glBufferData`, an invalidating map), so it lives as long
+  as the buffer (`get_gl_mem`; `~/WineskinTests/d3d11tools/probe/clrename.c`, and in Bit.Trip Rerunner
+  15800 buffers read through their memory object and a new one gave the same data). Making one costs a
+  search through all of the share group's buffers, about 0.2 ms with Bit.Trip Rerunner's 30000.
 - Constant buffers, and buffer views of buffers the CPU writes, reach kernels as copies, not as OpenGL
   buffers: Unreal Engine rewrites a constant buffer before nearly every dispatch, and dynamic buffers of
   64 KiB every frame. A buffer object of at most 64 KiB that a dispatch reads gets a mirror of its contents
@@ -286,13 +285,15 @@ in place.
   (`~/WineskinTests/d3d11tools/probe/clwrite.c`). Constants as a by-value kernel argument are a hundred
   times slower on the GPU (`clbyval2.c`).
 - Every command buffer the driver submits (a `glFlush`, an OpenCL write, an acquire or release of OpenGL
-  objects) walks the objects in flight, which in a frame of Rerunner costs 0.1-0.2 ms. Dispatches
+  objects) is a call into the kernel, which in a frame of Rerunner costs 0.1-0.2 ms. Dispatches
   therefore go to `cl.c` as a batch (`wined3d_cl_dispatch_params.batch`): their copies, arguments and
   OpenGL objects are recorded, and one write, one `glFlush`, one acquire and one release serve the whole
   batch when it is enqueued (`unix_cl_flush`). OpenGL must not touch an object of an open batch, so the
   command stream enqueues it before any operation but those that set state, dispatch, issue a query, or
-  clear, copy, write or map resources the batch does not use (`wined3d_cs_cl_before_op` in `cs.c`, with
-  the resources in `wined3d_device.cl_batch_resources`); a dispatch enqueues it before loading a resource
+  draw with, clear, copy, write or map resources the batch does not use (`wined3d_cs_cl_before_op` in
+  `cs.c`, with the resources in `wined3d_device.cl_batch_resources`; a draw's are its targets, vertex,
+  index and stream output buffers and the views and constant buffers its shaders declare,
+  `wined3d_cl_batch_uses_draw_resources`); a dispatch enqueues it before loading a resource
   through OpenGL or copying a texture the batch uses to its shadow, and the command stream thread before
   it waits for work. The copy of a shadow a batched kernel wrote back to its texture is made when the
   batch is enqueued (`cl_copy_back_shadows`); until then the texture is among the batch's resources.
@@ -320,8 +321,11 @@ in place.
   targets, each dispatch's unordered access views, shadow textures and buffers are written as images and
   files (`frame_dump_gl.c`). `~/WineskinTests/d3d11tools/probe/clrun.c` runs a dumped kernel natively with
   those files as inputs, and `clbuild.c` times a kernel's build. `WINESKIN_CL_STATS=1` prints the time
-  each part of a dispatch takes, the batches, memory objects made again, and the operations that end
-  batches.
+  each part of a dispatch takes, the batches, memory objects made, the operations that end batches and
+  what draws that end one share with it. `WINESKIN_CS_STATS=1` prints, every 300 presents, the command
+  stream thread's milliseconds per frame in each kind of operation, in enqueuing batches, in polling
+  queries and in waiting for work, the kilobytes of map shadows uploaded, and names copies that take
+  over half a millisecond.
 - `HKCU\Software\Wine\Direct3D\OpenCLCompute` = `n` (or `WINE_D3D_CONFIG=OpenCLCompute=n`) turns it off;
   dispatches then do nothing. `WINEDEBUG=+d3d_cl` logs each kernel's source and build log.
 

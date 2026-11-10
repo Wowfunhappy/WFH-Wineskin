@@ -494,7 +494,7 @@ enum cl_stat
 
 static int cl_stats = -1;
 static uint64_t cl_stat_time[CL_STAT_COUNT], cl_stat_last;
-static unsigned int cl_stat_dispatches, cl_stat_registers, cl_stat_host, cl_stat_gl_buffers, cl_stat_stale;
+static unsigned int cl_stat_dispatches, cl_stat_registers, cl_stat_host, cl_stat_gl_buffers;
 static unsigned int cl_stat_batches;
 
 static void cl_stat(enum cl_stat stat)
@@ -526,11 +526,11 @@ static void cl_stats_dispatch_done(void)
                 cl_stat_time[i] * (double)tb.numer / tb.denom / 1000.0 / cl_stat_dispatches);
         cl_stat_time[i] = 0;
     }
-    snprintf(line + len, sizeof(line) - len, "; per dispatch: batches %.2f, registers %.2f (buffers written"
-            " since %.2f), host copies %.2f, buffers %.2f\n", cl_stat_batches / 1000.0, cl_stat_registers / 1000.0,
-            cl_stat_stale / 1000.0, cl_stat_host / 1000.0, cl_stat_gl_buffers / 1000.0);
+    snprintf(line + len, sizeof(line) - len, "; per dispatch: batches %.2f, registers %.2f, host copies %.2f,"
+            " buffers %.2f\n", cl_stat_batches / 1000.0, cl_stat_registers / 1000.0, cl_stat_host / 1000.0,
+            cl_stat_gl_buffers / 1000.0);
     fputs(line, stderr);
-    cl_stat_dispatches = cl_stat_registers = cl_stat_host = cl_stat_gl_buffers = cl_stat_stale = 0;
+    cl_stat_dispatches = cl_stat_registers = cl_stat_host = cl_stat_gl_buffers = 0;
     cl_stat_batches = 0;
 }
 
@@ -546,40 +546,23 @@ static UINT32 mem_type(const struct wined3d_cl_arg *arg)
 
 /* The memory object of a registered OpenGL object, or NULL.
  *
- * A buffer's "level" is the serial of wined3d's last write to it from the
- * CPU side (wined3d_bo.cl_serial). The driver gives a buffer a new data store
- * when it is written while commands that use it are queued, or mapped with
- * its contents discarded, and a memory object keeps reading the store it was
- * created on. A buffer written since its memory object was made gets a new
- * one. Writes by the GPU, kernels' included, keep the store. */
+ * A buffer's memory object reads what the buffer holds when it is acquired,
+ * however the buffer was written since it was made (glBufferSubData(),
+ * glBufferData(), a map that invalidates it; checked in Bit.Trip Rerunner by
+ * reading 15800 such buffers through their memory object and through a new
+ * one, and natively by ~/WineskinTests/d3d11tools/probe/clrename.c), so it
+ * lives as long as the buffer. */
 static cl_mem get_gl_mem(struct cl_device_context *ctx, UINT64 group, const struct wined3d_cl_arg *arg)
 {
     UINT32 type = mem_type(arg);
-    struct cl_mem_entry *entry, **prev;
+    struct cl_mem_entry *entry;
 
-    for (prev = &ctx->mems[mem_hash(arg->gl_name) % CL_MEM_HASH_SIZE]; (entry = *prev); prev = &entry->next)
+    for (entry = ctx->mems[mem_hash(arg->gl_name) % CL_MEM_HASH_SIZE]; entry; entry = entry->next)
     {
         if (entry->group != group || entry->type != type || entry->name != arg->gl_name)
             continue;
         if (type == WINED3D_CL_OBJECT_BUFFER)
-        {
-            if (entry->level == arg->level)
-                return entry->mem;
-            if (cl_stats > 0 && cl_stat_stale < 8)
-            {
-                size_t size = 0;
-
-                clGetMemObjectInfo(entry->mem, CL_MEM_SIZE, sizeof(size), &size, NULL);
-                fprintf(stderr, "CLSTATS buffer %u (%zu bytes) written since its memory object was made\n",
-                        arg->gl_name, size);
-            }
-            ++cl_stat_stale;
-            batch_flush(ctx);
-            clReleaseMemObject(entry->mem);
-            *prev = entry->next;
-            free(entry);
-            return NULL;
-        }
+            return entry->mem;
         if (entry->target == arg->gl_target && entry->level == arg->level)
             return entry->mem;
     }
