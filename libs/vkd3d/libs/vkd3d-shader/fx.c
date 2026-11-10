@@ -313,6 +313,15 @@ struct fx_write_context
     bool include_empty_buffers;
 
     const struct fx_write_context_ops *ops;
+
+    /* WINESKIN: fx_2_0 resources: data that d3dx9 attaches to a state when it loads the effect
+     * (compiled shaders, names of referenced parameters), and where the state being written is. */
+    struct vkd3d_bytecode_buffer fx_2_resources;
+    uint32_t fx_2_resource_count;
+    uint32_t fx_2_data_object_count;   /* objects with data in fx->objects */
+    struct vkd3d_bytecode_buffer *fx_2_state_buffer;
+    uint32_t fx_2_technique_index, fx_2_index, fx_2_element_index, fx_2_state_index;
+    bool fx_2_writing_parameter;
 };
 
 static void set_status(struct fx_write_context *fx, int status)
@@ -1108,7 +1117,12 @@ static void write_fx_2_pass(struct hlsl_ir_var *var, struct fx_write_context *fx
     count_offset = put_u32(buffer, 0);
 
     write_fx_2_annotations(var, annotation_count_offset, fx);
+    /* WINESKIN: see struct fx_write_context. */
+    fx->fx_2_technique_index = fx->technique_count;
+    fx->fx_2_state_index = 0;
+    fx->fx_2_state_buffer = buffer;
     count = write_state_block(var, 0, fx);
+    fx->fx_2_state_buffer = NULL; /* WINESKIN */
     set_u32(buffer, count_offset, count);
 
     /* For some reason every pass adds to the total shader object count. */
@@ -1824,6 +1838,7 @@ static void write_fx_2_technique(struct hlsl_ir_var *var, struct fx_write_contex
 
     LIST_FOR_EACH_ENTRY(pass, &var->scope->vars, struct hlsl_ir_var, scope_entry)
     {
+        fx->fx_2_index = count; /* WINESKIN */
         write_pass(pass, fx);
         ++count;
     }
@@ -1959,6 +1974,39 @@ static bool compile_shader(const struct hlsl_ir_compile *compile, struct fx_writ
     return ret >= 0;
 }
 
+static uint32_t write_state_block(struct hlsl_ir_var *var, unsigned int block_index,
+        struct fx_write_context *fx); /* WINESKIN */
+
+/* WINESKIN: a sampler's value is a state block: a state count and the states, for each element,
+ * one after the other. Each state's type and value go to the unstructured data first, then the
+ * state lists. */
+static uint32_t write_fx_2_sampler_initializer(const struct hlsl_ir_var *var, struct fx_write_context *fx)
+{
+    unsigned int i, elements_count = hlsl_get_multiarray_size(var->data_type);
+    struct vkd3d_bytecode_buffer states = { 0 };
+    uint32_t count_offset, count, offset;
+
+    for (i = 0; i < elements_count; ++i)
+    {
+        count_offset = put_u32(&states, 0);
+        fx->fx_2_technique_index = ~0u;
+        fx->fx_2_index = fx->parameter_count;
+        fx->fx_2_element_index = elements_count > 1 || var->data_type->class == HLSL_CLASS_ARRAY ? i : ~0u;
+        fx->fx_2_state_index = 0;
+        fx->fx_2_state_buffer = &states;
+        count = (var->state_blocks && i < var->state_block_count)
+                ? write_state_block((struct hlsl_ir_var *)var, i, fx) : 0;
+        fx->fx_2_state_buffer = NULL;
+        set_u32(&states, count_offset, count);
+    }
+
+    offset = fx->unstructured.size;
+    bytecode_put_bytes(&fx->unstructured, states.data, states.size);
+    set_status(fx, states.status);
+    vkd3d_free(states.data);
+    return offset;
+}
+
 static uint32_t write_fx_2_object_initializer(const struct hlsl_ir_var *var, struct fx_write_context *fx)
 {
     const struct hlsl_type *type = hlsl_get_multiarray_element_type(var->data_type);
@@ -1968,6 +2016,10 @@ static uint32_t write_fx_2_object_initializer(const struct hlsl_ir_var *var, str
     struct hlsl_ctx *ctx = fx->ctx;
     struct vkd3d_shader_code code;
     const void *data;
+
+    /* WINESKIN: see write_fx_2_sampler_initializer(). */
+    if (type->class == HLSL_CLASS_SAMPLER)
+        return write_fx_2_sampler_initializer(var, fx);
 
     for (i = 0; i < elements_count; ++i)
     {
@@ -2005,6 +2057,7 @@ static uint32_t write_fx_2_object_initializer(const struct hlsl_ir_var *var, str
                     vkd3d_unreachable();
             }
             id = fx->object_variable_count++;
+            ++fx->fx_2_data_object_count; /* WINESKIN */
 
             put_u32(&fx->unstructured, id);
 
@@ -2139,7 +2192,9 @@ static void write_fx_2_parameters(struct fx_write_context *fx)
             continue;
 
         desc_offset = write_fx_2_parameter(var, fx);
+        fx->fx_2_writing_parameter = true; /* WINESKIN */
         value_offset = write_fx_2_initial_value(var, fx);
+        fx->fx_2_writing_parameter = false; /* WINESKIN */
 
         flags = 0;
         if (var->storage_modifiers & HLSL_STORAGE_SHARED)
@@ -2189,11 +2244,52 @@ static uint32_t write_fx_2_state_type(const struct hlsl_state_block_entry *entry
     return offset;
 }
 
+/* WINESKIN: records data d3dx9 attaches to the state being written (struct fx_write_context):
+ * usage 0, a compiled shader; usage 1, the name of the parameter the state refers to. */
+static void write_fx_2_resource(struct fx_write_context *fx, uint32_t usage, const void *data, uint32_t size)
+{
+    struct vkd3d_bytecode_buffer *buffer = &fx->fx_2_resources;
+    static const uint32_t pad;
+
+    if (fx->fx_2_technique_index == ~0u && !fx->fx_2_writing_parameter)
+    {
+        hlsl_fixme(fx->ctx, &fx->ctx->location, "Writing fx_2_0 resources of annotations is not implemented.");
+        return;
+    }
+
+    put_u32(buffer, fx->fx_2_technique_index);
+    put_u32(buffer, fx->fx_2_index);
+    put_u32(buffer, fx->fx_2_technique_index == ~0u ? fx->fx_2_element_index : ~0u);
+    put_u32(buffer, fx->fx_2_state_index);
+    put_u32(buffer, usage);
+    put_u32(buffer, size);
+    bytecode_put_bytes(buffer, data, size);
+    if (size % 4)
+        bytecode_put_bytes_unaligned(buffer, &pad, 4 - (size % 4));
+    ++fx->fx_2_resource_count;
+}
+
+/* WINESKIN: the type of an object state (shader, texture). */
+static uint32_t write_fx_2_object_state_type(D3DXPARAMETER_TYPE type, struct fx_write_context *fx)
+{
+    struct vkd3d_bytecode_buffer *buffer = &fx->unstructured;
+    uint32_t offset;
+
+    offset = put_u32(buffer, type);
+    put_u32(buffer, D3DXPC_OBJECT);
+    put_u32(buffer, 0); /* Name */
+    put_u32(buffer, 0); /* Semantic */
+    put_u32(buffer, 0); /* Element count */
+    return offset;
+}
+
 static void write_fx_2_state_assignment(const struct hlsl_ir_var *var,
         struct hlsl_state_block_entry *entry, struct fx_write_context *fx)
 {
     struct vkd3d_bytecode_buffer *unstructured = &fx->unstructured;
-    struct vkd3d_bytecode_buffer *buffer = &fx->structured;
+    /* WINESKIN: passes write their states to the structured data, samplers to a list of their own. */
+    // struct vkd3d_bytecode_buffer *buffer = &fx->structured;
+    struct vkd3d_bytecode_buffer *buffer = fx->fx_2_state_buffer ? fx->fx_2_state_buffer : &fx->structured;
     uint32_t value = 0, type = 0, rhs_offset, type_offset;
     struct hlsl_ir_node *value_node = entry->args->node;
     struct hlsl_ctx *ctx = fx->ctx;
@@ -2218,12 +2314,63 @@ static void write_fx_2_state_assignment(const struct hlsl_ir_var *var,
             }
             break;
         }
+        /* WINESKIN: "VertexShader = compile vs_3_0 main();": the shader's object gets the
+         * compiled code from a resource. */
+        case HLSL_IR_COMPILE:
+        {
+            const struct hlsl_ir_compile *compile = hlsl_ir_compile(value_node);
+            struct vkd3d_shader_code code = { 0 };
+
+            type = write_fx_2_object_state_type(compile->profile->type == VKD3D_SHADER_TYPE_PIXEL
+                    ? D3DXPT_PIXELSHADER : D3DXPT_VERTEXSHADER, fx);
+            value = put_u32(unstructured, fx->object_variable_count++);
+            if (compile_shader(compile, fx, &code))
+                write_fx_2_resource(fx, 0, code.code, code.size);
+            else
+                set_status(fx, VKD3D_ERROR_INVALID_SHADER);
+            vkd3d_shader_free_shader_code(&code);
+            break;
+        }
+        /* WINESKIN: "Texture = <tex>;", "PixelShader = <ps>;", "MinFilter = <filter>;": d3dx9
+         * looks the parameter up by the name in a resource. */
+        case HLSL_IR_LOAD:
+        {
+            const struct hlsl_ir_load *load = hlsl_ir_load(value_node);
+            const struct hlsl_type *ref_type = hlsl_get_multiarray_element_type(load->src.var->data_type);
+            const char *name = load->src.var->name;
+
+            if (load->src.path_len)
+                hlsl_fixme(ctx, &var->loc, "Indexed access in fx_2_0 state values is not implemented.");
+
+            switch (ref_type->class)
+            {
+                case HLSL_CLASS_TEXTURE:
+                case HLSL_CLASS_PIXEL_SHADER:
+                case HLSL_CLASS_VERTEX_SHADER:
+                    type = write_fx_2_object_state_type(hlsl_sm1_base_type(ref_type, false, HLSL_SAMPLER_DIM_GENERIC), fx);
+                    value = put_u32(unstructured, fx->object_variable_count++);
+                    break;
+                case HLSL_CLASS_SCALAR:
+                case HLSL_CLASS_VECTOR:
+                    type = write_fx_2_state_type(entry, fx);
+                    value = unstructured->size;
+                    for (unsigned int i = 0; i < hlsl_type_component_count(ref_type); ++i)
+                        put_u32(unstructured, 0);
+                    break;
+                default:
+                    hlsl_fixme(ctx, &var->loc, "Unsupported variable type for state %s.", entry->name);
+                    break;
+            }
+            write_fx_2_resource(fx, 1, name, strlen(name) + 1);
+            break;
+        }
         default:
             hlsl_fixme(ctx, &var->loc, "Unsupported assignment type for state %s.", entry->name);
     }
 
     set_u32(buffer, type_offset, type);
     set_u32(buffer, rhs_offset, value);
+    ++fx->fx_2_state_index; /* WINESKIN */
 }
 
 static void resolve_fx_2_state_block_values(struct hlsl_ir_var *var, struct hlsl_state_block_entry *entry,
@@ -2263,11 +2410,15 @@ static int hlsl_fx_2_write(struct hlsl_ctx *ctx, struct vkd3d_shader_code *out)
 
     write_fx_2_parameters(&fx);
     write_techniques(ctx->globals, &fx);
-    put_u32(structured, fx.object_variable_count - 1);
-    put_u32(structured, 0); /* Resource count */
+    /* WINESKIN: objects that states use get their data from resources. */
+    // put_u32(structured, fx.object_variable_count - 1);
+    // put_u32(structured, 0); /* Resource count */
+    put_u32(structured, fx.fx_2_data_object_count);
+    put_u32(structured, fx.fx_2_resource_count);
 
     bytecode_put_bytes(structured, fx.objects.data, fx.objects.size);
     /* TODO: resources */
+    bytecode_put_bytes(structured, fx.fx_2_resources.data, fx.fx_2_resources.size); /* WINESKIN */
 
     set_u32(structured, parameter_count, fx.parameter_count);
     set_u32(structured, object_count, fx.object_variable_count);
@@ -2283,6 +2434,7 @@ static int hlsl_fx_2_write(struct hlsl_ctx *ctx, struct vkd3d_shader_code *out)
     vkd3d_free(fx.unstructured.data);
     vkd3d_free(fx.structured.data);
     vkd3d_free(fx.objects.data);
+    vkd3d_free(fx.fx_2_resources.data); /* WINESKIN */
 
     if (!fx.technique_count)
         hlsl_error(ctx, &ctx->location, VKD3D_SHADER_ERROR_HLSL_MISSING_TECHNIQUE, "No techniques found.");
