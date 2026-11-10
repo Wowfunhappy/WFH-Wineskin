@@ -9363,7 +9363,11 @@ selection_statement:
                 }
             }
 
-            if (flatten_type == HLSL_IF_FORCE_BRANCH && hlsl_version_lt(ctx, 2, 1))
+            /* WINESKIN: an effect's functions are compiled for the profiles its compile statements
+               name, and native compilers accept [branch] in fx_2_0 effects (SMAA injectors' SMAA.fx). */
+            // if (flatten_type == HLSL_IF_FORCE_BRANCH && hlsl_version_lt(ctx, 2, 1))
+            if (flatten_type == HLSL_IF_FORCE_BRANCH && ctx->profile->type != VKD3D_SHADER_TYPE_EFFECT
+                    && hlsl_version_lt(ctx, 2, 1))
             {
                 hlsl_error(ctx, &@1, VKD3D_SHADER_ERROR_HLSL_INCOMPATIBLE_PROFILE,
                         "The 'branch' attribute requires shader model 2.1 or higher.");
