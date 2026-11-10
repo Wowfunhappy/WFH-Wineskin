@@ -497,6 +497,7 @@ struct wined3d_settings
     bool ffp_hlsl;
     bool opencl_compute; /* WINESKIN: compute shaders on OpenCL (cl_compute.c) */
     bool map_shadows; /* WINESKIN: client-side map shadows (map_shadow.c) */
+    bool map_shadow_watch; /* WINESKIN: write-watched shadows for buffers above 64 KiB (map_shadow.c) */
     bool gl_state_filter; /* WINESKIN: redundant OpenGL state call filter (gl_filter.c) */
 };
 
@@ -3275,6 +3276,10 @@ bool wined3d_client_map_shadow(struct wined3d_resource *resource, struct wined3d
         const struct wined3d_box *box, uint32_t flags);
 void wined3d_client_drop_map_shadow(struct wined3d_resource *resource);
 void wined3d_client_flush_map_shadow(struct upload_bo *upload_bo);
+bool wined3d_upload_bo_shadow_is_watched(const struct upload_bo *upload_bo);
+unsigned int wined3d_client_shadow_dirty_ranges(const struct wined3d_resource *resource,
+        const struct upload_bo *upload_bo, struct wined3d_range *ranges, unsigned int max_count, bool *more);
+void wined3d_client_end_watched_map(const struct upload_bo *upload_bo);
 void wined3d_buffer_upload_map_shadow(struct wined3d_buffer *buffer,
         const struct wined3d_box *box, const struct upload_bo *upload_bo);
 

@@ -2555,6 +2555,29 @@ static void wined3d_device_context_upload_bo(struct wined3d_device_context *cont
     wined3d_device_context_submit(context, WINED3D_CS_QUEUE_DEFAULT);
 }
 
+/* WINESKIN: queues the ranges of a buffer whose pages were written in its
+ * write-watched shadow (map_shadow.c). The first upload discards, if the map
+ * did. */
+static void wined3d_device_context_upload_watched_shadow(struct wined3d_device_context *context,
+        struct wined3d_resource *resource, struct upload_bo *bo)
+{
+    struct wined3d_range ranges[16];
+    unsigned int count, i;
+    struct wined3d_box box;
+    bool more;
+
+    do
+    {
+        count = wined3d_client_shadow_dirty_ranges(resource, bo, ranges, ARRAY_SIZE(ranges), &more);
+        for (i = 0; i < count; ++i)
+        {
+            wined3d_box_set(&box, ranges[i].offset, 0, ranges[i].offset + ranges[i].size, 1, 0, 1);
+            wined3d_device_context_upload_bo(context, resource, 0, &box, bo, resource->size, resource->size);
+            bo->flags &= ~UPLOAD_BO_SHADOW_DISCARD;
+        }
+    } while (more);
+}
+
 static void wined3d_cs_exec_map(struct wined3d_cs *cs, const void *data)
 {
     const struct wined3d_cs_map *op = data;
@@ -2628,6 +2651,14 @@ HRESULT wined3d_device_context_emit_unmap(struct wined3d_device_context *context
     if (context->ops->unmap_upload_bo(context, resource, sub_resource_idx, &box, &bo))
     {
         unsigned int row_pitch, slice_pitch;
+
+        /* WINESKIN: see map_shadow.c. */
+        if ((bo.flags & UPLOAD_BO_SHADOW) && wined3d_upload_bo_shadow_is_watched(&bo))
+        {
+            wined3d_device_context_upload_watched_shadow(context, resource, &bo);
+            wined3d_client_end_watched_map(&bo);
+            return WINED3D_OK;
+        }
 
         wined3d_resource_get_sub_resource_map_pitch(resource, sub_resource_idx, &row_pitch, &slice_pitch);
         if (bo.flags & UPLOAD_BO_UPLOAD_ON_UNMAP)
@@ -3707,6 +3738,11 @@ void CDECL wined3d_device_context_flush_mapped_buffer(struct wined3d_device_cont
     /* WINESKIN: see map_shadow.c. */
     if (client->mapped_upload.flags & UPLOAD_BO_SHADOW)
     {
+        if (wined3d_upload_bo_shadow_is_watched(&client->mapped_upload))
+        {
+            wined3d_device_context_upload_watched_shadow(context, &buffer->resource, &client->mapped_upload);
+            return;
+        }
         wined3d_client_flush_map_shadow(&client->mapped_upload);
         wined3d_device_context_upload_bo(context, &buffer->resource, 0,
                 &client->mapped_box, &client->mapped_upload, buffer->resource.size, buffer->resource.size);

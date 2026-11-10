@@ -136,6 +136,7 @@ struct wined3d_settings wined3d_settings =
     .decoder_backend = WINED3D_DECODER_BACKEND_AUTO,
     .opencl_compute = TRUE, /* WINESKIN */
     .map_shadows = TRUE, /* WINESKIN */
+    .map_shadow_watch = TRUE, /* WINESKIN */
     .gl_state_filter = TRUE, /* WINESKIN */
 };
 
@@ -506,12 +507,14 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
             wined3d_settings.opencl_compute = FALSE;
         }
         /* WINESKIN: client-side map shadows (map_shadow.c): "n", "0" or "disabled" turn them off,
-         * any other value on. */
+         * "small" keeps them for buffers of at most 64 KiB, any other value on. */
         if (!get_config_key(hkey, appkey, env, "MapShadows", buffer, size))
         {
             wined3d_settings.map_shadows = strcmp(buffer, "n") && strcmp(buffer, "N")
                     && strcmp(buffer, "0") && strcmp(buffer, "disabled");
-            ERR_(winediag)("Client-side map shadows %s.\n", wined3d_settings.map_shadows ? "on" : "off");
+            wined3d_settings.map_shadow_watch = wined3d_settings.map_shadows && strcmp(buffer, "small");
+            ERR_(winediag)("Client-side map shadows %s.\n", !wined3d_settings.map_shadows ? "off"
+                    : wined3d_settings.map_shadow_watch ? "on" : "on for small buffers");
         }
         /* WINESKIN: redundant OpenGL state call filter (gl_filter.c), on unless "n", "0" or "disabled". */
         if (!get_config_key(hkey, appkey, env, "GLStateFilter", buffer, size)
