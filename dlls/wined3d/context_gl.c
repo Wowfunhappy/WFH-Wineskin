@@ -2777,6 +2777,7 @@ static void *wined3d_bo_gl_map(struct wined3d_bo_gl *bo, struct wined3d_context_
                 bo_user->valid = false;
             list_init(&bo->b.users);
 
+            wined3d_bo_mirror_move(&tmp.b, &bo->b); /* WINESKIN: cb_uniforms_gl.c */
             wined3d_context_gl_destroy_bo(context_gl, bo);
             *bo = tmp;
             list_init(&bo->b.users);
@@ -2904,8 +2905,11 @@ void *wined3d_context_gl_map_bo_address(struct wined3d_context_gl *context_gl,
 
     if (flags & WINED3D_MAP_WRITE) /* WINESKIN: see struct wined3d_bo */
     {
+        uint32_t old_serial = bo->cl_serial;
+
         ++bo->content_serial;
         bo->cl_serial = wined3d_cl_new_serial();
+        wined3d_bo_mirror_map(bo, old_serial); /* cb_uniforms_gl.c */
     }
 
     if (!(map_ptr = wined3d_bo_gl_map(wined3d_bo_gl(bo), context_gl, flags)))
@@ -2966,6 +2970,7 @@ void wined3d_context_gl_unmap_bo_address(struct wined3d_context_gl *context_gl,
 
     assert(bo->b.map_ptr);
 
+    wined3d_bo_gl_mirror_unmap(bo, data, range_count, ranges); /* WINESKIN: cb_uniforms_gl.c */
     flush_bo_ranges(context_gl, wined3d_const_bo_address(data), range_count, ranges);
     wined3d_bo_gl_unmap(bo, context_gl);
 }
@@ -3015,6 +3020,8 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
                         src_bo->b.buffer_offset + (GLintptr)src->addr + ranges[i].offset,
                         dst_bo->b.buffer_offset + (GLintptr)dst->addr + ranges[i].offset, ranges[i].size));
             checkGLcall("direct buffer copy");
+            wined3d_bo_gl_mirror_copy(dst_bo, cl_serial, (uintptr_t)dst->addr, /* WINESKIN: cb_uniforms_gl.c */
+                    src_bo, (uintptr_t)src->addr, range_count, ranges);
 
             wined3d_context_gl_reference_bo(context_gl, src_bo);
             wined3d_context_gl_reference_bo(context_gl, dst_bo);

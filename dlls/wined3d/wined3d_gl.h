@@ -1016,6 +1016,13 @@ void wined3d_cb_uniforms_init(struct wined3d_cb_uniforms *u, const struct wined3
 void wined3d_cb_uniforms_load(struct wined3d_cb_uniforms *u, struct wined3d_context_gl *context_gl,
         GLuint program, const struct wined3d_state *state);
 void wined3d_cb_uniforms_cleanup(struct wined3d_cb_uniforms *u);
+void wined3d_bo_gl_mirror_create(struct wined3d_bo_gl *bo_gl);
+void wined3d_bo_mirror_map(struct wined3d_bo *bo, uint32_t old_serial);
+void wined3d_bo_gl_mirror_unmap(struct wined3d_bo_gl *bo_gl, const struct wined3d_bo_address *data,
+        unsigned int range_count, const struct wined3d_range *ranges);
+void wined3d_bo_mirror_move(struct wined3d_bo *dst, struct wined3d_bo *src);
+void wined3d_bo_gl_mirror_copy(struct wined3d_bo_gl *dst, uint32_t old_serial, size_t dst_offset,
+        const struct wined3d_bo_gl *src, size_t src_offset, unsigned int range_count, const struct wined3d_range *ranges);
 
 /* WINESKIN: gl_filter.c */
 void wined3d_gl_filter_install(struct wined3d_gl_info *gl_info);

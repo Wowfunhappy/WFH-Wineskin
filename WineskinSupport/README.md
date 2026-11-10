@@ -400,18 +400,25 @@ blocks' size and number, the buffers' usage and binding ranges, and program pipe
 So a shader model 4 or 5 vertex or pixel shader declares a constant buffer as `uniform uvec4 vs_cb0[n]` and
 reads it through `uintBitsToFloat()` (`dlls/wined3d/cb_uniforms_gl.c`): unsigned uniforms keep every bit, where
 float ones may lose NaN payloads and the denormals that integer constants are as floats. This applies while the
-stage's constant buffers fit its uniform storage (1024 vectors for vertex shaders and 512 for pixel shaders on
-this GPU, less a reserve). A constant buffer that the shader indexes dynamically stays a uniform block, because
-Direct3D reads past its declared size as far as the bound buffer goes; so do those that don't fit. Before each
-draw, the program loads each such constant buffer whose binding, range or contents changed since it last loaded
-it, with `glProgramUniform4uiv`. The contents come from the system memory copy that CPU writes keep of each
-small buffer object (`struct wined3d_bo`'s `cl_mirror`, which OpenCL dispatches use too). After a GPU write or a
-buffer-to-buffer copy, the buffer is read back first. A bound range shorter than the declared array is padded
-with zeros. The stream output emulation program loads its vertex shader's constant buffers the same way.
-It is off unless `HKCU\Software\Wine\Direct3D\ConstantBufferUniforms` = `y` (or
-`WINE_D3D_CONFIG=ConstantBufferUniforms=y`): a constant buffer that an update replaces with another buffer object
-(`UpdateSubresource` of the whole buffer) has no copy in system memory, and reading it back stalls each draw
-that uses it; Bit.Trip Rerunner's title drops to 1.5 frames a second.
+stage's constant buffers fit its share of a program's uniform storage: a program whose vertex and fragment
+shaders' plain uniforms come to more than 512 vectors together has its vertex processing run on the CPU
+(`~/WineskinTests/perf/tools/vpfallback.c`; one stage alone may use 1024), so each stage takes 256, less a
+reserve for wined3d's own uniforms. A constant buffer that the shader indexes dynamically stays a uniform block,
+because Direct3D reads past its declared size as far as the bound buffer goes; so do those that don't fit.
+Before each draw, the program loads each such constant buffer whose binding, range or contents changed since it
+last loaded it, with `glProgramUniform4uiv`. The contents come from the system memory copy of the buffer object
+(`struct wined3d_bo`'s `cl_mirror`, which OpenCL dispatches use too). A buffer object bound as a constant buffer
+gets one when it is created, and every write from the CPU keeps it current: updates from system memory, maps
+(their written ranges are copied from the mapping at the unmap), copies from a buffer object whose copy is
+current, and the new buffer object that takes a busy one's place on a DISCARD map. Only after a GPU write is the
+buffer read back. A bound range shorter than the declared array is padded with zeros. The stream output emulation
+program loads its vertex shader's constant buffers the same way. It is off unless
+`HKCU\Software\Wine\Direct3D\ConstantBufferUniforms` = `y` (or `WINE_D3D_CONFIG=ConstantBufferUniforms=y`).
+
+With it, Bit.Trip Rerunner's title runs at 71 frames a second against 61; without the copies kept through those
+writes it reads 44,000 buffers back (59.5), and without the per-stage share its vertex processing runs on the CPU
+(6 frames a second, black). Neon White, Thumper and Ori and the Will of the Wisps' title show no difference; Ori's
+gameplay has not been measured reliably with it yet, so it stays off by default.
 
 #### The cost of an OpenGL call, and the state filter
 

@@ -11,7 +11,8 @@
  *
  * So a shader model 4 or 5 vertex or pixel shader declares its constant
  * buffers as "uniform uvec4 <stage>_cb<n>[size]" while they fit the stage's
- * uniform storage (wined3d_shader_cb_is_uniform), and reads them through
+ * share of a program's uniform storage (wined3d_shader_cb_is_uniform,
+ * cb_uniform_limit), and reads them through
  * uintBitsToFloat(): unsigned uniforms keep every bit, where float ones may
  * lose NaN payloads and denormals, which integer constants are as floats. A
  * constant buffer the shader indexes dynamically stays a block: Direct3D reads
@@ -22,16 +23,19 @@
  * each such constant buffer that changed since it last loaded it: another
  * buffer, a write to the buffer, another range (wined3d_cb_uniforms_load).
  * The contents come from the buffer object's copy in system memory (struct
- * wined3d_bo's cl_mirror, which writes from the CPU keep current); after a
- * copy on the GPU, or before the first whole write, the buffer is read back. A
- * bound range shorter than the declared array is padded with zeros, as
- * Direct3D reads past the end of a constant buffer.
+ * wined3d_bo's cl_mirror). A buffer object bound as a constant buffer gets one
+ * when it is created (wined3d_bo_gl_mirror_create), and every write that
+ * reaches it from the CPU keeps it current: updates from system memory
+ * (wined3d_cl_update_mirror), maps, whose written ranges are copied from the
+ * mapping when it is unmapped, copies from a buffer object whose own copy is
+ * current, and the new buffer object that takes a busy one's place on a
+ * DISCARD map. Only after a write by the GPU (stream output, unordered access,
+ * a copy from a buffer without a current copy) and before the next whole write
+ * is the buffer read back. A bound range shorter than the declared array is
+ * padded with zeros, as Direct3D reads past the end of a constant buffer.
  *
  * It is off unless HKCU\Software\Wine\Direct3D\ConstantBufferUniforms is
- * "y" (or WINE_D3D_CONFIG has "ConstantBufferUniforms=y"): a buffer that an
- * update replaces with another buffer object has no copy in system memory,
- * and the read back that takes stalls on the GPU at each draw that uses it
- * (Bit.Trip Rerunner's title drops to 1.5 frames a second).
+ * "y" (or WINE_D3D_CONFIG has "ConstantBufferUniforms=y").
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -61,12 +65,19 @@ WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
  * a larger one is read back for each change. */
 #define CB_MIRROR_MAX_SIZE (4u << 20)
 
+/* A program whose vertex and fragment shaders' plain uniforms come to more
+ * than 512 vectors together runs its vertex processing on the CPU on 10.9
+ * (~/WineskinTests/perf/tools/vpfallback.c: a 64-vector fragment shader array
+ * with a 448-vector vertex one stays on the GPU, with 480 it does not; each
+ * stage alone may use 1024). Each stage takes half. */
+#define CB_UNIFORM_STAGE_MAX 256
+
 static unsigned int cb_uniform_limit(const struct wined3d_gl_info *gl_info, enum wined3d_shader_type type)
 {
     if (type == WINED3D_SHADER_TYPE_VERTEX)
-        return gl_info->limits.glsl_vs_float_constants;
+        return min(gl_info->limits.glsl_vs_float_constants, CB_UNIFORM_STAGE_MAX);
     if (type == WINED3D_SHADER_TYPE_PIXEL)
-        return gl_info->limits.glsl_ps_float_constants;
+        return min(gl_info->limits.glsl_ps_float_constants, CB_UNIFORM_STAGE_MAX);
     return 0;
 }
 
@@ -247,4 +258,93 @@ void wined3d_cb_uniforms_load(struct wined3d_cb_uniforms *u, struct wined3d_cont
         uniform->loaded = true;
     }
     checkGLcall("load constant buffer uniforms");
+}
+
+/* A new buffer object: one for a constant buffer gets a copy of its contents in
+ * system memory, current from the first write of the whole of it on. */
+void wined3d_bo_gl_mirror_create(struct wined3d_bo_gl *bo_gl)
+{
+    if (wined3d_settings.cb_uniforms && bo_gl->binding == GL_UNIFORM_BUFFER && bo_gl->size <= CB_MIRROR_MAX_SIZE)
+        bo_gl->b.cl_mirror = malloc(bo_gl->size);
+}
+
+/* While a buffer object is mapped for writing, a copy that was current before
+ * the map has the complement of the new cl_serial as its serial: it is current
+ * again once the written ranges are copied at the unmap. Until then readers
+ * take it as stale. */
+void wined3d_bo_mirror_map(struct wined3d_bo *bo, uint32_t old_serial)
+{
+    if (bo->cl_mirror && old_serial && bo->cl_mirror_serial == old_serial)
+        bo->cl_mirror_serial = ~bo->cl_serial;
+}
+
+/* The ranges of a map that reach the buffer object at its unmap reach the copy too. */
+void wined3d_bo_gl_mirror_unmap(struct wined3d_bo_gl *bo_gl, const struct wined3d_bo_address *data,
+        unsigned int range_count, const struct wined3d_range *ranges)
+{
+    struct wined3d_bo *bo = &bo_gl->b;
+    size_t offset = (uintptr_t)data->addr;
+    const BYTE *src;
+    unsigned int i;
+    bool whole;
+
+    if (!bo->cl_mirror || !bo->map_ptr || !range_count || offset > bo_gl->size)
+        return;
+    whole = range_count == 1 && !offset && !ranges[0].offset && ranges[0].size >= bo_gl->size;
+    if (!whole && bo->cl_mirror_serial != ~bo->cl_serial)
+        return;
+    src = (const BYTE *)bo->map_ptr + bo->buffer_offset + offset;
+    for (i = 0; i < range_count; ++i)
+    {
+        if (ranges[i].offset > bo_gl->size - offset || ranges[i].size > bo_gl->size - offset - ranges[i].offset)
+        {
+            bo->cl_mirror_serial = 0;
+            return;
+        }
+        memcpy((BYTE *)bo->cl_mirror + offset + ranges[i].offset, src + ranges[i].offset, ranges[i].size);
+    }
+    bo->cl_mirror_serial = bo->cl_serial;
+}
+
+/* "dst", a new buffer object, takes the place of "src" on a DISCARD map: with
+ * its copy, the copy's serials and the contents' serial. */
+void wined3d_bo_mirror_move(struct wined3d_bo *dst, struct wined3d_bo *src)
+{
+    free(dst->cl_mirror);
+    dst->cl_mirror = src->cl_mirror;
+    src->cl_mirror = NULL;
+    dst->cl_serial = src->cl_serial;
+    dst->cl_mirror_serial = src->cl_mirror_serial;
+    dst->content_serial = src->content_serial;
+}
+
+/* A copy on the GPU between buffer objects: their copies follow while the
+ * source's is current and the destination's was current before (its serial is
+ * now a new one) or the copy writes the whole of it. */
+void wined3d_bo_gl_mirror_copy(struct wined3d_bo_gl *dst, uint32_t old_serial, size_t dst_offset,
+        const struct wined3d_bo_gl *src, size_t src_offset, unsigned int range_count, const struct wined3d_range *ranges)
+{
+    unsigned int i;
+    bool whole;
+
+    if (!dst->b.cl_mirror)
+        return;
+    if (!src->b.cl_mirror || src->b.cl_mirror_serial != src->b.cl_serial || src == dst)
+        return;
+    whole = range_count == 1 && !dst_offset && !ranges[0].offset && ranges[0].size >= dst->size;
+    if (!whole && (!old_serial || dst->b.cl_mirror_serial != old_serial))
+        return;
+    if (dst_offset > dst->size || src_offset > src->size)
+        return;
+    for (i = 0; i < range_count; ++i)
+    {
+        if (ranges[i].offset > dst->size - dst_offset || ranges[i].size > dst->size - dst_offset - ranges[i].offset
+                || ranges[i].offset > src->size - src_offset
+                || ranges[i].size > src->size - src_offset - ranges[i].offset)
+            return;
+    }
+    for (i = 0; i < range_count; ++i)
+        memcpy((BYTE *)dst->b.cl_mirror + dst_offset + ranges[i].offset,
+                (const BYTE *)src->b.cl_mirror + src_offset + ranges[i].offset, ranges[i].size);
+    dst->b.cl_mirror_serial = dst->b.cl_serial;
 }
