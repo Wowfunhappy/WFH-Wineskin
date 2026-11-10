@@ -836,19 +836,51 @@ struct futex_queue
     LONG lock;
 };
 
-static struct futex_queue futex_queues[256];
+/* WINESKIN: 1024 queues, a hash that mixes the address bits, and a queue lock that yields after 64
+ * spins, from marzent/winecx (branch ff-wine-11.17, commits df9d6a8238, 42a629ff93 and f3faea1ffb
+ * by Marc-Aurel Zent, LGPL 2.1+). */
+/* static struct futex_queue futex_queues[256]; */
+static struct futex_queue futex_queues[1024];
 
 static struct futex_queue *get_futex_queue( const void *addr )
 {
-    ULONG_PTR val = (ULONG_PTR)addr;
+    /* WINESKIN: see futex_queues */
+    /* ULONG_PTR val = (ULONG_PTR)addr; */
+    ULONG_PTR val = (ULONG_PTR)addr >> 4;
 
-    return &futex_queues[(val >> 4) % ARRAY_SIZE(futex_queues)];
+    /* WINESKIN: see futex_queues */
+    /* return &futex_queues[(val >> 4) % ARRAY_SIZE(futex_queues)]; */
+    /* Mix the bits a bit to avoid collisions on low bits. */
+    val ^= val >> 11;
+    val ^= val >> 22;
+    return &futex_queues[val % ARRAY_SIZE(futex_queues)];
 }
 
 static void spin_lock( LONG *lock )
 {
-    while (InterlockedCompareExchange( lock, -1, 0 ))
+    /* WINESKIN: see futex_queues */
+    /* while (InterlockedCompareExchange( lock, -1, 0 ))
+        YieldProcessor(); */
+    unsigned int i;
+
+    if (!InterlockedCompareExchange( lock, -1, 0 ))
+        return;
+
+    /* WINESKIN: see futex_queues */
+    for (i = 0; i < 64; i++)
+    {
         YieldProcessor();
+        if (!ReadNoFence( lock ) && !InterlockedCompareExchange( lock, -1, 0 ))
+            return;
+    }
+
+    /* WINESKIN: see futex_queues */
+    for (;;)
+    {
+        NtYieldExecution();
+        if (!ReadNoFence( lock ) && !InterlockedCompareExchange( lock, -1, 0 ))
+            return;
+    }
 }
 
 static void spin_unlock( LONG *lock )
