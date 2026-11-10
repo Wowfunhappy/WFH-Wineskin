@@ -86,6 +86,7 @@
     BOOL wantsFullScreenSpace;      /* should be in (or entering) a full-screen Space of its own */
     BOOL ownsFullScreen;            /* full screen because winemac put it there */
     BOOL fullScreenSpacePending;    /* waiting to enter */
+    BOOL fullScreenSpaceLeavePending; /* waiting to leave */
     BOOL fullScreenSpaceDeclined;   /* the user took it out; it stays out while it covers the screen */
     BOOL minimizedForWine;          /* Windows has it minimized */
     BOOL minimizedInFullScreenSpace; /* minimized by Windows while its Space was in the background */

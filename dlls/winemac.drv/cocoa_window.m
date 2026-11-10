@@ -1903,6 +1903,11 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) wine_cancelFullScreenSpace
     {
+        if (fullScreenSpaceLeavePending)
+        {
+            fullScreenSpaceLeavePending = FALSE;
+            [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(wine_leaveFullScreenSpaceIfUncovered) object:nil];
+        }
         if (!fullScreenSpacePending) return;
         fullScreenSpacePending = FALSE;
         [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(wine_enterFullScreenSpace) object:nil];
@@ -1930,15 +1935,39 @@ static inline BOOL stage_manager_enabled(void)
             [super toggleFullScreen:nil];
     }
 
+    /* A window that stops covering the screen leaves once it has stayed uncovered for
+       FULL_SCREEN_SPACE_DELAY seconds, as it enters, so a game that resizes its window on the way
+       to another full-screen size keeps its Space. */
+    - (void) wine_leaveFullScreenSpaceIfUncovered
+    {
+        fullScreenSpaceLeavePending = FALSE;
+        if (ownsFullScreen && wantsFullScreenSpace &&
+            (![self wine_canUseFullScreenSpace] || ![self wine_coversScreenInFrame:nonFullscreenFrame]))
+            [self wine_leaveFullScreenSpace];
+    }
+
     - (void) wine_updateFullScreenSpace
     {
         if (!full_screen_space) return;
 
         if (ownsFullScreen)
         {
-            if (wantsFullScreenSpace &&
-                (![self wine_canUseFullScreenSpace] || ![self wine_coversScreenInFrame:nonFullscreenFrame]))
+            if (wantsFullScreenSpace && ![self wine_canUseFullScreenSpace])
+            {
+                [self wine_cancelFullScreenSpace];
                 [self wine_leaveFullScreenSpace];
+            }
+            else if (wantsFullScreenSpace && ![self wine_coversScreenInFrame:nonFullscreenFrame])
+            {
+                if (!fullScreenSpaceLeavePending)
+                {
+                    fullScreenSpaceLeavePending = TRUE;
+                    [self performSelector:@selector(wine_leaveFullScreenSpaceIfUncovered) withObject:nil
+                               afterDelay:FULL_SCREEN_SPACE_DELAY inModes:@[NSRunLoopCommonModes]];
+                }
+            }
+            else
+                [self wine_cancelFullScreenSpace];
             return;
         }
 
@@ -2903,6 +2932,10 @@ static inline BOOL stage_manager_enabled(void)
     {
         macdrv_query* query;
         NSSize size;
+
+        /* WINESKIN: a window in a Space of its own covers the screen in Windows' coordinates, and the
+           frame Cocoa gives it there is never posted, so the program's track sizes don't limit it. */
+        if (ownsFullScreen) return proposedSize;
 
         query = macdrv_create_query();
         query->type = QUERY_MIN_MAX_INFO;
