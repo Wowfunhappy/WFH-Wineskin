@@ -259,6 +259,8 @@ struct macdrv_client_surface
     WineMetalSwapChain_id   metal_swapchain;
     WineRemoteGLSurface    *remote;            /* WINESKIN: see remote_gl.c */
     HWND                    remote_toplevel;   /* WINESKIN */
+    SIZE                    virtual_size;      /* WINESKIN: see macdrv_client_surface_update */
+    SIZE                    monitor_size;      /* WINESKIN */
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
@@ -388,6 +390,16 @@ static inline bool intersect_rect( RECT *dst, const RECT *src1, const RECT *src2
     dst->right  = min(src1->right, src2->right);
     dst->bottom = min(src1->bottom, src2->bottom);
     return !IsRectEmpty( dst );
+}
+
+/* WINESKIN: a full-screen window in an emulated display mode has its visible rect widened to the whole
+   monitor, letterboxed (see macdrv_set_window_mask); an ordinary visible rect lies within the window. */
+static inline bool macdrv_win_data_letterboxed(const struct macdrv_win_data *data)
+{
+    RECT rect;
+
+    return intersect_rect(&rect, &data->rects.window, &data->rects.visible) &&
+           EqualRect(&rect, &data->rects.window) && !EqualRect(&data->rects.window, &data->rects.visible);
 }
 
 /* registry helpers */

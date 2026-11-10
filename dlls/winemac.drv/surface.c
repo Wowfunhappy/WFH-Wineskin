@@ -86,17 +86,11 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
     struct macdrv_win_data *data;
     RECT color_rect = *rect, color_dirty = *dirty; /* WINESKIN */
 
-    /* WINESKIN: a full-screen window in an emulated display mode has its visible rect widened to the
-       whole monitor (letterboxed, see macdrv_set_window_mask), but its surface holds only the window
-       itself, so the surface sits at the window's offset in the visible rect. A visible rect that
-       contains the window is a widened one; an ordinary visible rect lies within the window. */
+    /* WINESKIN: a letterboxed window's surface holds only the window itself, so it sits at the
+       window's offset in the visible rect. */
     if ((data = get_win_data(window_surface->hwnd)))
     {
-        RECT window_in_visible;
-
-        if (intersect_rect(&window_in_visible, &data->rects.window, &data->rects.visible) &&
-            EqualRect(&window_in_visible, &data->rects.window) &&
-            !EqualRect(&data->rects.window, &data->rects.visible))
+        if (macdrv_win_data_letterboxed(data))
         {
             OffsetRect(&color_rect, data->rects.window.left - data->rects.visible.left,
                        data->rects.window.top - data->rects.visible.top);

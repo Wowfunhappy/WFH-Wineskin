@@ -1117,6 +1117,36 @@ static void macdrv_client_surface_update(struct client_surface *client)
         return;
     }
     macdrv_remote_gl_detach(surface);
+    /* WINESKIN: on 10.9 a view's OpenGL surface keeps showing the drawable at the size it was made with,
+       whatever the context sets later, when the drawable changes scale (a display mode change under a
+       full-screen window) or changes size in a letterboxed window; the surface gets a new view then. */
+    {
+        SIZE size = { client->virtual_rect.right - client->virtual_rect.left,
+                      client->virtual_rect.bottom - client->virtual_rect.top };
+        SIZE monitor = { client->monitor_rect.right - client->monitor_rect.left,
+                         client->monitor_rect.bottom - client->monitor_rect.top };
+
+        if (surface->virtual_size.cx && surface->virtual_size.cy && !surface->metal_swapchain &&
+            (monitor.cx * surface->virtual_size.cx != surface->monitor_size.cx * size.cx ||
+             monitor.cy * surface->virtual_size.cy != surface->monitor_size.cy * size.cy ||
+             ((size.cx != surface->virtual_size.cx || size.cy != surface->virtual_size.cy) &&
+              macdrv_win_data_letterboxed(data))))
+        {
+            WineContentView *old_view = surface->cocoa_view;
+
+            TRACE("%s: new view for %dx%d in %dx%d\n", debugstr_client_surface(client), (int)size.cx, (int)size.cy,
+                  (int)monitor.cx, (int)monitor.cy);
+            surface->cocoa_view = macdrv_create_view(cgrect_from_rect(client->monitor_rect));
+            if (data->client_view == old_view)
+            {
+                data->client_view = surface->cocoa_view;
+                macdrv_set_view_hidden(surface->cocoa_view, FALSE);
+            }
+            macdrv_dispose_view(old_view);
+        }
+        surface->virtual_size = size;
+        surface->monitor_size = monitor;
+    }
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
     release_win_data(data);
