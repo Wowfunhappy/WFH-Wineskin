@@ -300,6 +300,7 @@ extern bool query_min_max_info(HWND hwnd);
 extern NTSTATUS macdrv_file_panel_begin(void *arg);
 extern NTSTATUS macdrv_file_panel_poll(void *arg);
 extern NTSTATUS macdrv_file_panel_release(void *arg);
+extern NTSTATUS macdrv_system_icon(void *arg); /* WINESKIN */
 
 /* menu.c (WINESKIN) */
 extern void macdrv_sync_window_menu(struct macdrv_win_data *data);

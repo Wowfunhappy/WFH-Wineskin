@@ -623,6 +623,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     macdrv_file_panel_begin,    /* WINESKIN */
     macdrv_file_panel_poll,     /* WINESKIN */
     macdrv_file_panel_release,  /* WINESKIN */
+    macdrv_system_icon,         /* WINESKIN */
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
@@ -655,6 +656,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     macdrv_file_panel_begin,
     macdrv_file_panel_poll,
     macdrv_file_panel_release,
+    macdrv_system_icon,
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );

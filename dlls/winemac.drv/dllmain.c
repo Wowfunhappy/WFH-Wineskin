@@ -372,6 +372,17 @@ cleanup:
 }
 
 
+/***********************************************************************
+ *              wineskin_system_icon   (MACDRV.@)
+ *
+ * WINESKIN: the Mac's alert icons for Windows' stock icons (include/wine/wineskin_system_icon.h)
+ */
+BOOL CDECL wineskin_system_icon(UINT id, UINT width, UINT height, DWORD *bits)
+{
+    struct system_icon_params params = { id, width, height, 0, (UINT_PTR)bits };
+    return !MACDRV_CALL(system_icon, &params);
+}
+
 /* WINESKIN: the native file panel (include/wine/wineskin_file_panel.h) */
 
 /***********************************************************************

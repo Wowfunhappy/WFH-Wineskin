@@ -1,6 +1,8 @@
 # WINESKIN: wine/wineskin_file_panel.h is the native file panel interface of winemac.drv.
+# WINESKIN: wine/wineskin_system_icon.h is winemac.drv's interface for the Mac's alert icons.
 SOURCES = \
 	wine/wineskin_file_panel.h \
+	wine/wineskin_system_icon.h \
 	accctrl.h \
 	access.idl \
 	aclapi.h \

@@ -21,8 +21,9 @@ VER_FILEDESCRIPTION_STR = "Wine Mac driver"
 # WINESKIN: cocoa_file_panel.m shows NSOpenPanel and NSSavePanel for the common file dialogs,
 # through wineskin_file_panel() in winemac.drv.spec.
 # WINESKIN: cocoa_remote_gl.m and remote_gl.c show OpenGL drawn into a child window of another
-# process's window.
+# process's window. cocoa_system_icon.m draws the Mac's alert icons for Windows' stock icons.
 SOURCES = \
+	cocoa_system_icon.m \
 	cocoa_remote_gl.m \
 	remote_gl.c \
 	cocoa_file_panel.m \

@@ -26,6 +26,7 @@ enum macdrv_funcs
     unix_file_panel_begin,      /* WINESKIN */
     unix_file_panel_poll,       /* WINESKIN */
     unix_file_panel_release,    /* WINESKIN */
+    unix_system_icon,           /* WINESKIN: macdrv_system_icon */
     unix_funcs_count
 };
 
@@ -66,6 +67,16 @@ struct file_panel_begin_params
     UINT32 filter_count;
     UINT32 filter_index;
     UINT64 panel;           /* out: the panel, for macdrv_file_panel_poll and _release */
+};
+
+/* WINESKIN: macdrv_system_icon params (cocoa_system_icon.m); the same layout for 32-bit callers */
+struct system_icon_params
+{
+    UINT32 id;              /* IDI_* */
+    UINT32 width;
+    UINT32 height;
+    UINT32 pad;
+    UINT64 bits;            /* width * height BGRA pixels, top-down, straight alpha */
 };
 
 /* WINESKIN: macdrv_file_panel_poll and macdrv_file_panel_release params */

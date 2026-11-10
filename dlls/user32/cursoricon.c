@@ -30,6 +30,7 @@
 #include "user_private.h"
 #include "controls.h"
 #include "wine/exception.h"
+#include "wine/wineskin_system_icon.h" /* WINESKIN */
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(cursor);
@@ -1358,6 +1359,63 @@ end:
  *
  * Load a cursor or icon from resource or file.
  */
+/* WINESKIN: the Mac's own alert icons stand for Windows' stock alert icons
+ * (include/wine/wineskin_system_icon.h): an icon drawn by the display driver at the size asked
+ * for, made into an icon of user32's resource so that LR_SHARED finds it again. */
+static HICON create_mac_system_icon( HINSTANCE module, LPCWSTR name, HRSRC rsrc, INT width, INT height,
+                                     UINT flags )
+{
+    static wineskin_system_icon_func func;
+    static BOOL looked_up;
+    BITMAPINFOHEADER *bmi;
+    DWORD row, mask_size, size;
+    POINT hotspot;
+    HICON icon = 0;
+    BYTE *xor;
+    int y;
+
+    if (!looked_up)
+    {
+        HMODULE driver = GetModuleHandleW( L"winemac.drv" );
+        if (driver) func = (wineskin_system_icon_func)GetProcAddress( driver, "wineskin_system_icon" );
+        looked_up = TRUE;
+    }
+    if (!func || !IS_INTRESOURCE(name) || LOWORD(name) < 32513 || LOWORD(name) > 32516) return 0;
+    if (!width) width = GetSystemMetrics( SM_CXICON );
+    if (!height) height = GetSystemMetrics( SM_CYICON );
+    if (width <= 0 || height <= 0 || width > 1024 || height > 1024) return 0;
+
+    row = ((width + 31) / 32) * 4;
+    mask_size = row * height;
+    size = sizeof(*bmi) + width * height * 4 + mask_size;
+    if (!(bmi = calloc( 1, size ))) return 0;
+    bmi->biSize = sizeof(*bmi);
+    bmi->biWidth = width;
+    bmi->biHeight = height * 2;
+    bmi->biPlanes = 1;
+    bmi->biBitCount = 32;
+    bmi->biCompression = BI_RGB;
+    xor = (BYTE *)(bmi + 1);
+    if (func( LOWORD(name), width, height, (DWORD *)xor ))
+    {
+        /* top-down to bottom-up */
+        BYTE *tmp = malloc( width * 4 );
+        for (y = 0; tmp && y < height / 2; y++)
+        {
+            memcpy( tmp, xor + y * width * 4, width * 4 );
+            memcpy( xor + y * width * 4, xor + (height - 1 - y) * width * 4, width * 4 );
+            memcpy( xor + (height - 1 - y) * width * 4, tmp, width * 4 );
+        }
+        free( tmp );
+        hotspot.x = width / 2;
+        hotspot.y = height / 2;
+        icon = create_icon_from_bmi( (const BITMAPINFO *)bmi, size, module, name, rsrc, hotspot, TRUE,
+                                     width, height, flags );
+    }
+    free( bmi );
+    return icon;
+}
+
 static HICON CURSORICON_Load(HINSTANCE hInstance, LPCWSTR name,
                              INT width, INT height, INT depth,
                              BOOL fCursor, UINT loadflags)
@@ -1429,6 +1487,11 @@ static HICON CURSORICON_Load(HINSTANCE hInstance, LPCWSTR name,
             (hIcon = NtUserFindExistingCursorIcon( &module_str, &res_str, hRsrc )))
             return hIcon;
     }
+
+    /* WINESKIN: see create_mac_system_icon */
+    if (!fCursor && hInstance == user32_module && IS_INTRESOURCE(name) &&
+        (hIcon = create_mac_system_icon( hInstance, name, hRsrc, width, height, loadflags )))
+        return hIcon;
 
     if (!(handle = LoadResource( hInstance, hRsrc ))) return 0;
     size = SizeofResource( hInstance, hRsrc );
