@@ -1699,6 +1699,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
                     cl_batch_add_resource(device, &state->cb[WINED3D_SHADER_TYPE_COMPUTE][binding->slot].buffer->resource);
                     break;
                 case WINED3D_CL_BINDING_SRV:
+                case WINED3D_CL_BINDING_SRV_LEVEL:
                     cl_batch_add_resource(device,
                             state->shader_resource_view[WINED3D_SHADER_TYPE_COMPUTE][binding->slot]->resource);
                     break;
