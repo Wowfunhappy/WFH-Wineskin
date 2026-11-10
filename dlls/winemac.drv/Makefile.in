@@ -2,7 +2,9 @@ MODULE    = winemac.drv
 UNIXLIB   = winemac.so
 IMPORTS   = uuid rpcrt4 user32 gdi32 win32u
 DELAYIMPORTS = ole32 shell32 imm32
+# WINESKIN: IOSurface for cocoa_remote_gl.m
 UNIX_LIBS    = \
+	-framework IOSurface \
 	-lwin32u \
 	-framework AppKit \
 	-framework Carbon \
@@ -18,7 +20,11 @@ VER_FILEDESCRIPTION_STR = "Wine Mac driver"
 # WINESKIN: cocoa_menu.m and menu.c show a window's Win32 menu bar in the Mac menu bar.
 # WINESKIN: cocoa_file_panel.m shows NSOpenPanel and NSSavePanel for the common file dialogs,
 # through wineskin_file_panel() in winemac.drv.spec.
+# WINESKIN: cocoa_remote_gl.m and remote_gl.c show OpenGL drawn into a child window of another
+# process's window.
 SOURCES = \
+	cocoa_remote_gl.m \
+	remote_gl.c \
 	cocoa_file_panel.m \
 	winemac.drv.spec \
 	cocoa_menu.m \

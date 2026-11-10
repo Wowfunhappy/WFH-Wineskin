@@ -1080,6 +1080,8 @@ static void macdrv_client_surface_detach(struct client_surface *client)
 
     TRACE("%s\n", debugstr_client_surface(client));
 
+    macdrv_remote_gl_detach(surface); /* WINESKIN */
+
     if (surface->cocoa_view)
     {
         struct macdrv_win_data *data;
@@ -1103,7 +1105,14 @@ static void macdrv_client_surface_update(struct client_surface *client)
 
     TRACE("%s\n", debugstr_client_surface(client));
 
-    if (!(data = get_win_data(toplevel))) return;
+    /* WINESKIN: a top-level window of another process; see remote_gl.c */
+    // if (!(data = get_win_data(toplevel))) return;
+    if (!(data = get_win_data(toplevel)))
+    {
+        macdrv_remote_gl_update(surface);
+        return;
+    }
+    macdrv_remote_gl_detach(surface);
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
     release_win_data(data);

@@ -257,10 +257,14 @@ struct macdrv_client_surface
     struct client_surface   client;
     WineContentView        *cocoa_view;
     WineMetalSwapChain_id   metal_swapchain;
+    WineRemoteGLSurface    *remote;            /* WINESKIN: see remote_gl.c */
+    HWND                    remote_toplevel;   /* WINESKIN */
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
 extern bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface *surface);
+extern void macdrv_remote_gl_update(struct macdrv_client_surface *surface); /* WINESKIN */
+extern void macdrv_remote_gl_detach(struct macdrv_client_surface *surface); /* WINESKIN */
 
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
 extern void release_win_data(struct macdrv_win_data *data);

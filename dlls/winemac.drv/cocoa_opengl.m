@@ -370,6 +370,7 @@ void macdrv_flush_opengl_context(WineOpenGLContext *context)
 @autoreleasepool
 {
     macdrv_update_opengl_context(context);
+    macdrv_remote_gl_present(context); /* WINESKIN: see cocoa_remote_gl.m */
     [context flushBuffer];
 
     /* WINESKIN: see -[WineWindow wine_openGLContentDrawn]. */

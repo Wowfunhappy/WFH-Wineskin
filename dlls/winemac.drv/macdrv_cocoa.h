@@ -110,6 +110,7 @@ DECLARE_CLASS(WineContentView);
 DECLARE_CLASS(WineEventQueue);
 DECLARE_CLASS(WineMetalView);
 DECLARE_CLASS(WineOpenGLContext);
+DECLARE_CLASS(WineRemoteGLSurface); /* WINESKIN */
 DECLARE_CLASS(WineStatusItem);
 DECLARE_CLASS(WineWindow);
 DECLARE_CLASS(CAMetalLayer);
@@ -602,6 +603,13 @@ extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
+/* WINESKIN: OpenGL in a child window of another process's window (cocoa_remote_gl.m) */
+extern WineRemoteGLSurface *macdrv_remote_gl_create(void);
+extern unsigned int macdrv_remote_gl_context_id(WineRemoteGLSurface *remote);
+extern void macdrv_remote_gl_destroy(WineRemoteGLSurface *remote);
+extern void macdrv_remote_gl_set_geometry(WineRemoteGLSurface *remote, CGRect frame, int width, int height, bool hidden);
+extern void macdrv_remote_gl_make_current(WineOpenGLContext *context, WineRemoteGLSurface *remote);
+extern void macdrv_remote_gl_present(WineOpenGLContext *context);
 /* WINESKIN: see show_program_gamma() in cocoa_display.m */
 extern void macdrv_set_program_gamma(uint32_t count, const CGGammaValue *red, const CGGammaValue *green,
                                      const CGGammaValue *blue);

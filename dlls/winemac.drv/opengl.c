@@ -1169,6 +1169,12 @@ static void macdrv_context_select_drawable(struct macdrv_context *context, struc
     {
         struct macdrv_client_surface *surface = impl_from_client_surface(drawable->client);
         RECT rect = surface->client.virtual_rect;
+        /* WINESKIN: see remote_gl.c */
+        if (surface->remote)
+        {
+            macdrv_remote_gl_make_current(context->context, surface->remote);
+            return;
+        }
         macdrv_make_context_current(context->context, surface->cocoa_view, cgrect_from_rect(rect));
         return;
     }
