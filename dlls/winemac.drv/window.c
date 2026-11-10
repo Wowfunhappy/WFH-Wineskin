@@ -415,18 +415,45 @@ static void sync_window_min_max_info(HWND hwnd)
     {
         RECT min_rect, max_rect;
         CGSize min_size, max_size;
+        /* WINESKIN: the track sizes are in the program's coordinates and the window's rects in the
+           display's, which differ in an emulated display mode or a scaled DPI: scale them by the
+           window's own size in each. A letterboxed window's visible rect is the whole screen, bars
+           included, which take no part in its size. */
+        struct window_rects rects = data->rects;
+        RECT app_rect;
+        BOOL unlimited = minmax.ptMaxTrackSize.x == NtUserGetSystemMetrics(SM_CXMAXTRACK) &&
+                         minmax.ptMaxTrackSize.y == NtUserGetSystemMetrics(SM_CYMAXTRACK);
+
+        if (NtUserGetWindowRect(hwnd, &app_rect, NtUserGetDpiForWindow(hwnd)) &&
+            app_rect.right > app_rect.left && app_rect.bottom > app_rect.top)
+        {
+            int app_cx = app_rect.right - app_rect.left, app_cy = app_rect.bottom - app_rect.top;
+            int cx = rects.window.right - rects.window.left, cy = rects.window.bottom - rects.window.top;
+
+            minmax.ptMinTrackSize.x = (int)(((LONGLONG)minmax.ptMinTrackSize.x * cx + app_cx / 2) / app_cx);
+            minmax.ptMinTrackSize.y = (int)(((LONGLONG)minmax.ptMinTrackSize.y * cy + app_cy / 2) / app_cy);
+            minmax.ptMaxTrackSize.x = (int)(((LONGLONG)minmax.ptMaxTrackSize.x * cx + app_cx / 2) / app_cx);
+            minmax.ptMaxTrackSize.y = (int)(((LONGLONG)minmax.ptMaxTrackSize.y * cy + app_cy / 2) / app_cy);
+        }
+        if (macdrv_win_data_letterboxed(data)) rects.visible = rects.window;
 
         SetRect(&min_rect, 0, 0, minmax.ptMinTrackSize.x, minmax.ptMinTrackSize.y);
-        min_rect = visible_rect_from_window(&data->rects, min_rect);
+        /* WINESKIN: rects, unlimited; see above */
+        // min_rect = visible_rect_from_window(&data->rects, min_rect);
+        min_rect = visible_rect_from_window(&rects, min_rect);
         min_size = CGSizeMake(min_rect.right - min_rect.left, min_rect.bottom - min_rect.top);
 
-        if (minmax.ptMaxTrackSize.x == NtUserGetSystemMetrics(SM_CXMAXTRACK) &&
-            minmax.ptMaxTrackSize.y == NtUserGetSystemMetrics(SM_CYMAXTRACK))
+        /* WINESKIN: rects, unlimited; see above */
+        // if (minmax.ptMaxTrackSize.x == NtUserGetSystemMetrics(SM_CXMAXTRACK) &&
+        //     minmax.ptMaxTrackSize.y == NtUserGetSystemMetrics(SM_CYMAXTRACK))
+        if (unlimited)
             max_size = CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX);
         else
         {
             SetRect(&max_rect, 0, 0, minmax.ptMaxTrackSize.x, minmax.ptMaxTrackSize.y);
-            max_rect = visible_rect_from_window(&data->rects, max_rect);
+            /* WINESKIN: rects, unlimited; see above */
+            // max_rect = visible_rect_from_window(&data->rects, max_rect);
+            max_rect = visible_rect_from_window(&rects, max_rect);
             max_size = CGSizeMake(max_rect.right - max_rect.left, max_rect.bottom - max_rect.top);
         }
 
