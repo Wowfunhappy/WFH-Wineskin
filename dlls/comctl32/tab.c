@@ -1940,7 +1940,9 @@ TAB_DrawItemInterior(const TAB_INFO *infoPtr, HDC hdc, INT iItem, RECT *drawRect
           item->pszText,
           lstrlenW(item->pszText),
           drawRect,
-          DT_LEFT | DT_SINGLELINE
+          // DT_LEFT | DT_SINGLELINE
+          DT_LEFT | DT_SINGLELINE | /* WINESKIN: the access key underline follows the UI state */
+          ((SendMessageW (infoPtr->hwnd, WM_QUERYUISTATE, 0, 0) & UISF_HIDEACCEL) ? DT_HIDEPREFIX : 0)
         );
       }
     }
@@ -3388,6 +3390,16 @@ TAB_WindowProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_GETFONT:
       return TAB_GetFont (infoPtr);
+
+    case WM_UPDATEUISTATE: /* WINESKIN: repaint when the access key underlines show or hide */
+    {
+      LRESULT ui_state = SendMessageW (hwnd, WM_QUERYUISTATE, 0, 0);
+
+      DefWindowProcW (hwnd, uMsg, wParam, lParam);
+      if ((ui_state ^ SendMessageW (hwnd, WM_QUERYUISTATE, 0, 0)) & UISF_HIDEACCEL)
+        InvalidateRect (hwnd, NULL, TRUE);
+      return 0;
+    }
 
     case WM_SETFONT:
       return TAB_SetFont (infoPtr, (HFONT)wParam);

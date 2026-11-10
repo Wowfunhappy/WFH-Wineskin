@@ -1168,6 +1168,11 @@ BOOL WINAPI IsDialogMessageW( HWND hwndDlg, LPMSG msg )
         dlgCode = SendMessageW( msg->hwnd, WM_GETDLGCODE, msg->wParam, (LPARAM)msg );
         if (dlgCode & (DLGC_WANTMESSAGE)) break;
 
+        /* WINESKIN: navigating with the keyboard shows the focus (UISF_HIDEFOCUS) */
+        if ((msg->wParam == VK_TAB && !(dlgCode & DLGC_WANTTAB)) ||
+            (msg->wParam >= VK_LEFT && msg->wParam <= VK_DOWN && !(dlgCode & DLGC_WANTARROWS)))
+            SendMessageW( hwndDlg, WM_CHANGEUISTATE, MAKEWPARAM( UIS_CLEAR, UISF_HIDEFOCUS ), 0 );
+
         switch(msg->wParam)
         {
         case VK_TAB:

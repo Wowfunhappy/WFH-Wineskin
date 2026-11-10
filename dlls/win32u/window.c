@@ -6052,6 +6052,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
         win->dwExStyle |= WS_EX_WINDOWEDGE;
 
     if (!(win->dwStyle & (WS_CHILD | WS_POPUP))) win->flags |= WIN_NEED_SIZE;
+    win->flags |= initial_ui_state_flags( parent, win->dwStyle ); /* WINESKIN */
 
     SERVER_START_REQ( init_window_info )
     {

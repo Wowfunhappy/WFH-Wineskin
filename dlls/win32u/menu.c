@@ -2436,6 +2436,12 @@ got_bitmap:
 }
 
 /* Draw a single menu item */
+/* WINESKIN: a menu's access key underlines follow its owner's UI state (WM_QUERYUISTATE) */
+static BOOL menu_hides_access_keys( HWND hwnd, HWND owner )
+{
+    return (send_message( owner ? owner : hwnd, WM_QUERYUISTATE, 0, 0 ) & UISF_HIDEACCEL) != 0;
+}
+
 static void draw_menu_item( HWND hwnd, struct menu *menu, HWND owner, HDC hdc,
                             struct menu_item *item, BOOL menu_bar, UINT odaction )
 {
@@ -2530,6 +2536,7 @@ static void draw_menu_item( HWND hwnd, struct menu *menu, HWND owner, HDC hdc,
         if (item->fState & MF_CHECKED) dis.itemState |= ODS_CHECKED;
         if (item->fState & MF_GRAYED)  dis.itemState |= ODS_GRAYED|ODS_DISABLED;
         if (item->fState & MF_HILITE)  dis.itemState |= ODS_SELECTED;
+        if (menu_hides_access_keys( hwnd, owner )) dis.itemState |= ODS_NOACCEL; /* WINESKIN */
         dis.itemAction = odaction; /* ODA_DRAWENTIRE | ODA_SELECT | ODA_FOCUS; */
         dis.hwndItem   = (HWND)menu->handle;
         dis.hDC        = hdc;
@@ -2712,6 +2719,8 @@ static void draw_menu_item( HWND hwnd, struct menu *menu, HWND owner, HDC hdc,
         UINT format = menu_bar ?
             DT_CENTER | DT_VCENTER | DT_SINGLELINE :
             DT_LEFT | DT_VCENTER | DT_SINGLELINE;
+
+        if (menu_hides_access_keys( hwnd, owner )) format |= DT_HIDEPREFIX; /* WINESKIN */
 
         if (!(menu->dwStyle & MNS_CHECKORBMP))
             rect.left += menu->textOffset;
@@ -4522,6 +4531,9 @@ void track_keyboard_menu_bar( HWND hwnd, UINT wparam, WCHAR ch )
     if (!menu || is_driver_menu( hwnd ) || is_iconic( hwnd ) || ch == ' ')
     {
         if (!(get_window_long( hwnd, GWL_STYLE ) & WS_SYSMENU)) return;
+        /* WINESKIN: a Mac title bar has no system menu button for a bare Alt or F10 to select, and an
+           invisible menu mode would take the keyboard */
+        if (!ch) return;
         menu = get_win_sys_menu( hwnd );
         item = 0;
         wparam |= HTSYSMENU; /* prevent item lookup */
@@ -4558,8 +4570,11 @@ void track_keyboard_menu_bar( HWND hwnd, UINT wparam, WCHAR ch )
     }
 
 track_menu:
+    /* WINESKIN: a menu bar the keyboard drives shows its access keys */
+    if (!(wparam & HTSYSMENU)) show_access_keys( hwnd, TRUE );
     track_menu( menu, flags, 0, 0, hwnd, NULL );
     exit_tracking( hwnd, FALSE );
+    if (!(wparam & HTSYSMENU)) show_access_keys( hwnd, FALSE ); /* WINESKIN */
 }
 
 /**********************************************************************

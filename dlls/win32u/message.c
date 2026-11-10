@@ -2522,6 +2522,15 @@ static BOOL process_keyboard_message( MSG *msg, UINT hw_id, HWND hwnd_filter,
     if (msg->message < first || msg->message > last) return FALSE;
     if (!check_hwnd_filter( msg, hwnd_filter )) return FALSE;
 
+    /* WINESKIN: access key underlines show while Alt is held */
+    if (remove && msg->wParam == VK_MENU && msg->hwnd != get_desktop_window())
+    {
+        if ((msg->message == WM_SYSKEYDOWN || msg->message == WM_KEYDOWN) && !(HIWORD( msg->lParam ) & KF_REPEAT))
+            show_access_keys( msg->hwnd, TRUE );
+        else if (msg->message == WM_SYSKEYUP || msg->message == WM_KEYUP)
+            show_access_keys( msg->hwnd, FALSE );
+    }
+
     if (remove)
     {
         if((msg->message == WM_KEYDOWN) &&

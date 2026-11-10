@@ -384,6 +384,17 @@ LRESULT ButtonWndProc_common(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
     case WM_GETFONT:
         return (LRESULT)get_button_font( hWnd );
 
+    case WM_UPDATEUISTATE: /* WINESKIN: repaint when the access key underline shows or hides */
+    {
+        LRESULT ui_state = SendMessageW( hWnd, WM_QUERYUISTATE, 0, 0 );
+
+        if (unicode) DefWindowProcW( hWnd, uMsg, wParam, lParam );
+        else DefWindowProcA( hWnd, uMsg, wParam, lParam );
+        if ((ui_state ^ SendMessageW( hWnd, WM_QUERYUISTATE, 0, 0 )) & UISF_HIDEACCEL)
+            NtUserInvalidateRect( hWnd, NULL, FALSE );
+        break;
+    }
+
     case WM_SETFOCUS:
         TRACE("WM_SETFOCUS %p\n",hWnd);
         set_button_state( hWnd, get_button_state(hWnd) | BST_FOCUS );
@@ -686,6 +697,8 @@ static void BUTTON_DrawLabel(HWND hwnd, HDC hdc, UINT dtFlags, const RECT *rc)
     * must use DSS_MONO flag and COLOR_GRAYTEXT brush (or maybe DSS_UNION).
     * I don't have Win31 on hand to verify that, so I leave it as is.
     */
+
+   if (SendMessageW( hwnd, WM_QUERYUISTATE, 0, 0 ) & UISF_HIDEACCEL) dtFlags |= DT_HIDEPREFIX; /* WINESKIN */
 
    if ((style & BS_PUSHLIKE) && (state & BST_INDETERMINATE))
    {

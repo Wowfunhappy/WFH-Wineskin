@@ -83,6 +83,8 @@ typedef struct tagWND
 #define WIN_CHILDREN_MOVED        0x0040 /* children may have moved, ignore stored positions */
 #define WIN_HAS_IME_WIN           0x0080 /* the window has been registered with imm32 */
 #define WIN_DRIVER_MENU           0x0100 /* WINESKIN: the user driver shows the window's menu bar */
+#define WIN_HIDE_FOCUS            0x0200 /* WINESKIN: UI state UISF_HIDEFOCUS */
+#define WIN_HIDE_ACCEL            0x0400 /* WINESKIN: UI state UISF_HIDEACCEL */
 
 #define WND_OTHER_PROCESS ((WND *)1)  /* returned by get_win_ptr on unknown window handles */
 #define WND_DESKTOP       ((WND *)2)  /* returned by get_win_ptr on the desktop window */

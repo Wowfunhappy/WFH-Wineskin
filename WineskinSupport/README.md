@@ -399,14 +399,16 @@ limit on every wait.
 - **Command keys.** A wrapper maps both Command keys to Control (`CommandAsControl` in `Wineskin.plist`, on
   unless set off), so Command-C copies and Command-S saves; the app menu then takes Command-H and
   Command-Q.
-- **Access keys.** Controls and in-window menus draw their access key underlines ("&High") only while the
-  Alt key is held (Option, with "Option keys act as Alt"), as Windows does with its default keyboard cues
-  setting (`SPI_GETKEYBOARDCUES` off). win32u keeps each window's UI state (`WM_CHANGEUISTATE`,
-  `WM_UPDATEUISTATE`, `WM_QUERYUISTATE`): a top-level window starts with underlines and focus
-  rectangles hidden and a child takes its parent's state; Alt shows the underlines and its release hides
-  them again (`win32u/defwnd.c`). Buttons, check boxes, radio buttons, group boxes, static text, tabs and
-  menus draw with `DT_HIDEPREFIX` (which `user32/text.c` honours) while the state hides them, and repaint
-  when it changes.
+- **Access keys.** Controls and in-window menus hide their access key underlines ("&High"), as Windows
+  does with its default keyboard cues setting (`SPI_GETKEYBOARDCUES` off), and show them while the Alt key
+  is held (Option, with "Option keys act as Alt"). win32u keeps each window's UI state
+  (`WM_CHANGEUISTATE`, `WM_UPDATEUISTATE`, `WM_QUERYUISTATE`, in `win32u/defwnd.c`): a top-level window
+  starts with underlines and focus rectangles hidden, a child takes its parent's state, and Tab or an
+  arrow key in a dialog shows focus rectangles. Pressing Alt shows the underlines and releasing it hides
+  them (`process_keyboard_message` in `win32u/message.c`); a menu bar the keyboard drives shows them until
+  it closes, and a bare Alt or F10 opens no system menu, which a Mac title bar has no button for. Buttons,
+  check boxes, radio buttons, group boxes, static text, tabs and menus draw with `DT_HIDEPREFIX` (which
+  `user32/text.c` honours) while the state hides them, and repaint when it changes.
 
 ## Full screen and display modes
 

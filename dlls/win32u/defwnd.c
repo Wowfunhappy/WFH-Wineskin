@@ -2401,6 +2401,84 @@ static LRESULT handle_nc_mouse_leave( HWND hwnd )
     return 0;
 }
 
+/* WINESKIN: the UI state of WM_CHANGEUISTATE, WM_UPDATEUISTATE and WM_QUERYUISTATE, in the window's
+ * WIN_HIDE_FOCUS and WIN_HIDE_ACCEL flags. Without keyboard cues (SPI_GETKEYBOARDCUES, off by default)
+ * a top-level window starts with focus rectangles and access key underlines hidden, and a child
+ * window starts with its parent's state. */
+static UINT hidden_keyboard_cues(void)
+{
+    BOOL cues = FALSE;
+
+    NtUserSystemParametersInfo( SPI_GETKEYBOARDCUES, 0, &cues, 0 );
+    return cues ? 0 : UISF_HIDEFOCUS | UISF_HIDEACCEL;
+}
+
+static UINT get_ui_state( HWND hwnd )
+{
+    UINT flags = win_get_flags( hwnd ), state = 0;
+
+    if (flags & WIN_HIDE_FOCUS) state |= UISF_HIDEFOCUS;
+    if (flags & WIN_HIDE_ACCEL) state |= UISF_HIDEACCEL;
+    return state;
+}
+
+UINT initial_ui_state_flags( HWND parent, DWORD style )
+{
+    UINT state = (style & WS_CHILD) ? get_ui_state( parent ) : hidden_keyboard_cues();
+
+    return ((state & UISF_HIDEFOCUS) ? WIN_HIDE_FOCUS : 0) | ((state & UISF_HIDEACCEL) ? WIN_HIDE_ACCEL : 0);
+}
+
+/* the state a WM_CHANGEUISTATE or WM_UPDATEUISTATE wparam gives, or ~0u for an invalid one */
+static UINT changed_ui_state( UINT state, WPARAM wparam, LPARAM lparam )
+{
+    UINT flags = HIWORD( wparam );
+
+    if (lparam || (flags & ~(UISF_HIDEFOCUS | UISF_HIDEACCEL | UISF_ACTIVE))) return ~0u;
+    flags &= UISF_HIDEFOCUS | UISF_HIDEACCEL;
+    switch (LOWORD( wparam ))
+    {
+    case UIS_SET: return state | flags;
+    case UIS_CLEAR: return state & ~flags;
+    case UIS_INITIALIZE: return (state & ~(UISF_HIDEFOCUS | UISF_HIDEACCEL)) | hidden_keyboard_cues();
+    }
+    return ~0u;
+}
+
+static void change_ui_state( HWND hwnd, WPARAM wparam, LPARAM lparam )
+{
+    UINT state = get_ui_state( hwnd ), new_state = changed_ui_state( state, wparam, lparam );
+    HWND parent;
+
+    if (new_state == ~0u || new_state == state) return;
+    if ((get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && (parent = get_parent( hwnd )))
+        send_message( parent, WM_CHANGEUISTATE, wparam, lparam );
+    else
+        send_message( hwnd, WM_UPDATEUISTATE, wparam, lparam );
+}
+
+static void update_ui_state( HWND hwnd, WPARAM wparam, LPARAM lparam )
+{
+    UINT state = changed_ui_state( get_ui_state( hwnd ), wparam, lparam );
+    HWND *list;
+    int i;
+
+    if (state == ~0u) return;
+    win_set_flags( hwnd, ((state & UISF_HIDEFOCUS) ? WIN_HIDE_FOCUS : 0) |
+                         ((state & UISF_HIDEACCEL) ? WIN_HIDE_ACCEL : 0), WIN_HIDE_FOCUS | WIN_HIDE_ACCEL );
+    if (!(list = list_window_children( hwnd ))) return;
+    for (i = 0; list[i]; i++) send_message( list[i], WM_UPDATEUISTATE, wparam, lparam );
+    free( list );
+}
+
+/* WINESKIN: access key underlines show while Alt is held (process_keyboard_message), unless keyboard
+ * cues always show them */
+void show_access_keys( HWND hwnd, BOOL show )
+{
+    if (!show && !(hidden_keyboard_cues() & UISF_HIDEACCEL)) return;
+    send_message( hwnd, WM_CHANGEUISTATE, MAKEWPARAM( show ? UIS_CLEAR : UIS_SET, UISF_HIDEACCEL ), 0 );
+}
+
 
 LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL ansi )
 {
@@ -2453,6 +2531,7 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
         return handle_nc_paint( hwnd, (HRGN)wparam );
 
     case WM_NCACTIVATE:
+        if (!wparam) show_access_keys( hwnd, FALSE ); /* WINESKIN: an inactive window sees no Alt release */
         return handle_nc_activate( hwnd, wparam, lparam );
 
     case WM_NCLBUTTONDOWN:
@@ -2816,6 +2895,18 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
         else if (wparam != '\x1b')  /* Ctrl-Esc */
             NtUserMessageBeep(0);
         break;
+
+    /* WINESKIN */
+    case WM_CHANGEUISTATE:
+        change_ui_state( hwnd, wparam, lparam );
+        break;
+
+    case WM_UPDATEUISTATE:
+        update_ui_state( hwnd, wparam, lparam );
+        break;
+
+    case WM_QUERYUISTATE:
+        return get_ui_state( hwnd );
 
     case WM_KEYF1:
         {

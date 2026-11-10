@@ -838,6 +838,16 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
     case WM_GETFONT:
         return (LRESULT)infoPtr->font;
 
+    case WM_UPDATEUISTATE: /* WINESKIN: repaint when the access key underline shows or hides */
+    {
+        LRESULT ui_state = SendMessageW( hWnd, WM_QUERYUISTATE, 0, 0 );
+
+        DefWindowProcW( hWnd, uMsg, wParam, lParam );
+        if ((ui_state ^ SendMessageW( hWnd, WM_QUERYUISTATE, 0, 0 )) & UISF_HIDEACCEL)
+            InvalidateRect( hWnd, NULL, FALSE );
+        break;
+    }
+
     case WM_SETFOCUS:
         TRACE("WM_SETFOCUS %p\n",hWnd);
         infoPtr->state |= BST_FOCUS;
@@ -1711,6 +1721,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
    CopyRect(imageRc, &imageRect);
    CopyRect(textRc, &textRect);
 
+   if (SendMessageW( infoPtr->hwnd, WM_QUERYUISTATE, 0, 0 ) & UISF_HIDEACCEL) dtStyle |= DT_HIDEPREFIX; /* WINESKIN */
    return dtStyle;
 }
 

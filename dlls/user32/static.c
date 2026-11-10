@@ -514,6 +514,18 @@ LRESULT StaticWndProc_common( HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     case WM_GETFONT:
         return (LRESULT)get_control_font( hwnd );
 
+    case WM_UPDATEUISTATE: /* WINESKIN: repaint when the access key underline shows or hides */
+    {
+        LRESULT ui_state = SendMessageW( hwnd, WM_QUERYUISTATE, 0, 0 );
+
+        if (unicode) DefWindowProcW( hwnd, uMsg, wParam, lParam );
+        else DefWindowProcA( hwnd, uMsg, wParam, lParam );
+        if (hasTextStyle( full_style ) && !(full_style & SS_NOPREFIX) &&
+            ((ui_state ^ SendMessageW( hwnd, WM_QUERYUISTATE, 0, 0 )) & UISF_HIDEACCEL))
+            NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE );
+        break;
+    }
+
     case WM_NCHITTEST:
         if (full_style & SS_NOTIFY)
            return HTCLIENT;
@@ -641,6 +653,8 @@ static void STATIC_PaintTextfn( HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style )
 
     if (style & SS_NOPREFIX)
         format |= DT_NOPREFIX;
+
+    if (SendMessageW( hwnd, WM_QUERYUISTATE, 0, 0 ) & UISF_HIDEACCEL) format |= DT_HIDEPREFIX; /* WINESKIN */
 
     if ((style & SS_TYPEMASK) != SS_SIMPLE)
     {

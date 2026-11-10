@@ -74,6 +74,8 @@ extern BOOL draw_rect_edge( HDC hdc, RECT *rc, UINT uType, UINT uFlags, UINT wid
 extern void fill_rect( HDC dc, const RECT *rect, HBRUSH hbrush );
 extern void get_sys_popup_pos( HWND hwnd, RECT *rect );
 extern LRESULT handle_nc_hit_test( HWND hwnd, POINT pt );
+extern UINT initial_ui_state_flags( HWND parent, DWORD style ); /* WINESKIN */
+extern void show_access_keys( HWND hwnd, BOOL show ); /* WINESKIN */
 
 /* hook.c */
 extern LRESULT call_current_hook( HHOOK hhook, INT code, WPARAM wparam, LPARAM lparam );
