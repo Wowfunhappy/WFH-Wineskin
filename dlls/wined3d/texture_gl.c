@@ -708,6 +708,21 @@ static bool fbo_blitter_supported(enum wined3d_blit_op blit_op, const struct win
     return true;
 }
 
+/* WINESKIN: typeless and swap chain textures of a format with an sRGB variant
+ * are allocated with the sRGB internal format (wined3d_format_gl.srgb_view_internal),
+ * and macOS's glBlitFramebuffer resolves between an sRGB internal format and its
+ * linear one keeping the bits, so a typeless resolve needs no intermediate
+ * texture when the two internal formats differ only in that. */
+static GLint wined3d_gl_linear_internal(GLint internal)
+{
+    switch (internal)
+    {
+        case GL_SRGB8_ALPHA8: return GL_RGBA8;
+        case GL_SRGB8: return GL_RGB8;
+        default: return internal;
+    }
+}
+
 /* Blit between surface locations. Onscreen on different swapchains is not supported.
  * Depth / stencil is not supported. Context activation is done by the caller. */
 static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_context *context,
@@ -781,7 +796,9 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
         /* In case of typeless resolve the texture type may not match the resolve type.
          * To handle that, allocate intermediate texture(s) to resolve from/to.
          * A possible performance improvement would be to resolve using a shader instead. */
-        if (src_internal != resolve_internal)
+        /* WINESKIN: see wined3d_gl_linear_internal(). */
+        /* if (src_internal != resolve_internal) */
+        if (wined3d_gl_linear_internal(src_internal) != wined3d_gl_linear_internal(resolve_internal))
         {
             struct wined3d_resource_desc desc;
             unsigned src_level;
@@ -820,7 +837,9 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
             src_sub_resource_idx = 0;
         }
 
-        if (dst_internal != resolve_internal)
+        /* WINESKIN: see wined3d_gl_linear_internal(). */
+        /* if (dst_internal != resolve_internal) */
+        if (wined3d_gl_linear_internal(dst_internal) != wined3d_gl_linear_internal(resolve_internal))
         {
             struct wined3d_resource_desc desc;
             unsigned dst_level;
@@ -938,6 +957,13 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
     {
         if (dst_location == WINED3D_LOCATION_DRAWABLE)
             FIXME("WINED3D_LOCATION_DRAWABLE not supported for the destination of a typeless resolve.\n");
+
+        /* WINESKIN: the resolve wrote the intermediate texture's dst_location only.
+         * Without ARB_copy_image the copy below is the CPU blitter's, which reads
+         * the intermediate's system memory, and that memory has to be downloaded
+         * first. */
+        wined3d_texture_validate_location(dst_texture, 0, dst_location);
+        wined3d_texture_invalidate_location(dst_texture, 0, ~dst_location);
 
         device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_RAW_BLIT, context,
                 dst_texture, 0, dst_location, dst_rect,
