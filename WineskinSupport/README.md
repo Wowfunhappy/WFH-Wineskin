@@ -156,6 +156,13 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   `gl_Layer` in fragment shaders. Unreal Engine renders its colour grading table one layer at a time and
   takes the blue coordinate from the layer. The centroid and sample interpolation modes interpolate at
   the pixel centre.
+- A vertex or domain shader that writes `SV_RenderTargetArrayIndex` or `SV_ViewportArrayIndex` (OpenGL 4.1
+  has `gl_Layer` and `gl_ViewportIndex` only in geometry shaders) comes with a geometry shader without a
+  function, made from its output signature (`wined3d_shader.layer_gs`). The command stream binds it where the
+  application binds no geometry shader, and it emits each primitive as it comes (adjacency primitives without
+  their adjacent vertices, tessellated draws as the tessellator's primitives) with the layer and viewport
+  index set. The device reports `VPAndRTArrayIndexFromAnyShaderFeedingRasterizer`. Unity's Sayonara Wild
+  Hearts draws into texture arrays this way.
 - A draw without a pixel shader (a depth prepass, a shadow map) links an empty fragment shader
   (`shader_glsl_get_empty_fragment_shader`): 10.9's core profile fails every draw of a program that has
   none with `GL_INVALID_OPERATION`.
@@ -193,7 +200,11 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
 - 10.9's driver keeps the converted colour of the previous `glClear` when the same colour is cleared again
   with `GL_FRAMEBUFFER_SRGB` toggled, so clears of sRGB views convert the colour themselves and run with
   it off (`ffp_blitter_clear_rendertargets`). Its `glBlitFramebuffer` never converts, so copies, resolves
-  and presents keep the texture's bits.
+  and presents keep the texture's bits. A multisample resolve between an sRGB internal format and its linear
+  one is allowed, so a resolve into a typeless texture goes straight into it (`wined3d_gl_linear_internal`);
+  resolves between other formats go through an intermediate texture of the resolve format, which the CPU
+  blitter copies (there is no `ARB_copy_image`). The driver averages sRGB samples as stored, not in linear
+  space, so the edge pixels of resolved sRGB targets come out a little darker than on Windows.
 - R11G11B10_FLOAT vertex elements can be declared; constant (stride 0) ones are decoded, arrays of them
   read as (0, 0, 0, 1) (there is no `ARB_vertex_type_10f_11f_11f_rev`).
 - A fragment shader gets 16 texture units, and shader model 5 shaders can sample more (resource, sampler)
