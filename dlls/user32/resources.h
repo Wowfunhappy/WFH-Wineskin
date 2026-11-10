@@ -27,6 +27,7 @@
 #define IDS_MDI_MOREWINDOWS     13
 #define MSGBOX_IDICON           stc1
 #define MSGBOX_IDTEXT           0xffff
+#define MSGBOX_AQUA_MANIFEST    124     /* WINESKIN: msgbox_aqua.c; not 1-16, which the loader activates */
 #define IDS_ERROR               2
 #define IDS_STRING_OK           800
 #define IDS_STRING_CANCEL       801

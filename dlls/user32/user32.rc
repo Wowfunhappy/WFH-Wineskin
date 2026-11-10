@@ -111,6 +111,10 @@ END
 
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
+/* WINESKIN: the activation context of message boxes (msgbox_aqua.c) */
+/* @makedep: msgbox_aqua.manifest */
+MSGBOX_AQUA_MANIFEST RT_MANIFEST msgbox_aqua.manifest
+
 /****************************************************************/
 /* Bitmaps */
 

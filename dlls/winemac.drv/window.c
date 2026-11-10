@@ -32,6 +32,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
 
+/* WINESKIN: see macdrv_SetWindowText */
+static const WCHAR untitled_propW[] = {'_','_','w','i','n','e','_','m','a','c','_','u','n','t','i','t','l','e','d',0};
+
 
 static pthread_mutex_t win_data_mutex;
 static CFMutableDictionaryRef win_datas;
@@ -482,6 +485,7 @@ static void create_cocoa_window(struct macdrv_win_data *data)
 
     /* set the window text */
     if (!NtUserInternalGetWindowText(data->hwnd, text, ARRAY_SIZE(text))) text[0] = 0;
+    if (NtUserGetProp(data->hwnd, untitled_propW)) text[0] = 0; /* WINESKIN: see macdrv_SetWindowText */
     macdrv_set_cocoa_window_title(data->cocoa_window, text, wcslen(text));
 
     /* set the window region */
@@ -1431,6 +1435,9 @@ void macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
 
     TRACE("%p, %s\n", hwnd, debugstr_w(text));
 
+    /* WINESKIN: a window with the __wine_mac_untitled property (user32's message boxes, laid out
+       as alerts) shows no title, as a Mac alert; its window text is unchanged. */
+    if (NtUserGetProp(hwnd, untitled_propW)) text = untitled_propW + ARRAY_SIZE(untitled_propW) - 1;
     if ((win = macdrv_get_cocoa_window(hwnd, FALSE)))
         macdrv_set_cocoa_window_title(win, text, wcslen(text));
 }

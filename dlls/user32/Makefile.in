@@ -7,7 +7,9 @@ DELAYIMPORTS = imm32 combase
 
 VER_PRODUCTVERSION = 5,1,2600,2180
 
+# WINESKIN: msgbox_aqua.c lays message boxes out as OS X alerts.
 SOURCES = \
+	msgbox_aqua.c \
 	button.c \
 	class.c \
 	clipboard.c \

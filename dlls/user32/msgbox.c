@@ -34,6 +34,13 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dialog);
 WINE_DECLARE_DEBUG_CHANNEL(msgbox);
 
+/* WINESKIN: msgbox_aqua.c */
+extern void MSGBOX_AquaLayout( HWND hwnd, const MSGBOXPARAMSW *mb );
+extern BOOL MSGBOX_AquaDrawItem( HWND hwnd, const DRAWITEMSTRUCT *dis );
+extern void MSGBOX_AquaDestroy( HWND hwnd );
+extern ULONG_PTR MSGBOX_AquaActivate( void );
+extern void MSGBOX_AquaDeactivate( ULONG_PTR cookie );
+
 struct ThreadWindows
 {
     UINT numHandles;
@@ -335,6 +342,7 @@ static INT_PTR CALLBACK MSGBOX_DlgProc( HWND hwnd, UINT message,
        LPMSGBOXPARAMSW mbp = (LPMSGBOXPARAMSW)lParam;
        NtUserSetWindowContextHelpId(hwnd, mbp->dwContextHelpId);
        MSGBOX_OnInit(hwnd, mbp);
+       MSGBOX_AquaLayout(hwnd, mbp); /* WINESKIN: see msgbox_aqua.c */
        SetPropA(hwnd, "WINE_MSGBOX_HELPCALLBACK", mbp->lpfnMsgBoxCallback);
        break;
    }
@@ -358,6 +366,13 @@ static INT_PTR CALLBACK MSGBOX_DlgProc( HWND hwnd, UINT message,
       break;
     }
     break;
+
+    /* WINESKIN: see msgbox_aqua.c */
+    case WM_DRAWITEM:
+        return MSGBOX_AquaDrawItem(hwnd, (const DRAWITEMSTRUCT *)lParam);
+    case WM_DESTROY:
+        MSGBOX_AquaDestroy(hwnd);
+        break;
 
     case WM_HELP:
     {
@@ -541,8 +556,12 @@ INT WINAPI MessageBoxIndirectW( LPMSGBOXPARAMSW msgbox )
     }
 
     NtUserModifyUserStartupInfoFlags( STARTF_USESHOWWINDOW, 0 );
+    {
+        ULONG_PTR cookie = MSGBOX_AquaActivate(); /* WINESKIN: see msgbox_aqua.c */
     ret=DialogBoxIndirectParamW(msgbox->hInstance, tmplate,
                                 msgbox->hwndOwner, MSGBOX_DlgProc, (LPARAM)msgbox);
+        MSGBOX_AquaDeactivate( cookie ); /* WINESKIN */
+    }
 
     if ((msgbox->dwStyle & MB_TASKMODAL) && (msgbox->hwndOwner==NULL))
     {
