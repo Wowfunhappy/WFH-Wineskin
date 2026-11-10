@@ -424,6 +424,13 @@ Wine's link to the Mac's Documents. "AppData in Application Support" (on) and "D
 Support" (off) in the configuration window choose; turning AppData off moves it back into the prefix, and
 turning Documents off links the Mac's Documents again, leaving what the program saved where it is.
 
+Each wrapper carries its own engine and is independent of every other. `wrapper/Update Existing
+Wrappers.command` brings wrappers up to this build: it replaces a wrapper's engine and launcher with
+those of `build/WFH Wineskin.app`, keeps its Windows environment, settings, name and icon, and has Wine
+update the prefix (`wineboot --update`), which refreshes the files a prefix copies from its engine: the
+visual style, placeholder DLLs and registry defaults. Run it with no arguments to choose wrappers in a
+dialog, with wrapper paths, or with `--update-apps-folder` for every wrapper in /Applications.
+
 The bundle's icon is the program's own, so Finder shows what the Dock shows while it runs. When the
 program changes (chosen in the configuration window, or found changed at launch; `IconProgram` in
 `Wineskin.plist` records which program the icon came from), `MatchBundleIcon` reads the program's first
