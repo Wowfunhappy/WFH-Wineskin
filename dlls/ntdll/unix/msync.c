@@ -64,6 +64,7 @@
 #include <mach/task.h>
 #include <mach/semaphore.h>
 #include <mach/mach_error.h>
+#include <mach/mach_time.h>  /* WINESKIN */
 #include <servers/bootstrap.h>
 #include <os/lock.h>
 #include <AvailabilityMacros.h>
@@ -90,13 +91,24 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
 
+/* WINESKIN: the end of a wait is kept on the monotonic clock, in 100 ns units, so that a wait lasts
+ * as long as was asked whatever happens to the wall clock (CrossOver keeps it in system time). */
+static ULONGLONG monotonic_time(void)
+{
+    static mach_timebase_info_data_t timebase;
+
+    if (!timebase.denom) mach_timebase_info( &timebase );
+    return mach_absolute_time() * timebase.numer / timebase.denom / 100;
+}
+
 static LONGLONG update_timeout( ULONGLONG end )
 {
-    LARGE_INTEGER now;
+    /* LARGE_INTEGER now; */
     LONGLONG timeleft;
 
-    NtQuerySystemTime( &now );
-    timeleft = end - now.QuadPart;
+    /* NtQuerySystemTime( &now ); */
+    /* timeleft = end - now.QuadPart; */
+    timeleft = end - monotonic_time();
     if (timeleft < 0) timeleft = 0;
     return timeleft;
 }
@@ -957,10 +969,13 @@ NTSTATUS msync_wait_objs( const DWORD count, const int *objs, BOOLEAN wait_any,
     {
         if (timeout->QuadPart == TIMEOUT_INFINITE)
             timeout = NULL;
+        /* WINESKIN: see monotonic_time() */
         else if (timeout->QuadPart > 0)
-            end = timeout->QuadPart;
+            /* end = timeout->QuadPart; */
+            end = monotonic_time() + (timeout->QuadPart > now.QuadPart ? timeout->QuadPart - now.QuadPart : 0);
         else
-            end = now.QuadPart - timeout->QuadPart;
+            /* end = now.QuadPart - timeout->QuadPart; */
+            end = monotonic_time() - timeout->QuadPart;
     }
 
     for (i = 0; i < count; i++)
