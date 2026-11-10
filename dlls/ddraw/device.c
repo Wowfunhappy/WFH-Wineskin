@@ -431,7 +431,15 @@ static HRESULT d3d_device7_GetCaps(IDirect3DDevice7 *iface, D3DDEVICEDESC7 *devi
     }
 
     /* Call the same function used by IDirect3D, this saves code */
-    return ddraw_get_d3dcaps(device->ddraw, device_desc);
+    /* WINESKIN: as on Windows, a device reports the type it was created as, with the caps
+     * IDirect3D7::EnumDevices gives that type. D3DX 7 (Typing of the Dead) identifies its
+     * software rasterizer devices by the GUID their GetCaps returns. */
+    // return ddraw_get_d3dcaps(device->ddraw, device_desc);
+    {
+        HRESULT hr = ddraw_get_d3dcaps(device->ddraw, device_desc);
+        if (SUCCEEDED(hr)) ddraw_d3dcaps_for_device_type(device_desc, &device->device_guid);
+        return hr;
+    }
 }
 
 static HRESULT WINAPI d3d_device7_GetCaps_FPUSetup(IDirect3DDevice7 *iface, D3DDEVICEDESC7 *desc)
@@ -6881,6 +6889,7 @@ static HRESULT d3d_device_init(struct d3d_device *device, struct ddraw *ddraw, c
     device->version = version;
     device->hardware_device = IsEqualGUID(&IID_IDirect3DTnLHalDevice, guid)
             || IsEqualGUID(&IID_IDirect3DHALDevice, guid);
+    device->device_guid = *guid; /* WINESKIN */
 
     if (device->hardware_device && !(target->surface_desc.ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY))
     {

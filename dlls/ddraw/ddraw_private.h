@@ -142,6 +142,7 @@ struct ddraw
 HRESULT ddraw_init(struct ddraw *ddraw, DWORD flags, enum wined3d_device_type device_type);
 void ddraw_d3dcaps1_from_7(D3DDEVICEDESC *caps1, D3DDEVICEDESC7 *caps7);
 HRESULT ddraw_get_d3dcaps(const struct ddraw *ddraw, D3DDEVICEDESC7 *caps);
+void ddraw_d3dcaps_for_device_type(D3DDEVICEDESC7 *caps, const GUID *device_guid); /* WINESKIN */
 void ddraw_update_lost_surfaces(struct ddraw *ddraw);
 
 static inline void ddraw_set_swapchain_window(struct ddraw *ddraw, HWND window)
@@ -322,6 +323,7 @@ struct d3d_device
     UINT version;
     BOOL hardware_device;
     BOOL have_draw_textures;
+    GUID device_guid; /* WINESKIN: the device type it was created as, for IDirect3DDevice7::GetCaps */
 
     IUnknown *outer_unknown;
     struct wined3d_device *wined3d_device;

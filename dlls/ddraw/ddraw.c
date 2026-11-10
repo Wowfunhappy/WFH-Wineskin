@@ -72,6 +72,22 @@ static struct enum_device_entry
     },
 };
 
+/* WINESKIN: the device GUID and caps IDirect3D7::EnumDevices reports for a device type; a type
+ * EnumDevices doesn't list (reference, null, MMX) keeps its own GUID and the common caps. */
+void ddraw_d3dcaps_for_device_type(D3DDEVICEDESC7 *caps, const GUID *device_guid)
+{
+    const GUID *guid = IsEqualGUID(device_guid, &IID_IDirect3DMMXDevice) ? &IID_IDirect3DRGBDevice : device_guid;
+    size_t i;
+
+    caps->deviceGUID = *device_guid;
+    for (i = 0; i < ARRAY_SIZE(device_list7); ++i)
+    {
+        if (!IsEqualGUID(guid, device_list7[i].device_guid)) continue;
+        caps->dwDevCaps &= ~device_list7[i].unsupported_caps;
+        break;
+    }
+}
+
 static void STDMETHODCALLTYPE ddraw_null_wined3d_object_destroyed(void *parent) {}
 
 const struct wined3d_parent_ops ddraw_null_wined3d_parent_ops =
