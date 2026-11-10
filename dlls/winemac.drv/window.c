@@ -1144,9 +1144,10 @@ static void macdrv_client_surface_update(struct client_surface *client)
         return;
     }
     macdrv_remote_gl_detach(surface);
-    /* WINESKIN: on 10.9 a view's OpenGL surface keeps showing the drawable at the size it was made with,
-       whatever the context sets later, when the drawable changes scale (a display mode change under a
-       full-screen window) or changes size in a letterboxed window; the surface gets a new view then. */
+    /* WINESKIN: on 10.9 a view's OpenGL surface can keep showing the drawable at the size it was made
+       with, whatever the context sets later: after a display mode change under a full-screen window, and
+       after a program resizes a window that started full screen. The surface gets a new view when its
+       drawable changes scale, or changes size other than in the user's live resize of the window. */
     {
         SIZE size = { client->virtual_rect.right - client->virtual_rect.left,
                       client->virtual_rect.bottom - client->virtual_rect.top };
@@ -1157,7 +1158,7 @@ static void macdrv_client_surface_update(struct client_surface *client)
             (monitor.cx * surface->virtual_size.cx != surface->monitor_size.cx * size.cx ||
              monitor.cy * surface->virtual_size.cy != surface->monitor_size.cy * size.cy ||
              ((size.cx != surface->virtual_size.cx || size.cy != surface->virtual_size.cy) &&
-              macdrv_win_data_letterboxed(data))))
+              !data->live_resize)))
         {
             WineContentView *old_view = surface->cocoa_view;
 
@@ -1852,6 +1853,7 @@ void macdrv_window_frame_changed(HWND hwnd, const macdrv_event *event)
               data->rects.window.bottom - data->rects.window.top, width, height);
 
     being_dragged = data->drag_event != NULL;
+    data->live_resize = event->window_frame_changed.in_resize; /* WINESKIN */
     release_win_data(data);
 
     if (event->window_frame_changed.fullscreen)
@@ -2034,7 +2036,14 @@ void macdrv_window_brought_forward(HWND hwnd)
  */
 void macdrv_window_resize_ended(HWND hwnd)
 {
+    struct macdrv_win_data *data; /* WINESKIN */
+
     TRACE("hwnd %p\n", hwnd);
+    if ((data = get_win_data(hwnd))) /* WINESKIN */
+    {
+        data->live_resize = FALSE;
+        release_win_data(data);
+    }
     send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
 }
 
