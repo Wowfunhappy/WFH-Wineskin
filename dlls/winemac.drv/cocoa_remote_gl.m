@@ -291,6 +291,13 @@ static void create_surfaces(WineRemoteGLSurface *remote, int width, int height)
     {
         if (remote->surfaces[i]) CFRelease(remote->surfaces[i]);
         remote->surfaces[i] = IOSurfaceCreate((CFDictionaryRef)props);
+        /* A new IOSurface holds whatever its memory held before, other programs' pixels included,
+           until the first frame is copied in; it starts black. */
+        if (remote->surfaces[i] && IOSurfaceLock(remote->surfaces[i], 0, NULL) == kIOReturnSuccess)
+        {
+            memset(IOSurfaceGetBaseAddress(remote->surfaces[i]), 0, IOSurfaceGetAllocSize(remote->surfaces[i]));
+            IOSurfaceUnlock(remote->surfaces[i], 0, NULL);
+        }
     }
     remote->surfaceWidth = width;
     remote->surfaceHeight = height;
