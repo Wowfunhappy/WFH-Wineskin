@@ -139,7 +139,7 @@ struct wined3d_settings wined3d_settings =
     .map_shadow_watch = TRUE, /* WINESKIN */
     .gl_state_filter = TRUE, /* WINESKIN */
     .stream_output_emulation = TRUE, /* WINESKIN */
-    .cb_uniforms = TRUE, /* WINESKIN */
+    .cb_uniforms = FALSE, /* WINESKIN */
 };
 
 enum wined3d_renderer CDECL wined3d_get_renderer(void)
@@ -534,13 +534,12 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
             ERR_(winediag)("Disabling the OpenGL state filter.\n");
             wined3d_settings.gl_state_filter = FALSE;
         }
-        /* WINESKIN: constant buffers as uniform arrays (cb_uniforms_gl.c), on unless "n", "0" or "disabled". */
+        /* WINESKIN: constant buffers as uniform arrays (cb_uniforms_gl.c), off unless "y" or "1". */
         if (!get_config_key(hkey, appkey, env, "ConstantBufferUniforms", buffer, size)
-                && (!strcmp(buffer, "n") || !strcmp(buffer, "N") || !strcmp(buffer, "0")
-                || !strcmp(buffer, "disabled")))
+                && (!strcmp(buffer, "y") || !strcmp(buffer, "Y") || !strcmp(buffer, "1")))
         {
-            ERR_(winediag)("Constant buffers are uniform blocks.\n");
-            wined3d_settings.cb_uniforms = FALSE;
+            ERR_(winediag)("Constant buffers are uniform arrays.\n");
+            wined3d_settings.cb_uniforms = TRUE;
         }
     }
 

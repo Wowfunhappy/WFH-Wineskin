@@ -386,8 +386,10 @@ it, with `glProgramUniform4uiv`. The contents come from the system memory copy t
 small buffer object (`struct wined3d_bo`'s `cl_mirror`, which OpenCL dispatches use too). After a GPU write or a
 buffer-to-buffer copy, the buffer is read back first. A bound range shorter than the declared array is padded
 with zeros. The stream output emulation program loads its vertex shader's constant buffers the same way.
-`HKCU\Software\Wine\Direct3D\ConstantBufferUniforms` = `n` (or `WINE_D3D_CONFIG=ConstantBufferUniforms=n`) keeps
-them all uniform blocks.
+It is off unless `HKCU\Software\Wine\Direct3D\ConstantBufferUniforms` = `y` (or
+`WINE_D3D_CONFIG=ConstantBufferUniforms=y`): a constant buffer that an update replaces with another buffer object
+(`UpdateSubresource` of the whole buffer) has no copy in system memory, and reading it back stalls each draw
+that uses it; Bit.Trip Rerunner's title drops to 1.5 frames a second.
 
 #### The cost of an OpenGL call, and the state filter
 

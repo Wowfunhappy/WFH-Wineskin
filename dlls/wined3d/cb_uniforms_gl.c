@@ -27,9 +27,11 @@
  * bound range shorter than the declared array is padded with zeros, as
  * Direct3D reads past the end of a constant buffer.
  *
- * HKCU\Software\Wine\Direct3D\ConstantBufferUniforms = "n" (or
- * WINE_D3D_CONFIG "ConstantBufferUniforms=n") keeps every constant buffer a
- * uniform block.
+ * It is off unless HKCU\Software\Wine\Direct3D\ConstantBufferUniforms is
+ * "y" (or WINE_D3D_CONFIG has "ConstantBufferUniforms=y"): a buffer that an
+ * update replaces with another buffer object has no copy in system memory,
+ * and the read back that takes stalls on the GPU at each draw that uses it
+ * (Bit.Trip Rerunner's title drops to 1.5 frames a second).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
