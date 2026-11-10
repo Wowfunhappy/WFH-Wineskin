@@ -580,6 +580,13 @@ struct wined3d_gl_view
      * of that part of "range_source" (wined3d_gl_view_load_buffer_range). */
     GLuint range_bo, range_source;
     unsigned int range_offset, range_size;
+
+    /* WINESKIN: without ARB_texture_view, a view that reads a typeless
+     * texture as integers when it is stored as float or normalised values
+     * (or the reverse) is a texture of its own in the view's format; "copy_bo"
+     * carries the texture's bits to it each time the view is bound
+     * (wined3d_shader_resource_view_gl_load_copy). */
+    GLuint copy_bo;
 };
 
 /* WINESKIN */
@@ -1215,8 +1222,12 @@ static inline const struct wined3d_format_gl *wined3d_format_gl(const struct win
 static inline GLuint wined3d_gl_get_internal_format(struct wined3d_resource *resource,
     const struct wined3d_format_gl *format_gl, bool srgb)
 {
-    /* WINESKIN: see wined3d_format_gl.srgb_view_internal. */
+    /* WINESKIN: see wined3d_format_gl.srgb_view_internal. A texture with
+     * unordered access keeps the format OpenCL shares (cl_compute.c): sRGB
+     * formats have no unordered access views, and a shadow copy around every
+     * dispatch costs more than its sRGB views are worth. */
     if (format_gl->srgb_view_internal && resource->type != WINED3D_RTYPE_BUFFER
+            && !(resource->bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
             && (wined3d_format_is_typeless(resource->format) || texture_from_resource(resource)->swapchain))
         return format_gl->srgb_view_internal;
     if (srgb)

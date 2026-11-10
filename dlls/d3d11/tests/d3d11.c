@@ -22663,6 +22663,83 @@ static void test_uav_load(void)
     release_test_context(&test_context);
 }
 
+/* WINESKIN: unordered access view clears on several devices in one process: two alive
+ * at once, one destroyed while another lives, and one created afterwards. */
+static void clear_and_check_uav(ID3D11Device *device, float value)
+{
+    const float clear_value[4] = {value, value, value, value};
+    D3D11_TEXTURE2D_DESC texture_desc;
+    ID3D11UnorderedAccessView *uav;
+    ID3D11DeviceContext *context;
+    ID3D11Texture2D *texture;
+    HRESULT hr;
+
+    texture_desc.Width = 64;
+    texture_desc.Height = 64;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_R32_FLOAT;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    texture_desc.CPUAccessFlags = 0;
+    texture_desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(device, &texture_desc, NULL, &texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID3D11Device_CreateUnorderedAccessView(device, (ID3D11Resource *)texture, NULL, &uav);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID3D11Device_GetImmediateContext(device, &context);
+    ID3D11DeviceContext_ClearUnorderedAccessViewFloat(context, uav, clear_value);
+    check_texture_float(texture, value, 0);
+
+    ID3D11DeviceContext_Release(context);
+    ID3D11UnorderedAccessView_Release(uav);
+    ID3D11Texture2D_Release(texture);
+}
+
+static void test_unordered_access_multiple_devices(void)
+{
+    ID3D11Device *device1, *device2, *device3;
+    ULONG refcount;
+
+    if (!(device1 = create_device(NULL)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+    if (ID3D11Device_GetFeatureLevel(device1) < D3D_FEATURE_LEVEL_11_0)
+    {
+        skip("Unordered access views are not supported.\n");
+        ID3D11Device_Release(device1);
+        return;
+    }
+    clear_and_check_uav(device1, 0.5f);
+
+    device2 = create_device(NULL);
+    ok(!!device2, "Failed to create device.\n");
+
+    clear_and_check_uav(device1, 1.0f);
+    clear_and_check_uav(device2, 2.0f);
+    clear_and_check_uav(device1, 3.0f);
+
+    refcount = ID3D11Device_Release(device1);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    clear_and_check_uav(device2, 4.0f);
+
+    device3 = create_device(NULL);
+    ok(!!device3, "Failed to create device.\n");
+    clear_and_check_uav(device3, 5.0f);
+    clear_and_check_uav(device2, 6.0f);
+
+    refcount = ID3D11Device_Release(device2);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    clear_and_check_uav(device3, 7.0f);
+    refcount = ID3D11Device_Release(device3);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_cs_uav_store(void)
 {
     static const D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -37945,6 +38022,7 @@ START_TEST(d3d11)
     queue_test(test_stencil_separate);
     queue_test(test_uav_load);
     queue_test(test_cs_uav_store);
+    queue_test(test_unordered_access_multiple_devices); /* WINESKIN */
     queue_test(test_uav_store_immediate_constant);
     queue_test(test_ps_cs_uav_binding);
     queue_test(test_atomic_instructions);

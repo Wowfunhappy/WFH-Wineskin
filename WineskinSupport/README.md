@@ -149,9 +149,13 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   `GL_FRAMEBUFFER_SRGB` from the render target view of each draw (`shader_glsl_apply_draw_state`).
   A typeless format is allocated as the last of its float and normalised formats (`init_typeless_formats`):
   R32 as R32F, R8 as R8 UNORM, R8G8 as RG8 UNORM, which is how games view them (Unity's ambient occlusion
-  and depth targets are typeless with float views). Views of some layers of an array, views that change
-  the texture's type (a cube view of an array, say), and integer views of such typeless textures read the
-  whole texture as it was allocated.
+  and depth targets are typeless with float views). A shader resource view of a 1D or 2D typeless texture
+  whose class differs from that storage (an R32_UINT view of an R32 typeless texture, say) is a texture of
+  its own in the view's format, and the texture's bits are copied to it through a pixel buffer each time
+  the view is bound (`wined3d_shader_resource_view_gl_load_copy`); views of the storage's class cost
+  nothing. Views of some layers of an array, views that change the texture's type (a cube view of an
+  array, say), and render target or unordered access views of the other class use the whole texture as
+  it was allocated.
 - 10.9's driver keeps the converted colour of the previous `glClear` when the same colour is cleared again
   with `GL_FRAMEBUFFER_SRGB` toggled, so clears of sRGB views convert the colour themselves and run with
   it off (`ffp_blitter_clear_rendertargets`). Its `glBlitFramebuffer` never converts, so copies, resolves
@@ -206,6 +210,7 @@ in place.
   the device has `cl_khr_gl_event`, under which acquiring OpenGL objects waits for the OpenGL commands
   of the context bound on the calling thread, and OpenGL commands issued after the release see the
   kernel's results; both calls run on wined3d's command stream thread with its OpenGL context current.
+  A device without the extension finishes OpenGL before and OpenCL after each dispatch.
 - An OpenCL context belongs to one device's share group. OpenGL names are per share group, so memory
   objects are looked up and released only in the current context's share group, and shadow textures
   belong to their device. When a device deletes its OpenGL contexts, its kernels in flight are finished

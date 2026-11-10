@@ -370,6 +370,9 @@ static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, st
             break;
     }
 
+    if (!shadow->blit)
+        WARN("The shadow of level %u of texture %u (%s) is copied through a pixel buffer, "
+                "which waits for the GPU at every dispatch.\n", level, source, debug_d3dformat(format->id));
     TRACE("Creating a %ux%ux%u shadow (internal format %#x) of level %u of texture %u (%s).\n",
             width, height, depth, shadow->internal, level, source, debug_d3dformat(format->id));
 

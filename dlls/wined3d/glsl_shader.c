@@ -882,9 +882,13 @@ static void shader_glsl_init_uniform_block_bindings(const struct wined3d_gl_info
  * view as it is before the draw, stores do nothing, and atomic operations
  * and counters return what they read without changing it. The functions
  * below carry the names the instruction handlers emit; "writeonly" views take
- * a unit only when the driver finds their sampler used. */
+ * a unit only when the driver finds their sampler used. A view the stage has
+ * no unit left for is a structure instead of a sampler, and reads as zero: a
+ * sampler without a unit of its own would share unit 0 with a sampler of
+ * another type, which makes every draw with the program invalid. */
 static void shader_glsl_declare_image_emulation(struct wined3d_string_buffer *buffer,
-        const struct wined3d_shader_reg_maps *reg_maps, unsigned int idx, const char *prefix)
+        const struct wined3d_gl_info *gl_info, const struct wined3d_shader_reg_maps *reg_maps,
+        unsigned int idx, const char *prefix)
 {
     static const struct
     {
@@ -907,7 +911,9 @@ static void shader_glsl_declare_image_emulation(struct wined3d_string_buffer *bu
     };
     const struct wined3d_shader_resource_info *info = &reg_maps->uav_resource_info[idx];
     const char *type_prefix, *vec, *scalar;
+    char type_name[64], fetch[64], size[64];
     unsigned int i, j;
+    bool null_image;
 
     switch (info->data_type)
     {
@@ -926,32 +932,47 @@ static void shader_glsl_declare_image_emulation(struct wined3d_string_buffer *bu
         return;
     }
 
-    /* The functions of a sampler type are declared with the first view of that type. */
+    null_image = wined3d_gl_limits_get_uav_texture_unit(&gl_info->limits, reg_maps->shader_version.type,
+            reg_maps->sampler_map.count, idx) == ~0u;
+    if (null_image)
+    {
+        sprintf(type_name, "wined3d_null_%s%s", type_prefix, types[i].sampler);
+        sprintf(fetch, "%s(0)", vec);
+        sprintf(size, "%s(0)", types[i].size);
+    }
+    else
+    {
+        sprintf(type_name, "%s%s", type_prefix, types[i].sampler);
+        sprintf(fetch, "texelFetch(s, c%s)", types[i].lod);
+        sprintf(size, "textureSize(s%s)", types[i].lod);
+    }
+
+    /* The functions of a type are declared with the first view of that type. */
     for (j = 0; j < idx; ++j)
     {
         if (reg_maps->uav_resource_info[j].type == info->type
-                && reg_maps->uav_resource_info[j].data_type == info->data_type)
+                && reg_maps->uav_resource_info[j].data_type == info->data_type
+                && (wined3d_gl_limits_get_uav_texture_unit(&gl_info->limits, reg_maps->shader_version.type,
+                reg_maps->sampler_map.count, j) == ~0u) == null_image)
             break;
     }
     if (j == idx)
     {
-        shader_addline(buffer, "%s imageLoad(%s%s s, %s c) { return texelFetch(s, c%s); }\n",
-                vec, type_prefix, types[i].sampler, types[i].coord, types[i].lod);
-        shader_addline(buffer, "%s imageSize(%s%s s) { return textureSize(s%s); }\n",
-                types[i].size, type_prefix, types[i].sampler, types[i].lod);
-        shader_addline(buffer, "void imageStore(%s%s s, %s c, %s v) {}\n",
-                type_prefix, types[i].sampler, types[i].coord, vec);
+        if (null_image)
+            shader_addline(buffer, "struct %s { int unused; };\n", type_name);
+        shader_addline(buffer, "%s imageLoad(%s s, %s c) { return %s; }\n", vec, type_name, types[i].coord, fetch);
+        shader_addline(buffer, "%s imageSize(%s s) { return %s; }\n", types[i].size, type_name, size);
+        shader_addline(buffer, "void imageStore(%s s, %s c, %s v) {}\n", type_name, types[i].coord, vec);
         if (scalar)
         {
             for (j = 0; j < ARRAY_SIZE(atomics); ++j)
-                shader_addline(buffer, "%s %s(%s%s s, %s c, %s v) { return texelFetch(s, c%s).x; }\n",
-                        scalar, atomics[j], type_prefix, types[i].sampler, types[i].coord, scalar, types[i].lod);
-            shader_addline(buffer, "%s imageAtomicCompSwap(%s%s s, %s c, %s v, %s w) "
-                    "{ return texelFetch(s, c%s).x; }\n",
-                    scalar, type_prefix, types[i].sampler, types[i].coord, scalar, scalar, types[i].lod);
+                shader_addline(buffer, "%s %s(%s s, %s c, %s v) { return %s.x; }\n",
+                        scalar, atomics[j], type_name, types[i].coord, scalar, fetch);
+            shader_addline(buffer, "%s imageAtomicCompSwap(%s s, %s c, %s v, %s w) { return %s.x; }\n",
+                    scalar, type_name, types[i].coord, scalar, scalar, fetch);
         }
     }
-    shader_addline(buffer, "uniform %s%s %s_image%u;\n", type_prefix, types[i].sampler, prefix, idx);
+    shader_addline(buffer, "%s%s %s_image%u;\n", null_image ? "" : "uniform ", type_name, prefix, idx);
 
     if (reg_maps->uav_counter_mask & (1u << idx))
     {
@@ -2980,7 +3001,7 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
         /* WINESKIN: see shader_glsl_declare_image_emulation(). */
         if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
         {
-            shader_glsl_declare_image_emulation(buffer, reg_maps, i, prefix);
+            shader_glsl_declare_image_emulation(buffer, gl_info, reg_maps, i, prefix);
             continue;
         }
 
@@ -11087,6 +11108,21 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
             shader_glsl_load_program_resources(context_gl, priv, program_id, pshader);
             shader_glsl_load_aliased_samplers(context_gl, priv, program_id, state, pshader); /* WINESKIN */
             shader_glsl_load_images(gl_info, priv, program_id, &pshader->reg_maps);
+            /* WINESKIN: with its sampler uniforms set, a program whose
+             * samplers of different types share a unit fails validation,
+             * and every draw with it is an invalid operation. */
+            if (WARN_ON(d3d_shader))
+            {
+                GLint valid = GL_TRUE;
+
+                GL_EXTCALL(glValidateProgram(program_id));
+                GL_EXTCALL(glGetProgramiv(program_id, GL_VALIDATE_STATUS, &valid));
+                if (!valid)
+                {
+                    WARN("Program %u (pixel shader %p) fails validation:\n", program_id, pshader);
+                    print_glsl_info_log(gl_info, program_id, TRUE);
+                }
+            }
         }
         else
         {
