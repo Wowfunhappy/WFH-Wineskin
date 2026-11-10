@@ -1373,6 +1373,7 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
 
         if (context_gl->blit_vbo)
             GL_EXTCALL(glDeleteBuffers(1, &context_gl->blit_vbo));
+        wined3d_context_gl_so_emu_cleanup(context_gl); /* WINESKIN */
 
         for (i = 0; i < context_gl->free_pipeline_statistics_query_count; ++i)
         {
@@ -4736,6 +4737,7 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     struct wined3d_rendertarget_view *dsv, *rtv;
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
+    struct wined3d_so_emu_draw so_emu; /* WINESKIN */
     struct wined3d_context *context;
     bool rasterizer_discard = false;
     unsigned int i, idx_size = 0;
@@ -4847,7 +4849,10 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
             idx_size = 4;
     }
 
-    if (use_transform_feedback(state))
+    /* WINESKIN: see so_emu_gl.c. */
+    so_emu.active = false;
+    // if (use_transform_feedback(state))
+    if (use_transform_feedback(state) && !wined3d_context_gl_so_emu_begin(context_gl, state, parameters, &so_emu))
     {
         const struct wined3d_shader *shader = state->shader[WINED3D_SHADER_TYPE_GEOMETRY];
 
@@ -4909,6 +4914,10 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     {
         wined3d_context_gl_draw_indirect(context_gl, state, &parameters->u.indirect, idx_size);
     }
+    /* WINESKIN: a stream output draw that writes nothing. */
+    else if (so_emu.active && so_emu.skip)
+    {
+    }
     else
     {
         wined3d_context_gl_draw_primitive_arrays(context_gl, state, idx_data, idx_size,
@@ -4916,6 +4925,8 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
                 parameters->u.direct.index_count, parameters->u.direct.start_instance,
                 parameters->u.direct.instance_count);
     }
+    if (so_emu.active) /* WINESKIN */
+        wined3d_context_gl_so_emu_end(context_gl, state, &so_emu);
 
     if (wined3d_gl_frame_dump_active) /* WINESKIN: frame_dump_gl.c */
         wined3d_gl_frame_dump_draw_done(context_gl, state);

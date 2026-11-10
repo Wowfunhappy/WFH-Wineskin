@@ -399,10 +399,16 @@ or not: a game that skins meshes on the GPU and draws its full-screen passes wit
 that 77 times a frame. wined3d points disabled arrays at no buffer
 (`wined3d_context_gl_drop_stale_attrib_pointers`).
 
-`glEndTransformFeedback` and `glPauseTransformFeedback` wait until the GPU has finished everything it
-was given (`~/WineskinTests/perf/tools/xfbstall.c`), so a game that uses stream output once a frame runs
-its CPU and GPU work one after the other. Nothing avoids it within one context; in a second context of
-the share group the call returns at once.
+`glEndTransformFeedback` and `glPauseTransformFeedback` wait until the GPU has finished every command
+submitted before them, in any context of the share group (`~/WineskinTests/perf/tools/xfbstall.c`), so a game
+that uses stream output once a frame runs its CPU and GPU work one after the other. `dlls/wined3d/so_emu_gl.c`
+runs the common case without transform feedback: a draw of a list of points, lines or triangles whose vertex
+shader outputs go to one stream output buffer, with no geometry shader of the game's and no rasterization
+(Unity's GPU skinning). A geometry shader writes the bits of each captured component to a pixel of a
+4096-wide `R32UI` renderbuffer, in the order they take in the buffer, and `glReadPixels` copies the rows
+into the stream output buffer bound as the pixel pack buffer; both are queued, and nothing waits. Other
+stream output uses transform feedback. `HKCU\Software\Wine\Direct3D\StreamOutputEmulation` = `n` (or
+`WINE_D3D_CONFIG=StreamOutputEmulation=n`) turns it off.
 
 `HKCU\Software\Wine\Mac Driver\MultithreadedOpenGL` = `y` turns on the multithreaded OpenGL engine
 (`kCGLCEMPEngine`) for every context: the driver's work for each call runs on a thread of its own, and

@@ -708,6 +708,9 @@ struct wined3d_context_gl
     /* WINESKIN: locations whose disabled array still points into a buffer
      * (wined3d_context_gl_drop_stale_attrib_pointers()). */
     uint32_t stale_attrib_pointers;
+    /* WINESKIN: stream output without transform feedback (so_emu_gl.c). */
+    GLuint so_emu_fbo, so_emu_renderbuffer;
+    unsigned int so_emu_height, so_emu_written;
 
     GLenum tracking_parm; /* Which source is tracking current colour. */
     GLenum untracked_materials[2];
@@ -835,6 +838,27 @@ void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, 
         enum wined3d_texture_filter_type filter);
 void wined3d_context_gl_enable_clip_distances(struct wined3d_context_gl *context_gl, uint32_t mask);
 void wined3d_context_gl_end_transform_feedback(struct wined3d_context_gl *context_gl);
+/* WINESKIN: so_emu_gl.c. */
+struct wined3d_so_emu_draw
+{
+    bool active, skip;
+    struct wined3d_buffer *buffer;
+    unsigned int offset, total;
+    GLuint program;
+    uint32_t clip_distance_mask;
+};
+bool wined3d_context_gl_so_emu_begin(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        const struct wined3d_draw_parameters *parameters, struct wined3d_so_emu_draw *draw);
+void wined3d_context_gl_so_emu_end(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        const struct wined3d_so_emu_draw *draw);
+void wined3d_context_gl_so_emu_reset(struct wined3d_context_gl *context_gl);
+void wined3d_context_gl_so_emu_cleanup(struct wined3d_context_gl *context_gl);
+GLuint wined3d_so_emu_build_program(const struct wined3d_context_gl *context_gl, GLuint vs_id,
+        const struct wined3d_shader *vshader, const struct wined3d_shader *gshader,
+        enum wined3d_primitive_type primitive_type, unsigned int *components, GLint *scale_location);
+GLuint wined3d_glsl_so_emu_program(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        unsigned int *components, GLint *scale_location);
+GLuint wined3d_glsl_so_emu_restore_program(struct wined3d_context_gl *context_gl);
 void wined3d_context_gl_flush_bo_address(struct wined3d_context_gl *context_gl,
         const struct wined3d_const_bo_address *data, size_t size);
 void wined3d_context_gl_free_fence(struct wined3d_fence *fence);

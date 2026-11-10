@@ -499,6 +499,7 @@ struct wined3d_settings
     bool map_shadows; /* WINESKIN: client-side map shadows (map_shadow.c) */
     bool map_shadow_watch; /* WINESKIN: write-watched shadows for buffers above 64 KiB (map_shadow.c) */
     bool gl_state_filter; /* WINESKIN: redundant OpenGL state call filter (gl_filter.c) */
+    bool stream_output_emulation; /* WINESKIN: stream output without transform feedback (so_emu_gl.c) */
 };
 
 extern struct wined3d_settings wined3d_settings;

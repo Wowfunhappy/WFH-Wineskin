@@ -256,6 +256,11 @@ struct glsl_shader_prog_link
     /* WINESKIN: see shader_glsl_load_level_counts(). */
     GLint levels_location[WINED3D_SHADER_TYPE_COUNT];
     bool uses_levels;
+    /* WINESKIN: the program that streams out without transform feedback; see so_emu_gl.c. */
+    GLuint so_emu_id;
+    GLint so_emu_scale_location;
+    unsigned int so_emu_components;
+    unsigned int so_emu_state; /* 0 not built yet, 1 built, 2 not possible */
 };
 
 struct glsl_program_key
@@ -7541,6 +7546,8 @@ static void delete_glsl_program_entry(struct shader_glsl_priv *priv, const struc
     wine_rb_remove(&priv->program_lookup, &entry->program_lookup_entry);
 
     GL_EXTCALL(glDeleteProgram(entry->id));
+    if (entry->so_emu_id) /* WINESKIN */
+        GL_EXTCALL(glDeleteProgram(entry->so_emu_id));
     if (entry->vs.id)
         list_remove(&entry->vs.shader_entry);
     if (entry->hs.id)
@@ -11063,6 +11070,8 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
     entry->cs.id = 0;
     entry->constant_version = 0;
     entry->shader_controlled_clip_distances = 0;
+    entry->so_emu_id = 0; /* WINESKIN */
+    entry->so_emu_state = 0; /* WINESKIN */
     /* Add the hash table entry */
     add_glsl_program_entry(priv, entry);
 
@@ -11931,6 +11940,53 @@ static BOOL shader_glsl_allocate_context_data(struct wined3d_context *context)
     ctx_data->vertex_color_clamp = GL_FIXED_ONLY_ARB;
     context->shader_backend_data = ctx_data;
     return TRUE;
+}
+
+/* WINESKIN: the stream output program of the current program (so_emu_gl.c),
+ * built the first time it is asked for; 0 if it can't be. */
+GLuint wined3d_glsl_so_emu_program(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        unsigned int *components, GLint *scale_location)
+{
+    const struct wined3d_shader *vshader = state->shader[WINED3D_SHADER_TYPE_VERTEX];
+    struct glsl_context_data *ctx_data = context_gl->c.shader_backend_data;
+    struct shader_glsl_priv *priv = context_gl->c.device->shader_priv;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct glsl_shader_prog_link *entry;
+    GLuint id;
+
+    if (!(entry = ctx_data->glsl_program) || !vshader || !entry->vs.id)
+        return 0;
+    if (!entry->so_emu_state)
+    {
+        entry->so_emu_state = 2;
+        /* Uniforms of the draw's program other than buffers, samplers and
+         * immediate constants would have to be loaded here too. */
+        if (entry->hs.id || entry->ds.id || entry->vs.base_vertex_id_location != -1 || entry->uses_levels)
+            return 0;
+        if (!(id = wined3d_so_emu_build_program(context_gl, entry->vs.id, vshader,
+                state->shader[WINED3D_SHADER_TYPE_GEOMETRY], state->primitive_type,
+                &entry->so_emu_components, &entry->so_emu_scale_location)))
+            return 0;
+        GL_EXTCALL(glUseProgram(id));
+        shader_glsl_load_program_resources(context_gl, priv, id, vshader);
+        GL_EXTCALL(glUseProgram(entry->id));
+        checkGLcall("stream output program resources");
+        entry->so_emu_id = id;
+        entry->so_emu_state = 1;
+    }
+    if (entry->so_emu_state != 1)
+        return 0;
+    *components = entry->so_emu_components;
+    *scale_location = entry->so_emu_scale_location;
+    return entry->so_emu_id;
+}
+
+/* WINESKIN: the program wined3d has made current for the draw. */
+GLuint wined3d_glsl_so_emu_restore_program(struct wined3d_context_gl *context_gl)
+{
+    struct glsl_context_data *ctx_data = context_gl->c.shader_backend_data;
+
+    return ctx_data->glsl_program ? ctx_data->glsl_program->id : 0;
 }
 
 static void shader_glsl_free_context_data(struct wined3d_context *context)

@@ -14,7 +14,9 @@ VER_FILEDESCRIPTION_STR = "Wine D3D"
 # GPU copies between texture formats (texture_copy_gl.c) and views that are textures (view_copy_gl.c).
 # WINESKIN: BC6H and BC7 decoded on upload (bptc_decompress.c, bcdec.h); buffer views of formats that
 # are not buffer texture formats (buffer_convert_gl.c); a frame capture for debugging (frame_dump_gl.c).
+# WINESKIN: stream output without transform feedback (so_emu_gl.c).
 SOURCES = \
+	so_emu_gl.c \
 	frame_dump_gl.c \
 	bptc_decompress.c \
 	buffer_convert_gl.c \

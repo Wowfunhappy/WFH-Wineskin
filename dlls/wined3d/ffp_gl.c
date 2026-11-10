@@ -1346,6 +1346,7 @@ static void state_so(struct wined3d_context *context, const struct wined3d_state
     TRACE("context %p, state %p, state_id %#lx.\n", context, state, state_id);
 
     wined3d_context_gl_end_transform_feedback(context_gl);
+    wined3d_context_gl_so_emu_reset(context_gl); /* WINESKIN: so_emu_gl.c */
 
     for (i = 0; i < ARRAY_SIZE(state->stream_output); ++i)
     {

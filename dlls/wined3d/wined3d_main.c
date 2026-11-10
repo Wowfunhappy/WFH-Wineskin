@@ -138,6 +138,7 @@ struct wined3d_settings wined3d_settings =
     .map_shadows = TRUE, /* WINESKIN */
     .map_shadow_watch = TRUE, /* WINESKIN */
     .gl_state_filter = TRUE, /* WINESKIN */
+    .stream_output_emulation = TRUE, /* WINESKIN */
 };
 
 enum wined3d_renderer CDECL wined3d_get_renderer(void)
@@ -515,6 +516,14 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
             wined3d_settings.map_shadow_watch = wined3d_settings.map_shadows && strcmp(buffer, "small");
             ERR_(winediag)("Client-side map shadows %s.\n", !wined3d_settings.map_shadows ? "off"
                     : wined3d_settings.map_shadow_watch ? "on" : "on for small buffers");
+        }
+        /* WINESKIN: stream output without transform feedback (so_emu_gl.c), on unless "n", "0" or "disabled". */
+        if (!get_config_key(hkey, appkey, env, "StreamOutputEmulation", buffer, size)
+                && (!strcmp(buffer, "n") || !strcmp(buffer, "N") || !strcmp(buffer, "0")
+                || !strcmp(buffer, "disabled")))
+        {
+            ERR_(winediag)("Stream output uses transform feedback.\n");
+            wined3d_settings.stream_output_emulation = FALSE;
         }
         /* WINESKIN: redundant OpenGL state call filter (gl_filter.c), on unless "n", "0" or "disabled". */
         if (!get_config_key(hkey, appkey, env, "GLStateFilter", buffer, size)
