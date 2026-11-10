@@ -586,3 +586,99 @@ bool wined3d_context_gl_copy_texels(struct wined3d_context_gl *context_gl,
 
     return status == GL_FRAMEBUFFER_COMPLETE;
 }
+
+/* Whether a sampler object's GL_TEXTURE_SRGB_DECODE_EXT governs sampling, as
+ * EXT_texture_sRGB_decode says. Intel's OpenGL on 10.9 (HD Graphics 5000)
+ * decodes whatever the sampler object says (~/WineskinTests/probe-air);
+ * there the texture's own parameter has to say it. Draws a texel of 0x80 in
+ * an SRGB8_ALPHA8 texture, whose texture parameter decodes, through a sampler
+ * object that skips decoding, into an RGBA8 target: 0x80 when the sampler
+ * object governs, 0x37 when it doesn't. Runs on the adapter's capability
+ * context (fixup_extensions()). */
+bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info)
+{
+    static const char vs_source[] =
+        "#version 150\n"
+        "void main()\n"
+        "{\n"
+        "    gl_Position = vec4(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0, 0.0, 1.0);\n"
+        "}\n";
+    static const char fs_source[] =
+        "#version 150\n"
+        "uniform sampler2D t;\n"
+        "out vec4 colour;\n"
+        "void main()\n"
+        "{\n"
+        "    colour = texture(t, vec2(0.5));\n"
+        "}\n";
+    static const DWORD texel = 0x80808080;
+    GLuint textures[2], fbo, sampler, vao, program, vs, fs;
+    BYTE result[4] = {0};
+    GLint status = 0;
+    bool works;
+
+    if (!gl_info->supported[EXT_TEXTURE_SRGB_DECODE] || !gl_info->supported[ARB_SAMPLER_OBJECTS]
+            || gl_info->supported[WINED3D_GL_LEGACY_CONTEXT] || gl_info->glsl_version < MAKEDWORD_VERSION(1, 50)
+            || !gl_info->fbo_ops.glGenFramebuffers)
+        return true;
+
+    gl_info->gl_ops.gl.p_glGenTextures(2, textures);
+    gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, textures[0]);
+    gl_info->gl_ops.gl.p_glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &texel);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SRGB_DECODE_EXT, GL_DECODE_EXT);
+    gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, textures[1]);
+    gl_info->gl_ops.gl.p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    gl_info->fbo_ops.glGenFramebuffers(1, &fbo);
+    gl_info->fbo_ops.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    gl_info->fbo_ops.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[1], 0);
+    gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, textures[0]);
+
+    GL_EXTCALL(glGenSamplers(1, &sampler));
+    GL_EXTCALL(glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    GL_EXTCALL(glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    GL_EXTCALL(glSamplerParameteri(sampler, GL_TEXTURE_SRGB_DECODE_EXT, GL_SKIP_DECODE_EXT));
+    GL_EXTCALL(glBindSampler(0, sampler));
+    GL_EXTCALL(glGenVertexArrays(1, &vao));
+    GL_EXTCALL(glBindVertexArray(vao));
+
+    program = GL_EXTCALL(glCreateProgram());
+    if ((vs = copy_compile_shader(gl_info, GL_VERTEX_SHADER, vs_source)))
+        GL_EXTCALL(glAttachShader(program, vs));
+    if ((fs = copy_compile_shader(gl_info, GL_FRAGMENT_SHADER, fs_source)))
+        GL_EXTCALL(glAttachShader(program, fs));
+    GL_EXTCALL(glLinkProgram(program));
+    GL_EXTCALL(glGetProgramiv(program, GL_LINK_STATUS, &status));
+    if (vs && fs && status)
+    {
+        GLint location;
+
+        GL_EXTCALL(glUseProgram(program));
+        location = GL_EXTCALL(glGetUniformLocation(program, "t"));
+        GL_EXTCALL(glUniform1i(location, 0));
+        gl_info->gl_ops.gl.p_glViewport(0, 0, 1, 1);
+        gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
+        gl_info->gl_ops.gl.p_glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl_info->gl_ops.gl.p_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, result);
+        GL_EXTCALL(glUseProgram(0));
+    }
+    works = !(vs && fs && status) || result[0] >= 0x7f;
+    TRACE("Sampling 0x80 through a sampler object that skips sRGB decoding gives %#x.\n", result[0]);
+
+    GL_EXTCALL(glDeleteProgram(program));
+    if (vs)
+        GL_EXTCALL(glDeleteShader(vs));
+    if (fs)
+        GL_EXTCALL(glDeleteShader(fs));
+    GL_EXTCALL(glBindVertexArray(0));
+    GL_EXTCALL(glDeleteVertexArrays(1, &vao));
+    GL_EXTCALL(glBindSampler(0, 0));
+    GL_EXTCALL(glDeleteSamplers(1, &sampler));
+    gl_info->fbo_ops.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl_info->fbo_ops.glDeleteFramebuffers(1, &fbo);
+    gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, 0);
+    gl_info->gl_ops.gl.p_glDeleteTextures(2, textures);
+    while (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR);
+    return works;
+}

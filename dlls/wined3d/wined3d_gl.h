@@ -329,6 +329,8 @@ void wined3d_gl_limits_get_uniform_block_range(const struct wined3d_gl_limits *g
 #define WINED3D_QUIRK_LIMITED_TEX_FILTERING     0x00000100
 #define WINED3D_QUIRK_BROKEN_ARB_FOG            0x00000200
 #define WINED3D_QUIRK_NO_INDEPENDENT_BIT_DEPTHS 0x00000400
+/* WINESKIN: a sampler object's GL_TEXTURE_SRGB_DECODE_EXT is ignored (wined3d_gl_sampler_srgb_decode_works()). */
+#define WINED3D_QUIRK_SAMPLER_SRGB_DECODE_IGNORED 0x00000800
 
 typedef void (WINE_GLAPI *wined3d_generic_attrib_func)(GLuint idx, const void *data);
 
@@ -1000,6 +1002,7 @@ bool wined3d_context_gl_pool_bo(struct wined3d_context_gl *context_gl, const str
 void wined3d_device_gl_destroy_bo_pool(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
 /* WINESKIN: texture_copy_gl.c */
 void wined3d_device_gl_destroy_copy_state(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
+bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info);
 /* WINESKIN: buffer_convert_gl.c */
 struct wined3d_format_gl;
 bool wined3d_gl_buffer_view_format_convertible(const struct wined3d_gl_info *gl_info,

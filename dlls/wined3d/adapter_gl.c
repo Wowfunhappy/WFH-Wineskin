@@ -989,6 +989,19 @@ static void quirk_no_independent_bit_depths(struct wined3d_gl_info *gl_info)
     gl_info->quirks |= WINED3D_QUIRK_NO_INDEPENDENT_BIT_DEPTHS;
 }
 
+/* WINESKIN: see wined3d_gl_sampler_srgb_decode_works() in texture_copy_gl.c. */
+static BOOL match_sampler_srgb_decode_ignored(const struct wined3d_gl_info *gl_info,
+        struct wined3d_caps_gl_ctx *ctx, const char *gl_renderer, enum wined3d_gl_vendor gl_vendor,
+        enum wined3d_pci_vendor card_vendor, enum wined3d_pci_device device)
+{
+    return !wined3d_gl_sampler_srgb_decode_works(gl_info);
+}
+
+static void quirk_sampler_srgb_decode_ignored(struct wined3d_gl_info *gl_info)
+{
+    gl_info->quirks |= WINED3D_QUIRK_SAMPLER_SRGB_DECODE_IGNORED;
+}
+
 static const struct wined3d_gpu_description *query_gpu_description(const struct wined3d_gl_info *gl_info,
         UINT64 *vram_bytes)
 {
@@ -1115,6 +1128,12 @@ static void fixup_extensions(struct wined3d_gl_info *gl_info, struct wined3d_cap
             match_no_independent_bit_depths,
             quirk_no_independent_bit_depths,
             "No support for MRT with independent bit depths"
+        },
+        /* WINESKIN */
+        {
+            match_sampler_srgb_decode_ignored,
+            quirk_sampler_srgb_decode_ignored,
+            "Sampler objects' sRGB decode setting is ignored"
         },
     };
 

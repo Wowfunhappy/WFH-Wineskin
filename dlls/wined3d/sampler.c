@@ -429,4 +429,16 @@ void wined3d_sampler_gl_bind(struct wined3d_sampler_gl *sampler_gl, unsigned int
 
     if (texture_gl)
         texture_gl_apply_base_level(texture_gl, &sampler_gl->s.desc, gl_info);
+
+    /* WINESKIN: where a sampler object's sRGB decode setting is ignored, the
+     * texture's says it (Direct3D 9's D3DSAMP_SRGBTEXTURE). */
+    if (texture_gl && (gl_info->quirks & WINED3D_QUIRK_SAMPLER_SRGB_DECODE_IGNORED)
+            && (context_gl->c.d3d_info->wined3d_creation_flags & WINED3D_SRGB_READ_WRITE_CONTROL)
+            && !sampler_gl->s.desc.srgb_decode != !texture_gl->texture_rgb.sampler_desc.srgb_decode)
+    {
+        gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_SRGB_DECODE_EXT,
+                sampler_gl->s.desc.srgb_decode ? GL_DECODE_EXT : GL_SKIP_DECODE_EXT);
+        checkGLcall("set sRGB decode");
+        texture_gl->texture_rgb.sampler_desc.srgb_decode = sampler_gl->s.desc.srgb_decode;
+    }
 }
