@@ -556,6 +556,13 @@ The media session (`dlls/mf/session.c`) asks a transform's upstream node for one
 so decoded frames don't pile up ahead of the renderer; a 32-bit program playing 4K video, such as
 Tempest 4000's 3840x2160 intro, holds only the frames it is showing.
 
+DirectShow's default video window (quartz's VMR-7 and its default presenter) shows each frame by a
+blit to a DirectDraw primary surface clipped to the window, which wined3d draws into the window's
+OpenGL surface. When winemac attaches an OpenGL context to a view again after 10.9 dropped the view's
+surface (the window or view was hidden and shown), it moves the context to an off-screen view and back
+(`-[WineOpenGLContext wine_reattach]`): a context whose drawable was cleared and then set to the same
+view draws into a surface that doesn't follow the view, at the screen's top-left corner and scaled down.
+
 ## TLS
 
 Schannel (`secur32`), and with it WinHTTP, WinINet and every program that speaks TLS through Windows,

@@ -36,6 +36,7 @@
 
     + (NSView*) dummyView;
     - (void) wine_updateBackingSize:(const CGSize*)size;
+    - (void) wine_reattach; /* WINESKIN */
 
 @end
 
@@ -179,6 +180,19 @@
     {
         [self setView:[[self class] dummyView]];
         [self clearDrawable];
+    }
+
+    /* WINESKIN: on 10.9 a context that -clearDrawable detached from its view and that is then
+       attached to the same view again draws into a surface that doesn't follow the view: the
+       drawing shows scaled down at the screen's top-left corner, over the view's last frame.
+       Moving the context to the off-screen dummy view and back gives the view a working surface,
+       as -[WineOpenGLContext setView:] does when a context changes views. */
+    - (void) wine_reattach
+    {
+        NSView* view = [[self.view retain] autorelease];
+
+        [self setView:[[self class] dummyView]];
+        self.view = view;
     }
 
     - (void) removeFromViews:(BOOL)removeViews
@@ -327,9 +341,11 @@ void macdrv_update_opengl_context(WineOpenGLContext *context)
         {
             if (reattach)
             {
-                NSView* view = [[context.view retain] autorelease];
-                [context clearDrawableLeavingSurfaceOnScreen];
-                context.view = view;
+                /* WINESKIN: see -wine_reattach. */
+                // NSView* view = [[context.view retain] autorelease];
+                // [context clearDrawableLeavingSurfaceOnScreen];
+                // context.view = view;
+                [context wine_reattach];
             }
             /* WINESKIN: -[WineContentView viewWillDraw] updates its pending contexts on the main thread. */
             else if ([NSThread isMainThread])
