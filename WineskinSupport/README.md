@@ -133,8 +133,39 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
 - Shader model 4 and 5 graphics shaders translate; the GLSL they need and 10.9 lacks (integer `mix()`,
   `packHalf2x16()`, coarse/fine derivatives) is declared in each shader
   (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
-- Compute shaders run on OpenCL 1.2 (see below). Pixel shaders that use unordered access views, and
-  indirect draws, do nothing. BC6H/BC7 are unsupported formats.
+- Compute shaders run on OpenCL 1.2 (see below). Indirect draws do nothing. BC6H/BC7 are unsupported
+  formats.
+- Graphics shaders that use unordered access views translate without image load/store
+  (`shader_glsl_declare_image_emulation`): each view is a sampler on one of the stage's last texture
+  units, so loads and size queries read the view as it is before the draw. Stores do nothing, atomic
+  operations and counters return what they read without changing it, and `early_fragment_tests` is not
+  declared. The shader's color and depth output is drawn as usual.
+- There are no texture views (`ARB_texture_view`). A shader resource view is bound as its texture, with
+  the view's level range set as the texture's base and maximum level
+  (`wined3d_shader_resource_view_gl_apply_view`). Typeless textures and swap chain buffers of a format
+  with an sRGB variant are allocated with the sRGB internal format (`srgb_view_internal`): sRGB views
+  decode and encode (`EXT_texture_sRGB_decode`, `GL_FRAMEBUFFER_SRGB`), other views skip decoding
+  through a second sampler object and draw with `GL_FRAMEBUFFER_SRGB` off; the GLSL backend sets
+  `GL_FRAMEBUFFER_SRGB` from the render target view of each draw (`shader_glsl_apply_draw_state`).
+  A typeless format is allocated as the last of its float and normalised formats (`init_typeless_formats`):
+  R32 as R32F, R8 as R8 UNORM, R8G8 as RG8 UNORM, which is how games view them (Unity's ambient occlusion
+  and depth targets are typeless with float views). Views of some layers of an array, views that change
+  the texture's type (a cube view of an array, say), and integer views of such typeless textures read the
+  whole texture as it was allocated.
+- 10.9's driver keeps the converted colour of the previous `glClear` when the same colour is cleared again
+  with `GL_FRAMEBUFFER_SRGB` toggled, so clears of sRGB views convert the colour themselves and run with
+  it off (`ffp_blitter_clear_rendertargets`). Its `glBlitFramebuffer` never converts, so copies, resolves
+  and presents keep the texture's bits.
+- R11G11B10_FLOAT vertex elements can be declared; constant (stride 0) ones are decoded, arrays of them
+  read as (0, 0, 0, 1) (there is no `ARB_vertex_type_10f_11f_11f_rev`).
+- A fragment shader gets 16 texture units, and shader model 5 shaders can sample more (resource, sampler)
+  pairs than that. For such a shader, pairs bound to the same view and sampler for a draw, and pairs with
+  no view, share a unit: the shader is compiled per sharing pattern with the duplicates `#define`d to the
+  sampler they share (`wined3d_shader_get_sampler_aliases`). When more than 16 distinct pairs remain, the
+  last ones read an earlier sampler's texture, and a FIXME names them.
+- A buffer view of part of a buffer (no `ARB_texture_buffer_range`) attaches its buffer texture to a
+  buffer of its own, and copies the viewed range into it on the GPU each time the view is bound
+  (`wined3d_gl_view_load_buffer_range`).
 - Constant (stride 0) vertex attributes of any format of 8, 16 or 32-bit components are set from their
   element (`wined3d_context_gl_load_stride0_attrib`).
 - Vertex shaders whose input registers run past 10.9's 16 attributes have the inputs they read packed into
@@ -172,7 +203,15 @@ in place.
   the GPU (or copied through a pixel buffer) before a dispatch and back after one that writes it.
 - `dlls/wined3d/cl.c` (`wined3d.so`) builds the kernels, keeps an OpenCL memory object per OpenGL buffer
   and texture level until wined3d deletes the OpenGL object, acquires them, runs the NDRange and flushes;
-  the share group orders the OpenCL work with the OpenGL commands around it.
+  the device has `cl_khr_gl_event`, under which acquiring OpenGL objects waits for the OpenGL commands
+  of the context bound on the calling thread, and OpenGL commands issued after the release see the
+  kernel's results; both calls run on wined3d's command stream thread with its OpenGL context current.
+- An OpenCL context belongs to one device's share group. OpenGL names are per share group, so memory
+  objects are looked up and released only in the current context's share group, and shadow textures
+  belong to their device. When a device deletes its OpenGL contexts, its kernels in flight are finished
+  and its shadows, memory objects and OpenCL context are released first (`wined3d_cl_release_device`);
+  an OpenCL context must never outlive its share group, since a later share group can be allocated at
+  the same address.
 - Uncompressed, non-sRGB color formats report unordered access support.
 - OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
   view's first level only; cube textures are read one face at a time; subroutines (`call`) don't

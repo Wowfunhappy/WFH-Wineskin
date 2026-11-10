@@ -221,6 +221,44 @@ static CRITICAL_SECTION_DEBUG cl_shadows_cs_debug =
 };
 static CRITICAL_SECTION cl_shadows_cs = {&cl_shadows_cs_debug, -1, 0, 0, 0, 0};
 
+/* A device's kernels that clear unordered access views, by image kind. A
+ * kernel belongs to the OpenCL context of the device that built it. */
+struct cl_clear_kernels
+{
+    struct list entry;
+    struct wined3d_device *device;
+    uint64_t kernels[256];
+    bool failed[256];
+};
+
+static struct list cl_clear_kernel_list = LIST_INIT(cl_clear_kernel_list);
+
+static struct cl_clear_kernels *cl_get_clear_kernels(struct wined3d_device *device, bool create)
+{
+    struct cl_clear_kernels *entry;
+
+    EnterCriticalSection(&cl_shadows_cs);
+    LIST_FOR_EACH_ENTRY(entry, &cl_clear_kernel_list, struct cl_clear_kernels, entry)
+    {
+        if (entry->device == device)
+        {
+            LeaveCriticalSection(&cl_shadows_cs);
+            return entry;
+        }
+    }
+    if (create && (entry = calloc(1, sizeof(*entry))))
+    {
+        entry->device = device;
+        list_add_head(&cl_clear_kernel_list, &entry->entry);
+    }
+    else
+    {
+        entry = NULL;
+    }
+    LeaveCriticalSection(&cl_shadows_cs);
+    return entry;
+}
+
 static void cl_shadow_destroy(struct wined3d_context_gl *context_gl, struct cl_shadow *shadow)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
@@ -519,6 +557,8 @@ void wined3d_cl_forget_gl_object(bool texture, GLuint name)
 void wined3d_cl_release_device(struct wined3d_context_gl *context_gl)
 {
     struct cl_shadow *shadow, *next;
+    struct cl_clear_kernels *clear;
+    unsigned int i;
 
     if (!cl_used)
         return;
@@ -527,6 +567,13 @@ void wined3d_cl_release_device(struct wined3d_context_gl *context_gl)
     {
         if (shadow->device == context_gl->c.device)
             cl_shadow_destroy(context_gl, shadow);
+    }
+    if ((clear = cl_get_clear_kernels(context_gl->c.device, false)))
+    {
+        for (i = 0; i < ARRAY_SIZE(clear->kernels); ++i)
+            wined3d_cl_release_kernel(clear->kernels[i]);
+        list_remove(&clear->entry);
+        free(clear);
     }
     LeaveCriticalSection(&cl_shadows_cs);
     WINE_UNIX_CALL(unix_cl_release_context, NULL);
@@ -1070,8 +1117,7 @@ static uint32_t cl_round_normalised(uint32_t v, unsigned int bits, unsigned int 
 bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, const struct wined3d_uvec4 *clear_value,
         struct wined3d_context_gl *context_gl, bool fp)
 {
-    static uint64_t clear_kernels[256];
-    static bool clear_failed[256];
+    struct cl_clear_kernels *clear;
     struct wined3d_unordered_access_view *view = &view_gl->v;
     struct wined3d_resource *resource = view->resource;
     unsigned int group_size[3] = {64, 1, 1}, extent[3] = {1, 1, 1}, i;
@@ -1177,14 +1223,16 @@ bool wined3d_cl_clear_uav(struct wined3d_unordered_access_view_gl *view_gl, cons
     cl_arg_value(&args[1], info, sizeof(info));
     cl_arg_value(&args[2], value, sizeof(value));
 
-    if (!clear_kernels[kind] && !clear_failed[kind]
-            && !wined3d_glsl_build_cl_clear_kernel(kind, group_size, &clear_kernels[kind]))
-        clear_failed[kind] = true;
-    if (!clear_kernels[kind])
+    if (!(clear = cl_get_clear_kernels(context_gl->c.device, true)))
+        return false;
+    if (!clear->kernels[kind] && !clear->failed[kind]
+            && !wined3d_glsl_build_cl_clear_kernel(kind, group_size, &clear->kernels[kind]))
+        clear->failed[kind] = true;
+    if (!clear->kernels[kind])
         return false;
 
     memset(&params, 0, sizeof(params));
-    params.kernel = clear_kernels[kind];
+    params.kernel = clear->kernels[kind];
     params.args = (ULONG_PTR)args;
     params.arg_count = ARRAY_SIZE(args);
     for (i = 0; i < 3; ++i)

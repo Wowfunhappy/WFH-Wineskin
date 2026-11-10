@@ -4635,6 +4635,8 @@ static void wined3d_view_gl_destroy_object(void *object)
         {
             context_gl_resource_released(device, ctx->gl_view->name, FALSE);
             gl_info->gl_ops.gl.p_glDeleteTextures(1, &ctx->gl_view->name);
+            if (ctx->gl_view->range_bo) /* WINESKIN: see struct wined3d_gl_view */
+                GL_EXTCALL(glDeleteBuffers(1, &ctx->gl_view->range_bo));
         }
         if (counter_id)
             wined3d_context_gl_destroy_bo(wined3d_context_gl(context), ctx->counter_bo);
@@ -4799,6 +4801,8 @@ static void wined3d_sampler_gl_destroy_object(void *object)
         context = context_acquire(sampler_gl->s.device, NULL, 0);
         gl_info = wined3d_context_gl(context)->gl_info;
         GL_EXTCALL(glDeleteSamplers(1, &sampler_gl->name));
+        if (sampler_gl->skip_decode_name) /* WINESKIN */
+            GL_EXTCALL(glDeleteSamplers(1, &sampler_gl->skip_decode_name));
         context_release(context);
     }
 

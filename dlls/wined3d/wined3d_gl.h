@@ -574,7 +574,16 @@ struct wined3d_gl_view
 {
     GLenum target;
     GLuint name;
+
+    /* WINESKIN: without ARB_texture_buffer_range, the buffer texture of a
+     * view of part of a buffer is attached to "range_bo", which holds a copy
+     * of that part of "range_source" (wined3d_gl_view_load_buffer_range). */
+    GLuint range_bo, range_source;
+    unsigned int range_offset, range_size;
 };
+
+/* WINESKIN */
+void wined3d_gl_view_load_buffer_range(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl);
 
 struct wined3d_rendertarget_info
 {
@@ -955,6 +964,7 @@ struct gl_texture
 {
     struct wined3d_sampler_desc sampler_desc;
     GLuint name;
+    bool view_levels; /* WINESKIN: see wined3d_shader_resource_view_gl_apply_view() */
 };
 
 struct wined3d_renderbuffer_entry
@@ -1057,7 +1067,11 @@ struct wined3d_sampler_gl
     struct wined3d_sampler s;
 
     GLuint name;
+    GLuint skip_decode_name; /* WINESKIN: see wined3d_sampler_gl_get_skip_decode_name() */
 };
+
+GLuint wined3d_sampler_gl_get_skip_decode_name(struct wined3d_sampler_gl *sampler_gl,
+        const struct wined3d_gl_info *gl_info); /* WINESKIN */
 
 static inline struct wined3d_sampler_gl *wined3d_sampler_gl(struct wined3d_sampler *sampler)
 {
@@ -1179,6 +1193,13 @@ struct wined3d_format_gl
     GLint type;
 
     GLenum view_class;
+
+    /* WINESKIN: without ARB_texture_view, the sRGB internal format typeless
+     * and swapchain textures of a format with an sRGB variant are allocated
+     * with, so that their views read and write sRGB through
+     * EXT_texture_sRGB_decode and ARB_framebuffer_sRGB
+     * (wined3d_gl_get_internal_format); 0 for other formats. */
+    GLint srgb_view_internal;
 };
 
 static inline const struct wined3d_format_gl *wined3d_format_gl(const struct wined3d_format *format)
@@ -1189,6 +1210,10 @@ static inline const struct wined3d_format_gl *wined3d_format_gl(const struct win
 static inline GLuint wined3d_gl_get_internal_format(struct wined3d_resource *resource,
     const struct wined3d_format_gl *format_gl, bool srgb)
 {
+    /* WINESKIN: see wined3d_format_gl.srgb_view_internal. */
+    if (format_gl->srgb_view_internal && resource->type != WINED3D_RTYPE_BUFFER
+            && (wined3d_format_is_typeless(resource->format) || texture_from_resource(resource)->swapchain))
+        return format_gl->srgb_view_internal;
     if (srgb)
         return format_gl->srgb_internal;
     else if ((resource->bind_flags & WINED3D_BIND_RENDER_TARGET) && wined3d_resource_is_offscreen(resource))
@@ -1266,6 +1291,13 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
 void wined3d_cl_finish(void);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
 void wined3d_cl_release_device(struct wined3d_context_gl *context_gl);
+
+/* WINESKIN: unordered access views of graphics shaders as textures, without
+ * ARB_shader_image_load_store (shader_glsl_declare_image_emulation). */
+unsigned int wined3d_gl_limits_get_uav_texture_unit(const struct wined3d_gl_limits *gl_limits,
+        enum wined3d_shader_type shader_type, unsigned int sampler_count, unsigned int uav_idx);
+void wined3d_context_gl_bind_unordered_access_view_textures(struct wined3d_context_gl *context_gl,
+        const struct wined3d_shader *shader, struct wined3d_unordered_access_view * const *views);
 const struct wined3d_cl_kernel *wined3d_glsl_get_cl_kernel(struct wined3d_context_gl *context_gl,
         struct wined3d_shader *shader, const struct wined3d_cl_kernel_key *key);
 bool wined3d_glsl_build_cl_clear_kernel(uint8_t kind, const unsigned int *group_size, uint64_t *handle);

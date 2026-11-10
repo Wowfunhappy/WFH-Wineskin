@@ -3749,6 +3749,9 @@ static void wined3d_context_gl_bind_shader_resources(struct wined3d_context_gl *
     const struct wined3d_shader *shader;
     const unsigned int *tex_unit_map;
     struct wined3d_sampler *sampler;
+    uint8_t alias[WINED3D_MAX_SAMPLER_ALIASES]; /* WINESKIN */
+    unsigned int unit_count; /* WINESKIN */
+    bool aliased; /* WINESKIN */
 
     if (!(shader = state->shader[shader_type]))
     {
@@ -3787,15 +3790,28 @@ static void wined3d_context_gl_bind_shader_resources(struct wined3d_context_gl *
             &shader->reg_maps.shader_version, &base, &count);
 
     shader_sampler_count = shader->reg_maps.sampler_map.count;
-    if (shader_sampler_count > count)
+    /* WINESKIN: samplers that read the same thing share a unit
+     * (wined3d_shader_get_sampler_aliases). */
+    aliased = shader_type == WINED3D_SHADER_TYPE_PIXEL
+            && wined3d_shader_get_sampler_aliases(shader, state, count, alias);
+    // if (shader_sampler_count > count) (WINESKIN)
+    if (shader_sampler_count > count && !aliased)
         FIXME("Shader %p needs %u samplers, but only %u are supported.\n",
                 shader, shader_sampler_count, count);
-    count = min(shader_sampler_count, count);
+    // count = min(shader_sampler_count, count); (WINESKIN)
+    unit_count = count; /* WINESKIN */
+    count = aliased ? shader_sampler_count : min(shader_sampler_count, count); /* WINESKIN */
 
     for (i = 0; i < count; ++i)
     {
         entry = &shader->reg_maps.sampler_map.entries[i];
         bind_idx = base + entry->bind_idx;
+        if (aliased) /* WINESKIN: an entry that owns a unit takes the stage's next one. */
+        {
+            if (alias[i] != i || (bind_idx = wined3d_sampler_alias_unit(alias, i)) >= unit_count)
+                continue;
+            bind_idx += base;
+        }
         if (tex_unit_map)
             bind_idx = tex_unit_map[bind_idx];
 
@@ -3831,6 +3847,13 @@ static void wined3d_context_gl_bind_unordered_access_views(struct wined3d_contex
 
     if (!shader)
         return;
+
+    /* WINESKIN: OpenGL without images reads the views as textures. */
+    if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+    {
+        wined3d_context_gl_bind_unordered_access_view_textures(context_gl, shader, views);
+        return;
+    }
 
     for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
     {
@@ -4142,6 +4165,12 @@ static BOOL context_apply_draw_state(struct wined3d_context *context,
 
     if (context->update_shader_resource_bindings)
     {
+        /* WINESKIN: which samplers share a unit, and with it the pixel shader
+         * variant, follows the bindings (wined3d_shader_get_sampler_aliases). */
+        if (state->shader[WINED3D_SHADER_TYPE_PIXEL]
+                && state->shader[WINED3D_SHADER_TYPE_PIXEL]->reg_maps.sampler_map.count
+                > gl_info->limits.samplers[WINED3D_SHADER_TYPE_PIXEL])
+            context->shader_update_mask |= 1u << WINED3D_SHADER_TYPE_PIXEL;
         for (i = 0; i < WINED3D_SHADER_TYPE_GRAPHICS_COUNT; ++i)
             wined3d_context_gl_bind_shader_resources(context_gl, state, i);
         context->update_shader_resource_bindings = 0;
@@ -4149,6 +4178,10 @@ static BOOL context_apply_draw_state(struct wined3d_context *context,
             context->update_compute_shader_resource_bindings = 1;
     }
 
+    /* WINESKIN: without images the views are textures on units that follow
+     * the shader's samplers; they are bound for each draw that uses them. */
+    if (context->uses_uavs && !gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+        context->update_unordered_access_view_bindings = 1;
     if (context->update_unordered_access_view_bindings)
     {
         wined3d_context_gl_bind_unordered_access_views(context_gl,
@@ -4842,7 +4875,8 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
                 parameters->u.direct.instance_count);
     }
 
-    if (context->uses_uavs)
+    /* WINESKIN: OpenGL without images has no barriers, and such draws write no views. */
+    if (context->uses_uavs && gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
     {
         GL_EXTCALL(glMemoryBarrier(GL_ALL_BARRIER_BITS));
         checkGLcall("glMemoryBarrier");
@@ -5016,6 +5050,20 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
 
         format_gl = wined3d_format_gl(element->format);
         stream = &state->streams[element->stream_idx];
+
+        /* WINESKIN: a format without an OpenGL vertex type (init_format_vertex_info). */
+        if (!format_gl->vtx_type && element->stride)
+        {
+            static unsigned int once;
+
+            if (!once++)
+                FIXME("Vertex arrays of format %s read as (0, 0, 0, 1).\n", debug_d3dformat(format_gl->f.id));
+            if (context->numbered_array_mask & (1u << i))
+                wined3d_context_gl_unload_numbered_array(context_gl, i);
+            GL_EXTCALL(glVertexAttrib4f(i, 0.0f, 0.0f, 0.0f, 1.0f));
+            context_gl->default_attrib_value_set &= ~(1u << i);
+            continue;
+        }
 
         if (gl_info->supported[ARB_INSTANCED_ARRAYS])
         {

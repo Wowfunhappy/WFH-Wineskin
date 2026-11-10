@@ -3100,6 +3100,12 @@ static BOOL init_format_texture_info(struct wined3d_adapter *adapter, struct win
         if (format->srgb_internal != format->internal
                 && !(adapter->d3d_info.wined3d_creation_flags & WINED3D_SRGB_READ_WRITE_CONTROL))
         {
+            /* WINESKIN: see wined3d_format_gl.srgb_view_internal. GL_SRGB8
+             * need not be color-renderable. */
+            if (!gl_info->supported[ARB_TEXTURE_VIEW] && gl_info->supported[EXT_TEXTURE_SRGB]
+                    && gl_info->supported[EXT_TEXTURE_SRGB_DECODE] && gl_info->supported[ARB_FRAMEBUFFER_SRGB]
+                    && format->srgb_internal != GL_SRGB8_EXT)
+                format->srgb_view_internal = format->srgb_internal;
             format->srgb_internal = format->internal;
             format_clear_caps(&format->f, WINED3D_FORMAT_CAP_SRGB_READ | WINED3D_FORMAT_CAP_SRGB_WRITE);
         }
@@ -3630,6 +3636,18 @@ static BOOL init_format_vertex_info(const struct wined3d_adapter *adapter,
         if (!(format = get_format_gl_internal(adapter, format_vertex_info[i].id)))
             return FALSE;
 
+        /* WINESKIN: a vertex format every Direct3D 10 device has may be
+         * declared without the OpenGL vertex type for it (R11G11B10_FLOAT on
+         * macOS): constant (stride 0) elements are decoded, and arrays of it
+         * read as (0, 0, 0, 1) (wined3d_context_gl_load_numbered_arrays). */
+        if (!gl_info->supported[format_vertex_info[i].extension]
+                && format_vertex_info[i].extension == ARB_VERTEX_TYPE_10F_11F_11F_REV)
+        {
+            format->f.emit_idx = format_vertex_info[i].emit_idx;
+            format->f.caps[WINED3D_GL_RES_TYPE_BUFFER] |= WINED3D_FORMAT_CAP_VERTEX_ATTRIBUTE;
+            continue;
+        }
+
         if (!gl_info->supported[format_vertex_info[i].extension])
             continue;
 
@@ -3648,7 +3666,14 @@ static BOOL init_format_vertex_info(const struct wined3d_adapter *adapter,
     return TRUE;
 }
 
-static BOOL init_typeless_formats(const struct wined3d_adapter *adapter)
+/* WINESKIN: "prefer_non_integer": a typeless format takes the last of its
+ * float and unsigned normalised formats rather than the last of all its
+ * formats, and is not an integer format then. Without texture views, a
+ * typeless texture is what its views read and draw to, and games mostly view
+ * R32, R8 and R8G8 typeless textures as float or UNORM; a float sampler reads
+ * nothing from an integer texture. */
+static BOOL init_typeless_formats(const struct wined3d_adapter *adapter, bool prefer_non_integer)
+// static BOOL init_typeless_formats(const struct wined3d_adapter *adapter)
 {
     unsigned int caps[WINED3D_GL_RES_TYPE_COUNT];
     unsigned int attrs, i, j;
@@ -3663,6 +3688,25 @@ static BOOL init_typeless_formats(const struct wined3d_adapter *adapter)
             return FALSE;
 
         attrs = typeless_format->attrs;
+        memcpy(caps, typeless_format->caps, sizeof(caps));
+        copy_format(adapter, typeless_format, format);
+        typeless_format->attrs |= attrs;
+        for (j = 0; j < ARRAY_SIZE(typeless_format->caps); ++j)
+            typeless_format->caps[j] |= caps[j];
+    }
+
+    /* WINESKIN: see above. */
+    for (i = 0; prefer_non_integer && i < ARRAY_SIZE(typed_formats); ++i)
+    {
+        struct wined3d_format *format, *typeless_format;
+
+        format = get_format_internal(adapter, typed_formats[i].id);
+        typeless_format = get_format_internal(adapter, typed_formats[i].typeless_id);
+        if ((format->attrs & WINED3D_FORMAT_ATTR_INTEGER) || ((format->attrs & WINED3D_FORMAT_ATTR_NORMALISED)
+                && !(format->attrs & WINED3D_FORMAT_ATTR_UNSIGNED)))
+            continue;
+
+        attrs = typeless_format->attrs & ~WINED3D_FORMAT_ATTR_INTEGER;
         memcpy(caps, typeless_format->caps, sizeof(caps));
         copy_format(adapter, typeless_format, format);
         typeless_format->attrs |= attrs;
@@ -4078,7 +4122,9 @@ BOOL wined3d_adapter_gl_init_format_info(struct wined3d_adapter *adapter, struct
     init_format_gen_mipmap_info(adapter, gl_info);
     init_format_depth_bias_scale(adapter, ctx);
 
-    if (!init_typeless_formats(adapter)) goto fail;
+    /* WINESKIN: see init_typeless_formats(). */
+    if (!init_typeless_formats(adapter, !gl_info->supported[ARB_TEXTURE_VIEW])) goto fail;
+    // if (!init_typeless_formats(adapter)) goto fail;
 
     return TRUE;
 
@@ -4345,7 +4391,8 @@ BOOL wined3d_adapter_vk_init_format_info(struct wined3d_adapter_vk *adapter_vk,
             init_vulkan_format_info(adapter, format, vk_info, vk_physical_device);
     }
 
-    if (!init_typeless_formats(adapter)) goto fail;
+    if (!init_typeless_formats(adapter, false)) goto fail; /* WINESKIN: see init_typeless_formats() */
+    // if (!init_typeless_formats(adapter)) goto fail;
 
     return TRUE;
 

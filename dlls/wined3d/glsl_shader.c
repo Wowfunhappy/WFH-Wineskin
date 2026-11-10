@@ -282,6 +282,8 @@ struct glsl_context_data
     struct glsl_shader_prog_link *glsl_program;
     GLenum vertex_color_clamp;
     BOOL rasterization_disabled;
+    /* WINESKIN: whether the last draw wrote sRGB; see shader_glsl_apply_draw_state(). */
+    BOOL srgb_write;
 };
 
 struct glsl_ps_compiled_shader
@@ -874,6 +876,94 @@ static void shader_glsl_init_uniform_block_bindings(const struct wined3d_gl_info
     string_buffer_release(&priv->string_buffers, name);
 }
 
+/* WINESKIN: without ARB_shader_image_load_store (macOS), a graphics shader's
+ * unordered access views are samplers on the stage's last texture units
+ * (wined3d_gl_limits_get_uav_texture_unit): loads and size queries read the
+ * view as it is before the draw, stores do nothing, and atomic operations
+ * and counters return what they read without changing it. The functions
+ * below carry the names the instruction handlers emit; "writeonly" views take
+ * a unit only when the driver finds their sampler used. */
+static void shader_glsl_declare_image_emulation(struct wined3d_string_buffer *buffer,
+        const struct wined3d_shader_reg_maps *reg_maps, unsigned int idx, const char *prefix)
+{
+    static const struct
+    {
+        enum wined3d_shader_resource_type type;
+        const char *sampler, *coord, *size, *lod;
+    }
+    types[] =
+    {
+        {WINED3D_SHADER_RESOURCE_BUFFER,          "samplerBuffer",  "int",   "int",   ""},
+        {WINED3D_SHADER_RESOURCE_TEXTURE_1D,      "sampler1D",      "int",   "int",   ", 0"},
+        {WINED3D_SHADER_RESOURCE_TEXTURE_2D,      "sampler2D",      "ivec2", "ivec2", ", 0"},
+        {WINED3D_SHADER_RESOURCE_TEXTURE_3D,      "sampler3D",      "ivec3", "ivec3", ", 0"},
+        {WINED3D_SHADER_RESOURCE_TEXTURE_1DARRAY, "sampler1DArray", "ivec2", "ivec2", ", 0"},
+        {WINED3D_SHADER_RESOURCE_TEXTURE_2DARRAY, "sampler2DArray", "ivec3", "ivec3", ", 0"},
+    };
+    static const char * const atomics[] =
+    {
+        "imageAtomicAnd", "imageAtomicOr", "imageAtomicXor", "imageAtomicAdd",
+        "imageAtomicMin", "imageAtomicMax", "imageAtomicExchange",
+    };
+    const struct wined3d_shader_resource_info *info = &reg_maps->uav_resource_info[idx];
+    const char *type_prefix, *vec, *scalar;
+    unsigned int i, j;
+
+    switch (info->data_type)
+    {
+        case WINED3D_DATA_INT: type_prefix = "i"; vec = "ivec4"; scalar = "int"; break;
+        case WINED3D_DATA_UINT: type_prefix = "u"; vec = "uvec4"; scalar = "uint"; break;
+        default: type_prefix = ""; vec = "vec4"; scalar = NULL; break;
+    }
+    for (i = 0; i < ARRAY_SIZE(types); ++i)
+    {
+        if (types[i].type == info->type)
+            break;
+    }
+    if (i == ARRAY_SIZE(types))
+    {
+        FIXME("Unhandled resource type %#x.\n", info->type);
+        return;
+    }
+
+    /* The functions of a sampler type are declared with the first view of that type. */
+    for (j = 0; j < idx; ++j)
+    {
+        if (reg_maps->uav_resource_info[j].type == info->type
+                && reg_maps->uav_resource_info[j].data_type == info->data_type)
+            break;
+    }
+    if (j == idx)
+    {
+        shader_addline(buffer, "%s imageLoad(%s%s s, %s c) { return texelFetch(s, c%s); }\n",
+                vec, type_prefix, types[i].sampler, types[i].coord, types[i].lod);
+        shader_addline(buffer, "%s imageSize(%s%s s) { return textureSize(s%s); }\n",
+                types[i].size, type_prefix, types[i].sampler, types[i].lod);
+        shader_addline(buffer, "void imageStore(%s%s s, %s c, %s v) {}\n",
+                type_prefix, types[i].sampler, types[i].coord, vec);
+        if (scalar)
+        {
+            for (j = 0; j < ARRAY_SIZE(atomics); ++j)
+                shader_addline(buffer, "%s %s(%s%s s, %s c, %s v) { return texelFetch(s, c%s).x; }\n",
+                        scalar, atomics[j], type_prefix, types[i].sampler, types[i].coord, scalar, types[i].lod);
+            shader_addline(buffer, "%s imageAtomicCompSwap(%s%s s, %s c, %s v, %s w) "
+                    "{ return texelFetch(s, c%s).x; }\n",
+                    scalar, type_prefix, types[i].sampler, types[i].coord, scalar, scalar, types[i].lod);
+        }
+    }
+    shader_addline(buffer, "uniform %s%s %s_image%u;\n", type_prefix, types[i].sampler, prefix, idx);
+
+    if (reg_maps->uav_counter_mask & (1u << idx))
+    {
+        if (!(reg_maps->uav_counter_mask & ((1u << idx) - 1)))
+        {
+            shader_addline(buffer, "uint atomicCounterIncrement(uint c) { return c; }\n");
+            shader_addline(buffer, "uint atomicCounterDecrement(uint c) { return c; }\n");
+        }
+        shader_addline(buffer, "const uint %s_counter%u = 0u;\n", prefix, idx);
+    }
+}
+
 /* Context activation is done by the caller. */
 static void shader_glsl_load_samplers_range(const struct wined3d_gl_info *gl_info,
         struct shader_glsl_priv *priv, GLuint program_id, const char *prefix,
@@ -950,6 +1040,53 @@ static void shader_glsl_load_samplers(const struct wined3d_context *context,
     shader_glsl_load_samplers_range(gl_info, priv, program_id, prefix, base, count, tex_unit_map);
 }
 
+/* WINESKIN: see wined3d_shader_get_sampler_aliases(). */
+static void shader_glsl_find_ps_sampler_aliases(const struct wined3d_context_gl *context_gl,
+        const struct wined3d_state *state, const struct wined3d_shader *shader, struct ps_compile_args *args)
+{
+    uint8_t alias[WINED3D_MAX_SAMPLER_ALIASES];
+    unsigned int i;
+
+    if (!wined3d_shader_get_sampler_aliases(shader, state,
+            context_gl->gl_info->limits.samplers[WINED3D_SHADER_TYPE_PIXEL], alias))
+        return;
+    for (i = 0; i < shader->reg_maps.sampler_map.count; ++i)
+        args->sampler_alias[i] = alias[i] + 1;
+}
+
+/* WINESKIN: the samplers of a pixel shader with aliased samplers take the
+ * stage's texture units in order (wined3d_sampler_alias_unit); the program
+ * is the one selected for "state". Context activation is done by the caller. */
+static void shader_glsl_load_aliased_samplers(const struct wined3d_context_gl *context_gl,
+        struct shader_glsl_priv *priv, GLuint program_id, const struct wined3d_state *state,
+        const struct wined3d_shader *shader)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    uint8_t alias[WINED3D_MAX_SAMPLER_ALIASES];
+    struct wined3d_string_buffer *name;
+    unsigned int base, count, i, unit;
+    GLint location;
+
+    if (!wined3d_shader_get_sampler_aliases(shader, state,
+            gl_info->limits.samplers[WINED3D_SHADER_TYPE_PIXEL], alias))
+        return;
+
+    wined3d_gl_limits_get_texture_unit_range(&gl_info->limits, WINED3D_SHADER_TYPE_PIXEL, &base, &count);
+    name = string_buffer_get(&priv->string_buffers);
+    for (i = 0; i < shader->reg_maps.sampler_map.count; ++i)
+    {
+        if (alias[i] != i || (unit = wined3d_sampler_alias_unit(alias, i)) >= count)
+            continue;
+        string_buffer_sprintf(name, "ps_sampler%u", shader->reg_maps.sampler_map.entries[i].bind_idx);
+        if ((location = GL_EXTCALL(glGetUniformLocation(program_id, name->buffer))) == -1)
+            continue;
+        TRACE("Loading sampler %s on unit %u.\n", name->buffer, base + unit);
+        GL_EXTCALL(glUniform1i(location, base + unit));
+    }
+    checkGLcall("Load aliased sampler bindings");
+    string_buffer_release(&priv->string_buffers, name);
+}
+
 static void shader_glsl_load_icb(const struct wined3d_gl_info *gl_info, struct shader_glsl_priv *priv,
         GLuint program_id, const struct wined3d_shader_reg_maps *reg_maps)
 {
@@ -992,6 +1129,17 @@ static void shader_glsl_load_images(const struct wined3d_gl_info *gl_info, struc
         location = GL_EXTCALL(glGetUniformLocation(program_id, name->buffer));
         if (location == -1)
             continue;
+
+        /* WINESKIN: see shader_glsl_declare_image_emulation(). */
+        if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+        {
+            unsigned int unit = wined3d_gl_limits_get_uav_texture_unit(&gl_info->limits,
+                    reg_maps->shader_version.type, reg_maps->sampler_map.count, i);
+
+            if (unit != ~0u)
+                GL_EXTCALL(glUniform1i(location, unit));
+            continue;
+        }
 
         TRACE("Loading image %s on unit %u.\n", name->buffer, i);
         GL_EXTCALL(glUniform1i(location, i));
@@ -2652,6 +2800,16 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
             continue;
         }
 
+        /* WINESKIN: a sampler that shares another's texture unit is that
+         * sampler (wined3d_shader_get_sampler_aliases). */
+        if (version->type == WINED3D_SHADER_TYPE_PIXEL && i < WINED3D_MAX_SAMPLER_ALIASES
+                && ps_args->sampler_alias[i] && ps_args->sampler_alias[i] - 1u != i)
+        {
+            shader_addline(buffer, "#define %s_sampler%u %s_sampler%u\n", prefix, entry->bind_idx, prefix,
+                    reg_maps->sampler_map.entries[ps_args->sampler_alias[i] - 1u].bind_idx);
+            continue;
+        }
+
         switch (reg_maps->resource_info[entry->resource_idx].data_type)
         {
             case WINED3D_DATA_FLOAT:
@@ -2817,6 +2975,13 @@ static void shader_generate_glsl_declarations(const struct wined3d_context_gl *c
                 image_type = "unsupported_image";
                 FIXME("Unhandled resource type %#x.\n", reg_maps->uav_resource_info[i].type);
                 break;
+        }
+
+        /* WINESKIN: see shader_glsl_declare_image_emulation(). */
+        if (!gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
+        {
+            shader_glsl_declare_image_emulation(buffer, reg_maps, i, prefix);
+            continue;
         }
 
         if (shader_glsl_use_layout_binding_qualifier(gl_info))
@@ -8161,7 +8326,9 @@ static GLuint shader_glsl_generate_fragment_shader(const struct wined3d_context_
     if (shader->limits->constant_float + extra_constants_needed >= gl_info->limits.glsl_ps_float_constants)
         FIXME("Insufficient uniforms to run this shader.\n");
 
-    if (shader->u.ps.force_early_depth_stencil)
+    /* WINESKIN: the qualifier comes with image load/store, as do the
+     * unordered access view writes it orders the tests before. */
+    if (shader->u.ps.force_early_depth_stencil && gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])
         shader_addline(buffer, "layout(early_fragment_tests) in;\n");
 
     shader_addline(buffer, "void main()\n{\n");
@@ -10616,6 +10783,7 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
         pshader = state->shader[WINED3D_SHADER_TYPE_PIXEL];
         find_ps_compile_args(state, pshader, context_gl->c.stream_info.position_transformed,
                 &ps_compile_args, &context_gl->c);
+        shader_glsl_find_ps_sampler_aliases(context_gl, state, pshader, &ps_compile_args); /* WINESKIN */
         ps_id = find_glsl_fragment_shader(context_gl, priv, pshader, &ps_compile_args);
         ps_list = &pshader->linked_programs;
     }
@@ -10917,6 +11085,7 @@ static void set_glsl_shader_program(const struct wined3d_context_gl *context_gl,
                 entry->constant_update_mask |= WINED3D_SHADER_CONST_PS_B;
 
             shader_glsl_load_program_resources(context_gl, priv, program_id, pshader);
+            shader_glsl_load_aliased_samplers(context_gl, priv, program_id, state, pshader); /* WINESKIN */
             shader_glsl_load_images(gl_info, priv, program_id, &pshader->reg_maps);
         }
         else
@@ -11031,9 +11200,26 @@ static void shader_glsl_apply_draw_state(void *shader_priv, struct wined3d_conte
 
     shader_glsl_update_legacy_states(context_gl, state);
 
+    /* WINESKIN: sRGB writes follow the render target view as well as the
+     * pixel shader: without ARB_texture_view, sRGB and other views of a
+     * texture draw to the same sRGB attachment (srgb_view_internal). Code
+     * that sets GL_FRAMEBUFFER_SRGB for itself invalidates the pixel shader.
     if (context_gl->gl_info->supported[ARB_FRAMEBUFFER_SRGB]
             && (context_gl->c.shader_update_mask & (1u << WINED3D_SHADER_TYPE_PIXEL)))
         state_srgbwrite(&context_gl->c, state, STATE_RENDER(WINED3D_RS_SRGBWRITEENABLE));
+    (WINESKIN) */
+    if (context_gl->gl_info->supported[ARB_FRAMEBUFFER_SRGB])
+    {
+        struct glsl_context_data *ctx_data = context->shader_backend_data;
+        BOOL srgb_write = needs_srgb_write(context->d3d_info, state, &state->fb);
+
+        if ((context_gl->c.shader_update_mask & (1u << WINED3D_SHADER_TYPE_PIXEL))
+                || srgb_write != ctx_data->srgb_write)
+        {
+            state_srgbwrite(&context_gl->c, state, STATE_RENDER(WINED3D_RS_SRGBWRITEENABLE));
+            ctx_data->srgb_write = srgb_write;
+        }
+    }
 
     if (context->shader_update_mask & ~(1u << WINED3D_SHADER_TYPE_COMPUTE))
         shader_glsl_update_graphics_program(priv, context_gl, state);

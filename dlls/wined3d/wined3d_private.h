@@ -1477,6 +1477,9 @@ enum wined3d_shader_tex_types
     WINED3D_SHADER_TEX_ERR  = 3,
 };
 
+/* WINESKIN: see wined3d_shader_get_sampler_aliases(). */
+#define WINED3D_MAX_SAMPLER_ALIASES 32
+
 struct ps_compile_args
 {
     struct color_fixup_desc     color_fixup[WINED3D_MAX_FRAGMENT_SAMPLERS];
@@ -1493,6 +1496,10 @@ struct ps_compile_args
     DWORD dual_source_blend : 1;
     DWORD projected : 4;
     DWORD padding : 13;
+    /* WINESKIN: for a shader with more samplers than the stage has texture
+     * units, 1 + the sampler map entry each entry shares a unit with (itself
+     * when it has its own); zeroes otherwise. */
+    uint8_t sampler_alias[WINED3D_MAX_SAMPLER_ALIASES];
 };
 
 enum fog_src_type
@@ -4389,6 +4396,10 @@ enum wined3d_shader_resource_type pixelshader_get_resource_type(const struct win
 void find_ps_compile_args(const struct wined3d_state *state, const struct wined3d_shader *shader,
         BOOL position_transformed, struct ps_compile_args *args,
         const struct wined3d_context *context);
+/* WINESKIN */
+bool wined3d_shader_get_sampler_aliases(const struct wined3d_shader *shader, const struct wined3d_state *state,
+        unsigned int unit_count, uint8_t *alias);
+unsigned int wined3d_sampler_alias_unit(const uint8_t *alias, unsigned int idx);
 
 bool vshader_get_input(const struct wined3d_shader *shader,
         uint8_t usage_req, uint8_t usage_idx_req, unsigned int *regnum);

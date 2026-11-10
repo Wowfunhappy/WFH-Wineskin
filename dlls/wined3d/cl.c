@@ -82,6 +82,11 @@ struct cl_device_context
     struct cl_sampler_entry *samplers;
     struct cl_null_image *null_images;
     BOOL pending;
+    /* cl_khr_gl_event: acquiring OpenGL objects waits for the commands of the
+     * OpenGL context bound on the calling thread, and that context's commands
+     * after the release see the kernel's results. Without it each dispatch
+     * finishes OpenGL first and OpenCL afterwards. */
+    BOOL implicit_sync;
     LONG refcount; /* the list's, and each kernel's */
     BOOL released; /* out of the list: its share group is going away */
 };
@@ -161,6 +166,17 @@ static struct cl_device_context *get_device_context(void)
 
         ctx->null_buffer = clCreateBuffer(ctx->context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 sizeof(zero), (void *)zero, &err);
+    }
+
+    {
+        char extensions[4096];
+
+        if (clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, NULL))
+            extensions[0] = 0;
+        extensions[sizeof(extensions) - 1] = 0;
+        ctx->implicit_sync = !!strstr(extensions, "cl_khr_gl_event");
+        if (!ctx->implicit_sync)
+            WARN("No cl_khr_gl_event; dispatches wait for OpenGL and OpenCL.\n");
     }
 
     ctx->share_group = share_group;
@@ -588,8 +604,11 @@ static NTSTATUS cl_dispatch(void *args)
     }
 
     /* OpenGL's commands must reach the device before OpenCL's that use the
-     * same objects (cl_APPLE_gl_sharing). */
-    glFlush();
+     * same objects (cl_APPLE_gl_sharing); see implicit_sync. */
+    if (ctx->implicit_sync)
+        glFlush();
+    else
+        glFinish();
     if (acquire_count && (err = clEnqueueAcquireGLObjects(ctx->queue, acquire_count, acquire, 0, NULL, NULL)))
         ERR("Failed to acquire OpenGL objects, error %d.\n", err);
     if ((err = clEnqueueNDRangeKernel(ctx->queue, kernel->kernel, 3, NULL, global, local, 0, NULL, NULL)))
@@ -602,7 +621,7 @@ static NTSTATUS cl_dispatch(void *args)
     if (acquire_count && (err = clEnqueueReleaseGLObjects(ctx->queue, acquire_count, acquire, 0, NULL, NULL)))
         ERR("Failed to release OpenGL objects, error %d.\n", err);
 
-    if (params->sync)
+    if (params->sync || !ctx->implicit_sync)
     {
         clFinish(ctx->queue);
         ctx->pending = FALSE;

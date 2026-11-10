@@ -2892,6 +2892,116 @@ void find_gs_compile_args(const struct wined3d_state *state, const struct wined3
     init_interpolation_compile_args(args->interpolation_mode, pixel_shader, context->d3d_info);
 }
 
+/* WINESKIN: a shader model 4+ shader may sample more (resource, sampler)
+ * pairs than a stage has texture units (16 on macOS). Pairs that are bound to
+ * the same view and sampler, or that have no view, read the same thing, so
+ * they can share a unit; which do depends on the state of each draw.
+ *
+ * For such a shader, alias[i] receives the sampler map entry that entry i
+ * shares its unit with (i itself for the first of its kind), and the function
+ * returns true. Entries that own a unit take the stage's units in order
+ * (wined3d_sampler_alias_unit()). When more than "unit_count" entries are
+ * left, the last of them share the unit of an earlier entry of their sampler
+ * type and read that entry's texture. */
+bool wined3d_shader_get_sampler_aliases(const struct wined3d_shader *shader, const struct wined3d_state *state,
+        unsigned int unit_count, uint8_t *alias)
+{
+    enum wined3d_shader_type type = shader->reg_maps.shader_version.type;
+    const struct wined3d_shader_reg_maps *reg_maps = &shader->reg_maps;
+    const struct wined3d_shader_sampler_map_entry *e, *o;
+    const struct wined3d_shader_resource_view *view, *other;
+    unsigned int count = reg_maps->sampler_map.count;
+    unsigned int i, j, fallback, owner_count = 0;
+    bool same_type, e_shadow, o_shadow;
+
+    if (count <= unit_count || count > WINED3D_MAX_SAMPLER_ALIASES || reg_maps->shader_version.major < 4)
+        return false;
+
+    for (i = 0; i < count; ++i)
+    {
+        e = &reg_maps->sampler_map.entries[i];
+        alias[i] = i;
+        if (e->resource_idx >= ARRAY_SIZE(reg_maps->resource_info))
+        {
+            ++owner_count;
+            continue;
+        }
+        view = state->shader_resource_view[type][e->resource_idx];
+        e_shadow = e->sampler_idx != WINED3D_SAMPLER_DEFAULT
+                && (reg_maps->sampler_comparison_mode & (1u << e->sampler_idx));
+        fallback = ~0u;
+
+        for (j = 0; j < i; ++j)
+        {
+            o = &reg_maps->sampler_map.entries[j];
+            if (alias[j] != j || o->resource_idx >= ARRAY_SIZE(reg_maps->resource_info))
+                continue;
+            o_shadow = o->sampler_idx != WINED3D_SAMPLER_DEFAULT
+                    && (reg_maps->sampler_comparison_mode & (1u << o->sampler_idx));
+            same_type = reg_maps->resource_info[e->resource_idx].type == reg_maps->resource_info[o->resource_idx].type
+                    && reg_maps->resource_info[e->resource_idx].data_type
+                    == reg_maps->resource_info[o->resource_idx].data_type
+                    && e_shadow == o_shadow;
+            if (!same_type)
+                continue;
+
+            if (fallback == ~0u)
+                fallback = j;
+
+            other = state->shader_resource_view[type][o->resource_idx];
+            if (!view || !other)
+            {
+                if (view || other)
+                    continue;
+                break;
+            }
+            if (view != other && (view->resource != other->resource || view->format != other->format
+                    || memcmp(&view->desc, &other->desc, sizeof(view->desc))))
+                continue;
+            if (e->sampler_idx == o->sampler_idx)
+                break;
+            if (e->sampler_idx == WINED3D_SAMPLER_DEFAULT || o->sampler_idx == WINED3D_SAMPLER_DEFAULT)
+                continue;
+            if (state->sampler[type][e->sampler_idx] == state->sampler[type][o->sampler_idx])
+                break;
+        }
+
+        if (j < i)
+        {
+            alias[i] = j;
+        }
+        else if (owner_count >= unit_count && fallback != ~0u)
+        {
+            static unsigned int once;
+
+            if (!once++)
+                FIXME("Shader %p samples more than %u distinct textures; sampler %u reads sampler %u's texture.\n",
+                        shader, unit_count, i, fallback);
+            alias[i] = fallback;
+        }
+        else
+        {
+            ++owner_count;
+        }
+    }
+
+    return true;
+}
+
+/* WINESKIN: the stage's texture unit of sampler map entry "idx", which owns
+ * one (alias[idx] == idx). */
+unsigned int wined3d_sampler_alias_unit(const uint8_t *alias, unsigned int idx)
+{
+    unsigned int i, unit = 0;
+
+    for (i = 0; i < idx; ++i)
+    {
+        if (alias[i] == i)
+            ++unit;
+    }
+    return unit;
+}
+
 void find_ps_compile_args(const struct wined3d_state *state, const struct wined3d_shader *shader,
         BOOL position_transformed, struct ps_compile_args *args, const struct wined3d_context *context)
 {

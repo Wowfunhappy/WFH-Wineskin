@@ -237,6 +237,20 @@ static void ffp_blitter_clear_rendertargets(struct wined3d_device *device, unsig
             wined3d_rendertarget_view_invalidate_location(rtv, ~rtv->resource->draw_binding);
         }
 
+        /* WINESKIN: macOS's OpenGL (the implementation with APPLE_rgb_422)
+         * keeps the converted clear colour of the previous clear when the
+         * same colour is cleared with GL_FRAMEBUFFER_SRGB toggled. Clears
+         * there convert the colour here and run with GL_FRAMEBUFFER_SRGB
+         * off; wined3d_context_gl_apply_clear_state() has invalidated the
+         * state that sets it for draws. */
+        if (gl_info->supported[ARB_FRAMEBUFFER_SRGB] && gl_info->supported[APPLE_RGB_422]
+                && needs_srgb_write(context->d3d_info, state, fb))
+        {
+            gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
+            wined3d_colour_srgb_from_linear(&colour_srgb, colour);
+            colour = &colour_srgb;
+        }
+
         if (!gl_info->supported[ARB_FRAMEBUFFER_SRGB] && needs_srgb_write(context->d3d_info, state, fb))
         {
             if (rt_count > 1)

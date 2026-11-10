@@ -133,6 +133,58 @@ static void wined3d_sampler_gl_cs_init(void *object)
     context_release(context);
 }
 
+/* WINESKIN: a copy of the sampler that skips sRGB decoding, for views that
+ * read a texture allocated with an sRGB internal format as linear
+ * (wined3d_format_gl.srgb_view_internal). Context activation is done by the
+ * caller. */
+GLuint wined3d_sampler_gl_get_skip_decode_name(struct wined3d_sampler_gl *sampler_gl,
+        const struct wined3d_gl_info *gl_info)
+{
+    static const GLenum int_params[] =
+    {
+        GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
+        GL_TEXTURE_COMPARE_MODE, GL_TEXTURE_COMPARE_FUNC,
+    };
+    static const GLenum float_params[] =
+    {
+        GL_TEXTURE_LOD_BIAS, GL_TEXTURE_MIN_LOD, GL_TEXTURE_MAX_LOD,
+    };
+    GLfloat border_color[4], f;
+    unsigned int i;
+    GLint v;
+
+    if (sampler_gl->skip_decode_name)
+        return sampler_gl->skip_decode_name;
+
+    GL_EXTCALL(glGenSamplers(1, &sampler_gl->skip_decode_name));
+    for (i = 0; i < ARRAY_SIZE(int_params); ++i)
+    {
+        GL_EXTCALL(glGetSamplerParameteriv(sampler_gl->name, int_params[i], &v));
+        GL_EXTCALL(glSamplerParameteri(sampler_gl->skip_decode_name, int_params[i], v));
+    }
+    for (i = 0; i < ARRAY_SIZE(float_params); ++i)
+    {
+        GL_EXTCALL(glGetSamplerParameterfv(sampler_gl->name, float_params[i], &f));
+        GL_EXTCALL(glSamplerParameterf(sampler_gl->skip_decode_name, float_params[i], f));
+    }
+    GL_EXTCALL(glGetSamplerParameterfv(sampler_gl->name, GL_TEXTURE_BORDER_COLOR, border_color));
+    GL_EXTCALL(glSamplerParameterfv(sampler_gl->skip_decode_name, GL_TEXTURE_BORDER_COLOR, border_color));
+    if (gl_info->supported[ARB_TEXTURE_FILTER_ANISOTROPIC])
+    {
+        GL_EXTCALL(glGetSamplerParameterfv(sampler_gl->name, GL_TEXTURE_MAX_ANISOTROPY, &f));
+        GL_EXTCALL(glSamplerParameterf(sampler_gl->skip_decode_name, GL_TEXTURE_MAX_ANISOTROPY, f));
+    }
+    if (gl_info->supported[ARB_TEXTURE_FILTER_MINMAX])
+    {
+        GL_EXTCALL(glGetSamplerParameteriv(sampler_gl->name, GL_TEXTURE_REDUCTION_MODE_ARB, &v));
+        GL_EXTCALL(glSamplerParameteri(sampler_gl->skip_decode_name, GL_TEXTURE_REDUCTION_MODE_ARB, v));
+    }
+    GL_EXTCALL(glSamplerParameteri(sampler_gl->skip_decode_name, GL_TEXTURE_SRGB_DECODE_EXT, GL_SKIP_DECODE_EXT));
+    checkGLcall("create skip decode sampler");
+
+    return sampler_gl->skip_decode_name;
+}
+
 void wined3d_sampler_gl_init(struct wined3d_sampler_gl *sampler_gl, struct wined3d_device *device,
         const struct wined3d_sampler_desc *desc, void *parent, const struct wined3d_parent_ops *parent_ops)
 {

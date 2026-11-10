@@ -273,6 +273,19 @@ static void create_texture_view(struct wined3d_gl_view *view, GLenum view_target
     context_release(context);
 }
 
+/* WINESKIN: copies the viewed part of the buffer to the view's own buffer;
+ * see struct wined3d_gl_view. Context activation is done by the caller. */
+void wined3d_gl_view_load_buffer_range(const struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+
+    wined3d_context_gl_bind_bo(context_gl, GL_COPY_READ_BUFFER, view->range_source);
+    wined3d_context_gl_bind_bo(context_gl, GL_COPY_WRITE_BUFFER, view->range_bo);
+    GL_EXTCALL(glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+            view->range_offset, 0, view->range_size));
+    checkGLcall("copy buffer view range");
+}
+
 static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_context_gl *context_gl,
         struct wined3d_buffer *buffer, const struct wined3d_format_gl *view_format_gl,
         unsigned int offset, unsigned int size)
@@ -308,10 +321,24 @@ static void create_buffer_texture(struct wined3d_gl_view *view, struct wined3d_c
     {
         GL_EXTCALL(glTexBufferRange(GL_TEXTURE_BUFFER, view_format_gl->internal, bo_gl->id, offset, size));
     }
+    /* WINESKIN: see struct wined3d_gl_view. */
+    else if (size && (offset || size != bo_gl->size) && offset + size <= bo_gl->size)
+    {
+        if (!view->range_bo)
+            GL_EXTCALL(glGenBuffers(1, &view->range_bo));
+        wined3d_context_gl_bind_bo(context_gl, GL_COPY_WRITE_BUFFER, view->range_bo);
+        if (view->range_size != size)
+            GL_EXTCALL(glBufferData(GL_COPY_WRITE_BUFFER, size, NULL, GL_STREAM_COPY));
+        view->range_source = bo_gl->id;
+        view->range_offset = offset;
+        view->range_size = size;
+        GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, view_format_gl->internal, view->range_bo));
+        wined3d_gl_view_load_buffer_range(view, context_gl);
+    }
     else
     {
-        if (offset || size != buffer->resource.size)
-            FIXME("OpenGL implementation does not support ARB_texture_buffer_range.\n");
+        /* if (offset || size != buffer->resource.size)
+            FIXME("OpenGL implementation does not support ARB_texture_buffer_range.\n"); (WINESKIN) */
         GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, view_format_gl->internal, bo_gl->id));
     }
     checkGLcall("Create buffer texture");
@@ -1315,6 +1342,70 @@ HRESULT CDECL wined3d_shader_resource_view_create(const struct wined3d_view_desc
     return adapter_ops->adapter_create_shader_resource_view(desc, resource, parent, parent_ops, view);
 }
 
+/* WINESKIN: without ARB_texture_view a view is bound as its texture, with
+ * what the view selects applied to the texture and the unit:
+ *
+ * - A view of some of the texture's levels sets the texture's base and
+ *   maximum level, so level 0 in the shader is the view's first level.
+ * - A texture allocated with its format's srgb_view_internal is read as the
+ *   view's format: sRGB views decode, other views skip decoding. The
+ *   texture's parameter applies to texel fetches, the sampler's to sampling.
+ *
+ * Two views of one texture that differ in these and are bound for the same
+ * draw both read as the one bound last. */
+static void wined3d_shader_resource_view_gl_apply_view(struct wined3d_shader_resource_view_gl *view_gl,
+        struct wined3d_texture_gl *texture_gl, unsigned int unit, struct wined3d_sampler_gl *sampler_gl,
+        struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_format_gl *format_gl = wined3d_format_gl(texture_gl->t.resource.format);
+    const struct wined3d_view_desc *desc = &view_gl->v.desc;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct gl_texture *gl_tex;
+    BOOL decode;
+
+    gl_tex = wined3d_texture_gl_get_gl_texture(texture_gl, FALSE);
+
+    if (texture_gl->target != GL_TEXTURE_2D_MULTISAMPLE && texture_gl->target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+    {
+        if (desc->u.texture.level_idx || desc->u.texture.level_count < texture_gl->t.level_count)
+        {
+            gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_BASE_LEVEL, desc->u.texture.level_idx);
+            gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_MAX_LEVEL,
+                    desc->u.texture.level_idx + desc->u.texture.level_count - 1);
+            checkGLcall("set view levels");
+            gl_tex->sampler_desc.mip_base_level = desc->u.texture.level_idx;
+            gl_tex->view_levels = true;
+        }
+        else if (gl_tex->view_levels)
+        {
+            gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_BASE_LEVEL, 0);
+            gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_MAX_LEVEL,
+                    texture_gl->t.level_count - 1);
+            checkGLcall("reset view levels");
+            gl_tex->sampler_desc.mip_base_level = 0;
+            gl_tex->view_levels = false;
+        }
+    }
+
+    if (!format_gl->srgb_view_internal || wined3d_gl_get_internal_format(&texture_gl->t.resource,
+            format_gl, false) != format_gl->srgb_view_internal)
+        return;
+
+    decode = !!(view_gl->v.format->caps[texture_gl->t.resource.gl_type] & WINED3D_FORMAT_CAP_SRGB_READ);
+    if (gl_tex->sampler_desc.srgb_decode != decode)
+    {
+        gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target, GL_TEXTURE_SRGB_DECODE_EXT,
+                decode ? GL_DECODE_EXT : GL_SKIP_DECODE_EXT);
+        checkGLcall("set sRGB decode");
+        gl_tex->sampler_desc.srgb_decode = decode;
+    }
+    if (!decode && gl_info->supported[ARB_SAMPLER_OBJECTS])
+    {
+        GL_EXTCALL(glBindSampler(unit, wined3d_sampler_gl_get_skip_decode_name(sampler_gl, gl_info)));
+        checkGLcall("bind sampler");
+    }
+}
+
 void wined3d_shader_resource_view_gl_bind(struct wined3d_shader_resource_view_gl *view_gl,
         unsigned int unit, struct wined3d_sampler_gl *sampler_gl, struct wined3d_context_gl *context_gl)
 {
@@ -1325,6 +1416,8 @@ void wined3d_shader_resource_view_gl_bind(struct wined3d_shader_resource_view_gl
 
     if (view_gl->gl_view.name)
     {
+        if (view_gl->gl_view.range_bo) /* WINESKIN */
+            wined3d_gl_view_load_buffer_range(&view_gl->gl_view, context_gl);
         wined3d_context_gl_bind_texture(context_gl, view_gl->gl_view.target, view_gl->gl_view.name);
         wined3d_sampler_gl_bind(sampler_gl, unit, NULL, context_gl);
         return;
@@ -1339,6 +1432,65 @@ void wined3d_shader_resource_view_gl_bind(struct wined3d_shader_resource_view_gl
     texture_gl = wined3d_texture_gl(wined3d_texture_from_resource(view_gl->v.resource));
     wined3d_texture_gl_bind(texture_gl, context_gl, sampler_gl->s.desc.srgb_decode);
     wined3d_sampler_gl_bind(sampler_gl, unit, texture_gl, context_gl);
+    if (!gl_info->supported[ARB_TEXTURE_VIEW]) /* WINESKIN */
+        wined3d_shader_resource_view_gl_apply_view(view_gl, texture_gl, unit, sampler_gl, context_gl);
+}
+
+/* WINESKIN: the texture unit unordered access view "uav_idx" of a shader with
+ * "sampler_count" samplers is read through, where OpenGL has no images: the
+ * stage's units from the last one down, or ~0u when the samplers need it. */
+unsigned int wined3d_gl_limits_get_uav_texture_unit(const struct wined3d_gl_limits *gl_limits,
+        enum wined3d_shader_type shader_type, unsigned int sampler_count, unsigned int uav_idx)
+{
+    unsigned int base, count;
+
+    wined3d_gl_limits_get_texture_unit_range(gl_limits, shader_type, &base, &count);
+    if (uav_idx >= count || count - 1 - uav_idx < sampler_count)
+        return ~0u;
+    return base + count - 1 - uav_idx;
+}
+
+/* WINESKIN: binds the unordered access views a graphics shader reads to their
+ * texture units (shader_glsl_declare_image_emulation). A view of a texture
+ * reads the texture's first level and all of its layers. */
+void wined3d_context_gl_bind_unordered_access_view_textures(struct wined3d_context_gl *context_gl,
+        const struct wined3d_shader *shader, struct wined3d_unordered_access_view * const *views)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_unordered_access_view_gl *view_gl;
+    struct wined3d_sampler_gl *sampler_gl;
+    unsigned int i, unit;
+
+    sampler_gl = wined3d_sampler_gl(context_gl->c.device->default_sampler);
+    for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
+    {
+        if (!shader->reg_maps.uav_resource_info[i].type || !views[i])
+            continue;
+        if ((unit = wined3d_gl_limits_get_uav_texture_unit(&gl_info->limits, shader->reg_maps.shader_version.type,
+                shader->reg_maps.sampler_map.count, i)) == ~0u)
+        {
+            WARN("No texture unit for unordered access view %u.\n", i);
+            continue;
+        }
+
+        view_gl = wined3d_unordered_access_view_gl(views[i]);
+        wined3d_context_gl_active_texture(context_gl, gl_info, unit);
+        if (view_gl->gl_view.name)
+        {
+            wined3d_context_gl_bind_texture(context_gl, view_gl->gl_view.target, view_gl->gl_view.name);
+            wined3d_sampler_gl_bind(sampler_gl, unit, NULL, context_gl);
+        }
+        else if (view_gl->v.resource->type != WINED3D_RTYPE_BUFFER)
+        {
+            struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(texture_from_resource(view_gl->v.resource));
+
+            if (view_gl->v.desc.u.texture.level_idx)
+                WARN("Reading level 0 for a view of level %u.\n", view_gl->v.desc.u.texture.level_idx);
+            wined3d_texture_gl_bind(texture_gl, context_gl, FALSE);
+            wined3d_sampler_gl_bind(sampler_gl, unit, texture_gl, context_gl);
+        }
+    }
+    checkGLcall("bind unordered access view textures");
 }
 
 /* Context activation is done by the caller. */
