@@ -212,13 +212,19 @@ static struct handle_entry *get_handle_ptr( struct handle_table *table, HANDLE h
     if (index >= ARRAY_SIZE(table->handles)) return NULL;
     ptr = table->handles + index;
 
-    AcquireSRWLockShared( &table->lock );
-    if (index >= table->count || ULongToHandle( ptr->handle ) != handle)
+    /* WINESKIN: every OpenGL call looks its context up here, some three times, and wined3d makes
+     * tens of thousands of calls a frame. The entries are static, the count only grows and a
+     * handle is one word, so the check reads them without the lock: what it returns is as good
+     * as it was when the lock was released. */
+    // AcquireSRWLockShared( &table->lock );
+    // if (index >= table->count || ULongToHandle( ptr->handle ) != handle)
+    if (index >= ReadNoFence( (LONG *)&table->count ) || ULongToHandle( ReadNoFence( (LONG *)&ptr->handle ) ) != handle)
     {
         RtlSetLastWin32Error( ERROR_INVALID_HANDLE );
         ptr = NULL;
     }
-    ReleaseSRWLockShared( &table->lock );
+    /* WINESKIN: see above. */
+    // ReleaseSRWLockShared( &table->lock );
 
     return ptr;
 }

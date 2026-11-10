@@ -90,6 +90,8 @@ static struct
     void (WINAPI *glLinkProgram)(GLuint);
 } gl;
 
+/* A slot's filter is allocated once and never freed, and is in use while its rc is set:
+ * get_filter(), which runs for every filtered OpenGL call, reads the table without a lock. */
 static struct gl_filter *filters[FILTER_CONTEXTS];
 static SRWLOCK filters_lock = SRWLOCK_INIT;
 
@@ -97,30 +99,24 @@ static SRWLOCK filters_lock = SRWLOCK_INIT;
  * wined3d_gl_filter_add_context() was told of, and the caller then passes its call on. */
 static struct gl_filter *get_filter(void)
 {
-    struct gl_filter *filter = NULL;
+    struct gl_filter *filter;
     unsigned int i;
     HGLRC rc;
 
     if (!(rc = wglGetCurrentContext()))
         return NULL;
 
-    AcquireSRWLockShared(&filters_lock);
     for (i = 0; i < FILTER_CONTEXTS; ++i)
     {
-        if (filters[i] && filters[i]->rc == rc)
-        {
-            filter = filters[i];
-            break;
-        }
+        if ((filter = ReadPointerAcquire((void **)&filters[i])) && filter->rc == rc)
+            return filter;
     }
-    ReleaseSRWLockShared(&filters_lock);
-    return filter;
+    return NULL;
 }
 
 /* A context wined3d draws with was destroyed. */
 void wined3d_gl_filter_remove_context(HGLRC rc)
 {
-    struct gl_filter *filter = NULL;
     unsigned int i;
 
     AcquireSRWLockExclusive(&filters_lock);
@@ -128,13 +124,11 @@ void wined3d_gl_filter_remove_context(HGLRC rc)
     {
         if (filters[i] && filters[i]->rc == rc)
         {
-            filter = filters[i];
-            filters[i] = NULL;
+            filters[i]->rc = NULL;
             break;
         }
     }
     ReleaseSRWLockExclusive(&filters_lock);
-    free(filter);
 }
 
 /* A context wined3d draws with was created: nothing is known of its state. Contexts beyond
@@ -145,22 +139,23 @@ void wined3d_gl_filter_add_context(HGLRC rc)
     unsigned int i;
 
     wined3d_gl_filter_remove_context(rc);
-    if (!gl.glEnable || !(filter = calloc(1, sizeof(*filter))))
+    if (!gl.glEnable)
         return;
-    filter->rc = rc;
-    filter->active_unit = ~0u;
     AcquireSRWLockExclusive(&filters_lock);
     for (i = 0; i < FILTER_CONTEXTS; ++i)
     {
-        if (!filters[i])
-        {
-            filters[i] = filter;
-            filter = NULL;
+        if ((filter = filters[i]) && filter->rc)
+            continue;
+        if (filter)
+            memset(filter, 0, sizeof(*filter));
+        else if (!(filter = calloc(1, sizeof(*filter))))
             break;
-        }
+        filter->active_unit = ~0u;
+        WritePointerRelease((void **)&filters[i], filter);
+        filter->rc = rc;
+        break;
     }
     ReleaseSRWLockExclusive(&filters_lock);
-    free(filter);
 }
 
 /* Whether a capability's state is one switch for the whole context, which glEnablei() and
