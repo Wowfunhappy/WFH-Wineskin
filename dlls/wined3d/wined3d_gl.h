@@ -705,6 +705,9 @@ struct wined3d_context_gl
     uint32_t padding : 25;
 
     uint32_t default_attrib_value_set;
+    /* WINESKIN: locations whose disabled array still points into a buffer
+     * (wined3d_context_gl_drop_stale_attrib_pointers()). */
+    uint32_t stale_attrib_pointers;
 
     GLenum tracking_parm; /* Which source is tracking current colour. */
     GLenum untracked_materials[2];

@@ -4940,8 +4940,33 @@ static void wined3d_context_gl_unload_numbered_array(struct wined3d_context_gl *
     checkGLcall("glDisableVertexAttribArray");
     if (gl_info->supported[ARB_INSTANCED_ARRAYS])
         GL_EXTCALL(glVertexAttribDivisor(i, 0));
+    /* WINESKIN: see wined3d_context_gl_drop_stale_attrib_pointers(). */
+    context_gl->stale_attrib_pointers |= 1u << i;
 
     context_gl->c.numbered_array_mask &= ~(1u << i);
+}
+
+/* WINESKIN: a disabled vertex attribute array keeps pointing into the buffer
+ * it last read, and 10.9's OpenGL brings every buffer the vertex array object
+ * names up to date before a draw, read or not. For a buffer the GPU has
+ * written since (stream output, an OpenCL kernel), that submits the context's
+ * command buffer to the kernel, at every draw for as long as the pointer
+ * stays (0.03 ms each; a game that skins its meshes on the GPU and then draws
+ * its full-screen passes with no vertex buffers pays it for each of them).
+ * Disabled arrays therefore point at no buffer. This leaves no buffer bound
+ * to GL_ARRAY_BUFFER. */
+static void wined3d_context_gl_drop_stale_attrib_pointers(struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    uint32_t mask = context_gl->stale_attrib_pointers;
+
+    if (!mask)
+        return;
+    GL_EXTCALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    while (mask)
+        GL_EXTCALL(glVertexAttribPointer(wined3d_bit_scan(&mask), 4, GL_FLOAT, GL_FALSE, 0, NULL));
+    checkGLcall("drop stale attribute pointers");
+    context_gl->stale_attrib_pointers = 0;
 }
 
 static void wined3d_context_gl_unload_numbered_arrays(struct wined3d_context_gl *context_gl)
@@ -5144,6 +5169,8 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
                         !!(format_attrs & WINED3D_FORMAT_ATTR_NORMALISED), element->stride, offset));
             }
 
+            /* WINESKIN: see wined3d_context_gl_drop_stale_attrib_pointers(). */
+            context_gl->stale_attrib_pointers &= ~(1u << i);
             if (!(context->numbered_array_mask & (1u << i)))
             {
                 GL_EXTCALL(glEnableVertexAttribArray(i));
@@ -5266,6 +5293,8 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
             context_gl->default_attrib_value_set &= ~(1u << i);
         }
     }
+    /* WINESKIN */
+    wined3d_context_gl_drop_stale_attrib_pointers(context_gl);
     checkGLcall("Loading numbered arrays");
 }
 
@@ -5431,5 +5460,6 @@ void wined3d_context_gl_prepare_generated_draw(struct wined3d_context_gl *contex
 
     wined3d_context_gl_pause_transform_feedback(context_gl, FALSE);
     wined3d_context_gl_unload_numbered_arrays(context_gl);
+    wined3d_context_gl_drop_stale_attrib_pointers(context_gl);
     checkGLcall("generated draw state");
 }
