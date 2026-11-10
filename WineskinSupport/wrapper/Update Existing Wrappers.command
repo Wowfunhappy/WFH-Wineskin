@@ -26,6 +26,23 @@ fi
 
 selected_apps=()
 interactive_mode=false
+current_app=
+
+# alert <title> [message] [critical]: an alert whose text reaches AppleScript as arguments, so names
+# with quotes in them show as they are.
+alert()
+{
+	osascript -e 'on run argv' \
+	          -e 'if item 3 of argv is "critical" then' \
+	          -e 'display alert (item 1 of argv) message (item 2 of argv) as critical' \
+	          -e 'else' \
+	          -e 'display alert (item 1 of argv) message (item 2 of argv)' \
+	          -e 'end if' \
+	          -e 'end run' "$1" "${2:-}" "${3:-}" > /dev/null
+}
+
+# A command that fails stops the script (set -e); in dialog mode, say so instead of quitting silently.
+trap 'if [ "$interactive_mode" = true ] && [ -n "$current_app" ]; then alert "$current_app could not be updated." "A step of the update failed. Run this script from Terminal with the wrapper as its argument to see why." critical; fi' ERR
 
 if [ "$1" = "--update-apps-folder" ]
 then
@@ -94,6 +111,7 @@ do
 		continue
 	fi
 
+	current_app=$(basename "$input_app")
 	input_path=$(cd "$input_app" && pwd -P)
 	app_contents="$input_path/Contents"
 	if [ "$input_path" = "$template_path" ] ||
@@ -134,10 +152,11 @@ do
 	name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$app_contents/Info.plist")
 	identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app_contents/Info.plist" 2>/dev/null || true)
 	cp "$template_contents/Info.plist" "$app_contents/Info.plist"
-	/usr/libexec/PlistBuddy -c "Set :CFBundleName $name" "$app_contents/Info.plist"
+	# plutil takes the values as they are; PlistBuddy's command parser stops at quotes (Baldur's Gate).
+	plutil -replace CFBundleName -string "$name" "$app_contents/Info.plist"
 	if [ -n "$identifier" ]
 	then
-		/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $identifier" "$app_contents/Info.plist"
+		plutil -replace CFBundleIdentifier -string "$identifier" "$app_contents/Info.plist"
 	fi
 
 	if [ -d "$prefix" ]
@@ -150,26 +169,25 @@ do
 	touch "$app_contents/Resources/Wineskin.icns"
 	touch "$input_path"
 	updated_apps+=("$(basename "$input_app")")
+	current_app=
 done
 
 if [ "$interactive_mode" = true ]
 then
 	if [ ${#invalid_apps[@]} -eq 1 ]
 	then
-		osascript -e "display alert \"${invalid_apps[0]} was not modified because it is not a WFH Wineskin wrapper.\" as critical"
+		alert "${invalid_apps[0]} was not modified because it is not a WFH Wineskin wrapper." "" critical
 	elif [ ${#invalid_apps[@]} -gt 1 ]
 	then
-		invalid_apps_list=$(printf "%s\\n" "${invalid_apps[@]}")
-		osascript -e "display alert \"These apps were not modified because they are not WFH Wineskin wrappers:\" message \"$invalid_apps_list\" as critical"
+		alert "These apps were not modified because they are not WFH Wineskin wrappers:" "$(printf "%s\n" "${invalid_apps[@]}")" critical
 	fi
 
 	if [ ${#updated_apps[@]} -eq 1 ]
 	then
-		osascript -e "display alert \"${updated_apps[0]} updated successfully.\""
+		alert "${updated_apps[0]} updated successfully."
 	elif [ ${#updated_apps[@]} -gt 1 ]
 	then
-		updated_apps_list=$(printf "%s\\n" "${updated_apps[@]}")
-		osascript -e "display alert \"Wrappers updated successfully:\" message \"$updated_apps_list\""
+		alert "Wrappers updated successfully:" "$(printf "%s\n" "${updated_apps[@]}")"
 	fi
 else
 	printf "Updated: %s\n" "${updated_apps[@]}"
