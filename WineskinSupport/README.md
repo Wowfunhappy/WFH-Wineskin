@@ -290,16 +290,33 @@ replaces a buffer the GPU still reads with a new OpenGL buffer. Two files change
 
 #### The cost of an OpenGL call, and the state filter
 
-A 64-bit Windows thread keeps its TEB in `%gs`, which macOS's libraries use for their own thread data, so
-Wine switches the `%gs` base on every call from Windows code into a Unix library and back. 10.9 has no
-user-mode `wrgsbase`: each switch is a kernel trap, and a call costs about 0.3 microseconds before it
-does anything (`~/WineskinTests/perf/tools/ucall.c` measures it). 32-bit programs keep their TEB in `%fs`
-and pay nothing. wined3d makes one such call per OpenGL function, tens per draw.
+A 64-bit Windows thread keeps its TEB in `%gs`, which macOS's libraries use for their own thread data.
+Upstream Wine switches the `%gs` base on every call from Windows code into a Unix library and back; 10.9
+has no user-mode `wrgsbase`, so each switch is a kernel trap, and a call costs about 0.5 microseconds
+before it does anything (`~/WineskinTests/perf/tools/ucall.c` measures it). wined3d makes one such call
+per OpenGL function, tens per draw. 32-bit programs keep their TEB in `%fs` and pay nothing.
+
+Here `%gs` keeps the pthread base while Windows code runs, as in CrossOver and in marzent/winecx
+(commit 0a3e723e47, the source of the change), and a call costs 0.15 to 0.2 microseconds. Compiled
+Windows code reads three things straight from `%gs`, and each thread's pthread data holds them at the
+same offsets (`wineskin_init_teb_slots` in `dlls/ntdll/unix/signal_x86_64.c`): the TEB at `%gs:0x30`,
+the TLS pointer at `%gs:0x58`, the PEB at `%gs:0x60`. Code that inlines `TlsGetValue()` reads
+`%gs:0x1780`, the TLS expansion slots, which every thread has from the start; the 64 TLS slots inside
+the TEB are never handed out, so `TlsAlloc()` returns indices from 64 up. What this rests on in 10.9's
+libpthread and libc, checked in their disassembly: a thread's `%gs` base is its array of 768 pointers;
+slot 6 (`0x30`) belongs to nobody; slots 11 and 12 (`0x58`, `0x60`) are libc's keys for the buffers of
+`ttyname()` and `localtime()`, which the Unix loader replaces with versions that use no key, and which
+are cleared before a thread exits, since libc frees what it finds there; slot 752 (`0x1780`) is an
+ordinary pthread key, which the loader reserves at startup. A program that reads any other TEB field
+straight from `%gs` (the stack bounds at `0x8` and `0x10`, the last error at `0x68`, a TLS slot at
+`0x1480`) reads pthread data instead; `WINESKIN_GSBASE_SWITCH=1` in the environment gives such a
+program upstream's switching. A program that loads the `%gs` selector loses the base until its next
+fault, where the signal handler restores it.
 
 `QueryPerformanceCounter` makes no such call in a 64-bit program: `RtlQueryPerformanceCounter`
 (`dlls/ntdll/time.c`) scales the TSC with the nanotime data of macOS's commpage, as
 `mach_absolute_time()` does, once the Unix side (`wineskin_qpc_params` in `unix/sync.c`) has checked
-that this gives the same clock. It takes 19 ns, against 300 through `NtQueryPerformanceCounter`.
+that this gives the same clock. It takes 19 ns.
 
 `dlls/wined3d/gl_filter.c` replaces the state setting entries of wined3d's OpenGL function table
 (`glEnable`/`glDisable`, texture, sampler and uniform buffer bindings, vertex attribute divisors, face,
@@ -316,6 +333,45 @@ programs can't be kept on disk: a shader is compiled the first time each run dra
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
 time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).
+
+## Synchronisation
+
+`RtlWaitOnAddress`, on which SRW locks, condition variables and most engines' own locks sleep, hashes
+addresses into 1024 queues and its queue lock yields after 64 spins (`dlls/ntdll/sync.c`, from
+marzent/winecx).
+
+### In-process synchronisation (msync)
+
+Every wait on, and every release of, a semaphore, event or mutex is otherwise a wineserver round trip,
+and the server is one thread for the whole prefix. With `WINEMSYNC=1` in the environment the wineserver
+starts in (off unless set), these objects live in memory the server shares with every process, and a
+release or an uncontended wait is a few atomic operations in the calling thread. The server decides: a
+process uses msync exactly when its server does, whatever its own environment says.
+
+- The code is CrossOver 26.3.0's msync (`server/msync.c`, `dlls/ntdll/unix/msync.c` and their headers;
+  CodeWeavers, LGPL 2.1+, the successor of https://github.com/marzent/wine-msync), which plugs into
+  Wine's in-process synchronisation (`server/inproc_sync.c`, `dlls/ntdll/unix/sync.c`) where Linux has
+  ntsync; `msync_inproc.h` on each side is that glue. The object types are ntsync's: semaphores, events,
+  mutexes, and the internal events through which the server signals everything else a thread can wait
+  on (threads, processes, timers, queues, a thread's user APCs).
+- CrossOver's msync sleeps and wakes through the ulock system calls of macOS 10.12. 10.9 has none, so a
+  thread that has to sleep waits on a Mach semaphore of its own: it sends the semaphore to the server's
+  Mach port once (a bootstrap service named after the prefix), registers each wait there with one
+  message, and the server's message thread signals the semaphore when a registered object is signaled
+  or already is. A release with no sleeper sends nothing; one with sleepers sends one message and does
+  not wait for it. The ulock paths remain for systems that have the calls; they are untested here.
+- The protocol is upstream's: an object's index in the shared memory travels in the type field of the
+  `get_inproc_sync_fd` reply and in the handle of the `get_inproc_alert_fd` reply.
+- Differences from CrossOver's files are marked `WINESKIN` in them: `NtReleaseMutant` reports NT's
+  previous count; a signaled object comes before a pending user APC, as in the server; a mutex whose
+  handles are closed while a thread waits on it is still abandoned when its owner dies; long timeouts
+  don't overflow; thread exit doesn't close the alert object's index as a file descriptor.
+- Known limits, inherited: a process that dies leaves its references to objects' shared memory entries
+  allocated; `PulseEvent` can miss a waiter; relative timeouts follow the wall clock.
+
+`~/WineskinTests/perf/tools/synctest.c` exercises timeouts, mixed and wait-all waits, APCs, named,
+inherited and duplicated objects across processes, abandoned mutexes and killed threads, with a time
+limit on every wait.
 
 ## Native look and feel
 
