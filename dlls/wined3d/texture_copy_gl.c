@@ -587,6 +587,41 @@ bool wined3d_context_gl_copy_texels(struct wined3d_context_gl *context_gl,
     return status == GL_FRAMEBUFFER_COMPLETE;
 }
 
+/* The OpenGL state a driver check at initialisation may touch. Checks compare
+ * it before and after; wined3d's own state must come out as it went in. */
+static const GLenum gl_check_state[] =
+{
+    GL_VERTEX_ARRAY_BINDING, GL_CURRENT_PROGRAM, GL_DRAW_FRAMEBUFFER_BINDING, GL_READ_FRAMEBUFFER_BINDING,
+    GL_ACTIVE_TEXTURE, GL_TEXTURE_BINDING_2D, GL_SAMPLER_BINDING, GL_ARRAY_BUFFER_BINDING,
+    GL_PIXEL_UNPACK_BUFFER_BINDING, GL_PIXEL_PACK_BUFFER_BINDING, GL_RENDERBUFFER_BINDING, GL_VIEWPORT,
+    GL_SCISSOR_BOX, GL_SCISSOR_TEST, GL_DEPTH_WRITEMASK, GL_RASTERIZER_DISCARD, GL_FRAMEBUFFER_SRGB, GL_BLEND,
+};
+
+static void gl_check_state_get(const struct wined3d_gl_info *gl_info, GLint values[ARRAY_SIZE(gl_check_state)][4])
+{
+    unsigned int i;
+
+    memset(values, 0, sizeof(GLint) * 4 * ARRAY_SIZE(gl_check_state));
+    for (i = 0; i < ARRAY_SIZE(gl_check_state); ++i)
+        gl_info->gl_ops.gl.p_glGetIntegerv(gl_check_state[i], values[i]);
+}
+
+static void gl_check_state_compare(const struct wined3d_gl_info *gl_info,
+        GLint before[ARRAY_SIZE(gl_check_state)][4], const char *check)
+{
+    GLint after[ARRAY_SIZE(gl_check_state)][4];
+    unsigned int i;
+
+    gl_check_state_get(gl_info, after);
+    for (i = 0; i < ARRAY_SIZE(gl_check_state); ++i)
+    {
+        if (memcmp(before[i], after[i], sizeof(after[i])))
+            ERR("The %s check changed OpenGL state %#x (%d %d %d %d -> %d %d %d %d).\n", check, gl_check_state[i],
+                    before[i][0], before[i][1], before[i][2], before[i][3],
+                    after[i][0], after[i][1], after[i][2], after[i][3]);
+    }
+}
+
 /* Whether a sampler object's GL_TEXTURE_SRGB_DECODE_EXT governs sampling, as
  * EXT_texture_sRGB_decode says. Intel's OpenGL on 10.9 (HD Graphics 5000)
  * decodes whatever the sampler object says (~/WineskinTests/probe-air);
@@ -595,7 +630,8 @@ bool wined3d_context_gl_copy_texels(struct wined3d_context_gl *context_gl,
  * object that skips decoding, into an RGBA8 target: 0x80 when the sampler
  * object governs, 0x37 when it doesn't. Runs on the adapter's capability
  * context (fixup_extensions()), whose bindings, viewport and sRGB write state
- * it restores: the format checks that follow draw with its vertex array. */
+ * it restores: the format checks that follow draw with its vertex array.
+ * WINESKIN_NO_DRIVER_CHECKS=1 skips it. */
 bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info)
 {
     static const char vs_source[] =
@@ -614,6 +650,8 @@ bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info)
         "}\n";
     static const DWORD texel = 0x80808080;
     GLint old_vao = 0, old_program = 0, old_fbo = 0, old_texture = 0, old_sampler = 0, old_viewport[4];
+    GLint old_active = GL_TEXTURE0;
+    GLint state[ARRAY_SIZE(gl_check_state)][4];
     GLuint textures[2], fbo, sampler, vao, program, vs, fs;
     GLboolean old_srgb;
     BYTE result[4] = {0};
@@ -624,11 +662,15 @@ bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info)
             || gl_info->supported[WINED3D_GL_LEGACY_CONTEXT] || gl_info->glsl_version < MAKEDWORD_VERSION(1, 50)
             || !gl_info->fbo_ops.glGenFramebuffers)
         return true;
+    if (getenv("WINESKIN_NO_DRIVER_CHECKS"))
+        return true;
 
+    gl_check_state_get(gl_info, state);
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &old_vao);
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_CURRENT_PROGRAM, &old_program);
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_fbo);
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_VIEWPORT, old_viewport);
+    gl_info->gl_ops.gl.p_glGetIntegerv(GL_ACTIVE_TEXTURE, &old_active);
     GL_EXTCALL(glActiveTexture(GL_TEXTURE0));
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
     gl_info->gl_ops.gl.p_glGetIntegerv(GL_SAMPLER_BINDING, &old_sampler);
@@ -694,6 +736,8 @@ bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info)
     gl_info->gl_ops.gl.p_glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3]);
     if (old_srgb)
         gl_info->gl_ops.gl.p_glEnable(GL_FRAMEBUFFER_SRGB);
+    GL_EXTCALL(glActiveTexture(old_active));
     while (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR);
+    gl_check_state_compare(gl_info, state, "sRGB decode");
     return works;
 }

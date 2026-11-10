@@ -31,6 +31,7 @@
 #include "wined3d_vk.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
+WINE_DECLARE_DEBUG_CHANNEL(d3d_formats); /* WINESKIN */
 
 #define WINED3D_FORMAT_FOURCC_BASE (WINED3DFMT_BC7_UNORM_SRGB + 1)
 
@@ -3036,8 +3037,25 @@ static void query_internal_format(struct wined3d_adapter *adapter,
         }
         else
         {
-            max_log2 = wined3d_log2i(min(gl_info->limits.samples,
-                    sizeof(format->f.multisample_types) * CHAR_BIT));
+            /* WINESKIN: macOS has no ARB_internalformat_query. Integer formats
+             * take at most GL_MAX_INTEGER_SAMPLES (1 on 10.9, with NVIDIA's and
+             * Intel's drivers), depth and colour formats the multisample
+             * texture limits. */
+            GLint samples = gl_info->limits.samples;
+
+            if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE])
+            {
+                GLint limit = 0;
+
+                gl_info->gl_ops.gl.p_glGetIntegerv((format->f.attrs & WINED3D_FORMAT_ATTR_INTEGER)
+                        ? GL_MAX_INTEGER_SAMPLES : (format->f.depth_size || format->f.stencil_size)
+                        ? GL_MAX_DEPTH_TEXTURE_SAMPLES : GL_MAX_COLOR_TEXTURE_SAMPLES, &limit);
+                if (limit > 0)
+                    samples = min(samples, limit);
+            }
+            max_log2 = wined3d_log2i(min(samples, sizeof(format->f.multisample_types) * CHAR_BIT));
+            /* max_log2 = wined3d_log2i(min(gl_info->limits.samples,
+                    sizeof(format->f.multisample_types) * CHAR_BIT)); (WINESKIN) */
             for (i = 1; i <= max_log2; ++i)
                 format->f.multisample_types |= 1u << ((1u << i) - 1);
         }
@@ -4154,6 +4172,27 @@ static void init_format_bptc_decompress_info(struct wined3d_adapter *adapter, co
     }
 }
 
+/* WINESKIN: WINEDEBUG=+d3d_formats prints every format's capabilities, so
+ * that two runs (with and without WINESKIN_NO_DRIVER_CHECKS=1, see
+ * ~/WineskinTests/probe-air/capsdiff.sh) can be compared. */
+static void dump_format_caps(const struct wined3d_adapter *adapter)
+{
+    unsigned int i, j;
+
+    if (!TRACE_ON(d3d_formats))
+        return;
+    for (i = 0; i < WINED3D_FORMAT_COUNT; ++i)
+    {
+        const struct wined3d_format *format = get_format_by_idx(adapter, i);
+        char caps[WINED3D_GL_RES_TYPE_COUNT * 9 + 1];
+
+        for (j = 0; j < WINED3D_GL_RES_TYPE_COUNT; ++j)
+            sprintf(caps + j * 9, " %08x", format->caps[j]);
+        TRACE_(d3d_formats)("%s attrs %08x caps%s samples %08lx.\n", debug_d3dformat(format->id),
+                format->attrs, caps, (unsigned long)format->multisample_types);
+    }
+}
+
 BOOL wined3d_adapter_gl_init_format_info(struct wined3d_adapter *adapter, struct wined3d_caps_gl_ctx *ctx)
 {
     struct wined3d_gl_info *gl_info = &wined3d_adapter_gl(adapter)->gl_info;
@@ -4175,6 +4214,7 @@ BOOL wined3d_adapter_gl_init_format_info(struct wined3d_adapter *adapter, struct
     /* WINESKIN: see init_typeless_formats(). */
     if (!init_typeless_formats(adapter, !gl_info->supported[ARB_TEXTURE_VIEW])) goto fail;
     // if (!init_typeless_formats(adapter)) goto fail;
+    dump_format_caps(adapter); /* WINESKIN */
 
     return TRUE;
 

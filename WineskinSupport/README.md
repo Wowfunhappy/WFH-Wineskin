@@ -260,8 +260,10 @@ in place.
   names writes to another device's objects, which the NVIDIA driver answers with "GPU hang occurred".
 - `dlls/wined3d/cl_compute.c` loads the bound resources into their OpenGL locations, describes each
   argument, reads indirect arguments back, and dispatches. It also clears unordered access views (10.9 has
-  neither `ARB_clear_texture` nor `ARB_clear_buffer_object`). Formats OpenCL can't share (R11G11B10F,
-  RGB10A2, sRGB, SNORM, 24-bit depth, compressed) get a shadow texture of a shareable format. A dispatch
+  neither `ARB_clear_texture` nor `ARB_clear_buffer_object`). Formats OpenCL can't share get a shadow
+  texture of a shareable format: which formats share is tried at initialisation (`test_shareable_formats`
+  in `cl.c`); with NVIDIA's and Intel's drivers R11G11B10F, RGB10A2, sRGB, SNORM, 24-bit depth and
+  compressed formats don't. A dispatch
   copies the texture to its shadow when the texture has been written since they were last in step, and
   copies a shadow it wrote back; both copies are draws (`texture_copy_gl.c`). Only a texture OpenGL
   can't draw to gets its shadow back through a pixel buffer, which waits for the GPU.
@@ -317,14 +319,20 @@ in place.
 - NVIDIA's OpenCL on 10.9 reads an `image2d_depth_t` at the wrong texel through a sampler with normalised
   coordinates (it reads them as texel indices); an `image2d_t` of the same OpenGL depth texture reads the
   depth into x at the right texel. Sampled depth views are therefore declared as colour images
-  (`shader_cl_image_type`). Unreal builds its hierarchical Z buffer with such reads.
+  (`shader_cl_image_type`). Unreal builds its hierarchical Z buffer with such reads. A depth format is
+  shared only if a kernel reads back, this way, the depth OpenGL cleared a texture to
+  (`test_depth_read`); Intel's OpenCL returns 0 for every shared depth texture, and there depth reaches
+  kernels through an R32F shadow. `WINESKIN_CL_NO_DEPTH=1` shares no depth format.
 - A typed buffer view of a format of 32-bit components is read and written as words: the kernel key
   holds its component count (`WINED3D_CL_BUFFER_KEY_32`). The path for any format (`wfmt_ld`, `wfmt_st`)
   is large, and the driver's compiler gives up on a kernel that has hundreds of them ("Error getting
   function data from server", after two minutes during which the game stands still).
 - The driver's compile server caches builds by source text, so a kernel's source is the same in every
   run; its first line names the shader by a hash of its byte code. A first run compiles for about half a
-  minute in total, spread over the first minutes of play.
+  minute in total, spread over the first minutes of play. A kernel builds on a thread of its own, and the
+  command stream waits for it at most `WINESKIN_CL_BUILD_WAIT` seconds (10; 0 waits for every build).
+  A slower build goes on in the background, and the kernel's dispatches do nothing until it has finished;
+  a failed build is logged with its build log, and its dispatches do nothing.
 - Debugging aids: `WINESKIN_CL_DUMP=<directory>` receives every kernel's source;
   `WINESKIN_D3D_FRAME_DUMP=<Windows path of a directory>` captures a frame when a file named `go` (or
   `go-indirect`, for the frame after an indirect dispatch) appears there: `frame.txt` lists the draws and
@@ -460,6 +468,61 @@ programs can't be kept on disk: a shader is compiled the first time each run dra
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
 time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).
+
+### Other GPUs
+
+The work above was done on an NVIDIA GeForce GTX Titan Black. `~/WineskinTests/probe-air` holds a
+probe that measures what it relies on with another Mac's drivers (a native program, run by double-
+clicking "Run Probe.command"; it writes a report to the Desktop), and reports from the Titan and a 2014
+MacBook Air with Intel HD Graphics 5000 on 10.9. What wined3d checks, and what it does without:
+
+- OpenCL compute needs the OpenCL device CGL names for the OpenGL context to be a GPU with images,
+  OpenCL C 1.2 and OpenGL sharing (`device_usable` in `cl.c`; a GPU without OpenCL, such as Intel HD
+  Graphics 3000, can have the CPU named), and the shadow formats (R32F, RGBA16F, RGBA32F, RGBA32UI,
+  RGBA32I) to share. Without them one message says so and compute dispatches do nothing; the feature
+  level stays 11_0, as with `OpenCLCompute` = `n`. Shared formats, depth reads and build times are
+  above. Kernels that write 3D images need `cl_khr_3d_image_writes` (Intel's OpenCL lacks it), and
+  kernels with multisample images `cl_khr_gl_msaa_sharing` (NVIDIA's only); without the extension the
+  shader's dispatches do nothing, with a FIXME (`shader_cl_kinds_supported` in `glsl_cl.h`).
+- What the OpenCL path does for NVIDIA's quirks is valid OpenCL on any device and runs everywhere:
+  loads at normalised texel centres (exact with Intel's OpenCL too), and 32-bit typed buffer views read
+  as words. So is the conversion of `glClear` colours for sRGB views: Intel's driver clears either way.
+- Intel's OpenGL ignores `GL_TEXTURE_SRGB_DECODE_EXT` on a sampler object; the texture's parameter
+  decides. A draw at adapter initialisation finds this (`wined3d_gl_sampler_srgb_decode_works` in
+  `texture_copy_gl.c`, quirk `WINED3D_QUIRK_SAMPLER_SRGB_DECODE_IGNORED`), and Direct3D 9's sRGB
+  sampler state then goes into the texture's parameter. Views of Direct3D 10 and later set the
+  texture's parameter in any case, and copies read with `texelFetch()`, which the texture's parameter
+  governs.
+- macOS has no `ARB_internalformat_query`: a format's multisample counts are the powers of two up to
+  `GL_MAX_INTEGER_SAMPLES` for integer formats (1 with NVIDIA's and Intel's drivers: none),
+  `GL_MAX_DEPTH_TEXTURE_SAMPLES` for depth and `GL_MAX_COLOR_TEXTURE_SAMPLES` for the rest
+  (`query_internal_format` in `utils.c`).
+- Stream output emulation needs a geometry shader and an `R32UI` render target of 4096 texels a row;
+  when its program doesn't build or its target is incomplete, the draw uses transform feedback. Intel's
+  `glReadPixels` into the buffer waits for the GPU work queued before it (6.5 ms, against 9.8 ms for
+  `glEndTransformFeedback`), so the emulation gains less there.
+- View copies and texture copies need GLSL 3.30 and sampler objects (OpenGL 3.3), buffer conversions
+  also `ARB_transform_feedback2`; without them wined3d's own paths run. Buffer textures lack RGBA8_SNORM and RGB10A2 with both drivers,
+  which `buffer_convert_gl.c` covers.
+- Memory: the pool of retired OpenGL buffers holds at most an eighth of the video memory (Intel HD
+  Graphics 5000 reports 1536 MB, shared with the system), and no more than 256 MiB. Map shadows are
+  system memory, at most 16 MiB a buffer; shadows and view copies are textures of their texture's size,
+  made only for textures a dispatch or a view needs.
+- Timer queries read the CPU clock (Intel's `GL_TIME_ELAPSED` reads 0 anyway). The per-draw cost of
+  Intel's driver is higher: 3.3 microseconds for a draw after 8 texture changes, 4.0 after a program
+  change (Titan: 1.5 and 2.6).
+
+The checks at initialisation (the sRGB decode draw on the capability context, the OpenCL format and depth
+checks on the command stream's context) compare the OpenGL state they could touch before and after, and
+an error names any state they leave changed: the format checks that follow the sRGB check draw with the
+capability context's vertex array. `WINESKIN_NO_DRIVER_CHECKS=1` skips them (every format then counts
+as shared with OpenCL), and `WINEDEBUG=+d3d_formats` prints every format's capabilities;
+`~/WineskinTests/probe-air/capsdiff.sh` runs a d3d11 test both ways and compares the two, which must be
+the same on a Mac whose drivers need none of the workarounds.
+
+Only seen on other hardware: AMD GPUs (none probed yet); whether games' compute shaders read depth
+correctly through the shadow on Intel (the probe's copy does); Intel HD Graphics 3000 (OpenGL 3.3, so
+shader model 4 and feature level 10_0 at most, and no OpenCL on its GPU).
 
 ## Synchronisation
 

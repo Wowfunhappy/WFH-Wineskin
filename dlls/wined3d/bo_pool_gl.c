@@ -32,7 +32,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 
 #define BO_POOL_BUCKETS 64
 #define BO_POOL_MAX_BO_SIZE (8u << 20)
+/* The pool holds at most an eighth of the video memory, and no more than
+ * 256 MiB: a Mac with Intel graphics shares 1.5 GiB of system memory. */
 #define BO_POOL_MAX_BYTES (256u << 20)
+#define BO_POOL_MIN_BYTES (32u << 20)
 /* How many of a bucket's oldest buffers a request looks at. */
 #define BO_POOL_SCAN 8
 
@@ -55,6 +58,7 @@ struct wined3d_bo_pool_gl
 {
     struct wined3d_bo_pool_bucket buckets[BO_POOL_BUCKETS];
     size_t bytes;
+    size_t max_bytes;
 };
 
 static struct wined3d_bo_pool_bucket *bo_pool_bucket(struct wined3d_bo_pool_gl *pool, GLsizeiptr size)
@@ -112,7 +116,14 @@ bool wined3d_context_gl_pool_bo(struct wined3d_context_gl *context_gl, const str
 
     if (!pool && !(pool = device_gl->bo_pool = calloc(1, sizeof(*pool))))
         return false;
-    if (pool->bytes + bo->size > BO_POOL_MAX_BYTES)
+    if (!pool->max_bytes)
+    {
+        UINT64 vram = context_gl->c.device->adapter->driver_info.vram_bytes;
+
+        pool->max_bytes = vram ? min(max(vram / 8, BO_POOL_MIN_BYTES), BO_POOL_MAX_BYTES) : BO_POOL_MAX_BYTES;
+        TRACE("Pooling up to %Iu MiB of buffers.\n", pool->max_bytes >> 20);
+    }
+    if (pool->bytes + bo->size > pool->max_bytes)
         return false;
 
     bucket = bo_pool_bucket(pool, bo->size);

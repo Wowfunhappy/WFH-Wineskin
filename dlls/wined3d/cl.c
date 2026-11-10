@@ -478,9 +478,46 @@ static BOOL test_depth_read(struct cl_device_context *ctx, GLuint texture, BOOL 
  * reads what OpenGL rendered (test_depth_read()); a depth texture of another
  * reaches kernels through an R32F shadow. WINESKIN_CL_NO_DEPTH=1 shares no
  * depth format. */
+/* The OpenGL state the checks may touch, compared before and after: the
+ * command stream's context must come out as it went in. */
+static const GLenum check_state[] =
+{
+    0x85b5 /* GL_VERTEX_ARRAY_BINDING */, 0x8b8d /* GL_CURRENT_PROGRAM */,
+    0x8ca6 /* GL_DRAW_FRAMEBUFFER_BINDING */, 0x8caa /* GL_READ_FRAMEBUFFER_BINDING */,
+    0x84e0 /* GL_ACTIVE_TEXTURE */, 0x8069 /* GL_TEXTURE_BINDING_2D */, 0x8919 /* GL_SAMPLER_BINDING */,
+    0x8894 /* GL_ARRAY_BUFFER_BINDING */, 0x88ef /* GL_PIXEL_UNPACK_BUFFER_BINDING */,
+    0x88ed /* GL_PIXEL_PACK_BUFFER_BINDING */, 0x8ca7 /* GL_RENDERBUFFER_BINDING */, 0x0ba2 /* GL_VIEWPORT */,
+    0x0c10 /* GL_SCISSOR_BOX */, 0x0c11 /* GL_SCISSOR_TEST */, 0x0b72 /* GL_DEPTH_WRITEMASK */,
+    0x8c89 /* GL_RASTERIZER_DISCARD */, 0x8db9 /* GL_FRAMEBUFFER_SRGB */, 0x0be2 /* GL_BLEND */,
+};
+
+static void check_state_get(GLint values[ARRAY_SIZE(check_state)][4])
+{
+    unsigned int i;
+
+    memset(values, 0, sizeof(GLint) * 4 * ARRAY_SIZE(check_state));
+    for (i = 0; i < ARRAY_SIZE(check_state); ++i)
+        glGetIntegerv(check_state[i], values[i]);
+}
+
+static void check_state_compare(GLint before[ARRAY_SIZE(check_state)][4])
+{
+    GLint after[ARRAY_SIZE(check_state)][4];
+    unsigned int i;
+
+    check_state_get(after);
+    for (i = 0; i < ARRAY_SIZE(check_state); ++i)
+    {
+        if (memcmp(before[i], after[i], sizeof(after[i])))
+            ERR("The OpenCL format checks changed OpenGL state %#x (%d %d %d %d -> %d %d %d %d).\n", check_state[i],
+                    before[i][0], before[i][1], before[i][2], before[i][3],
+                    after[i][0], after[i][1], after[i][2], after[i][3]);
+    }
+}
+
 static UINT64 test_shareable_formats(struct cl_device_context *ctx, const struct wined3d_cl_init_params *params)
 {
-    GLint old_texture = 0, old_unpack = 0;
+    GLint old_texture = 0, old_unpack = 0, state[ARRAY_SIZE(check_state)][4];
     BOOL depth_tested = FALSE, depth_ok = FALSE, no_depth = !!getenv("WINESKIN_CL_NO_DEPTH");
     UINT64 mask = 0;
     unsigned int i;
@@ -488,6 +525,10 @@ static UINT64 test_shareable_formats(struct cl_device_context *ctx, const struct
     cl_int err;
     cl_mem mem;
 
+    /* WINESKIN_NO_DRIVER_CHECKS=1: every format counts as shared. */
+    if (getenv("WINESKIN_NO_DRIVER_CHECKS"))
+        return ~(UINT64)0;
+    check_state_get(state);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
     glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &old_unpack);
     if (old_unpack)
@@ -527,6 +568,7 @@ static UINT64 test_shareable_formats(struct cl_device_context *ctx, const struct
     if (old_unpack)
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, old_unpack);
     while (glGetError());
+    check_state_compare(state);
     TRACE("Shareable formats %#llx.\n", (unsigned long long)mask);
     return mask;
 }
