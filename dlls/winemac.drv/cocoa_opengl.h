@@ -28,9 +28,13 @@
     BOOL needsReattach;
 
     GLint backing_size[2];
+    /* WINESKIN: whether kCGLCESurfaceBackingSize is enabled. Asking the context (CGLIsEnabled) at every
+     * buffer swap waits for the multithreaded OpenGL engine to finish what it was given. */
+    BOOL backingSizeEnabled;
 }
 
 @property BOOL needsUpdate;
 @property BOOL needsReattach;
+@property BOOL backingSizeEnabled; /* WINESKIN */
 
 @end

@@ -46,6 +46,7 @@ bool right_option_is_alt = false;
 bool left_command_is_ctrl = false;
 bool right_command_is_ctrl = false;
 bool allow_software_rendering = false;
+bool multithreaded_opengl = false; /* WINESKIN: see macdrv_context_create() */
 bool allow_immovable_windows = true;
 bool use_confinement_cursor_clipping = true;
 bool cursor_clipping_locks_windows = true;
@@ -337,6 +338,10 @@ static void setup_options(void)
 
     if (!get_config_key(hkey, appkey, "AllowSoftwareRendering", buffer, sizeof(buffer)))
         allow_software_rendering = IS_OPTION_TRUE(buffer[0]);
+
+    /* WINESKIN: see macdrv_context_create(). */
+    if (!get_config_key(hkey, appkey, "MultithreadedOpenGL", buffer, sizeof(buffer)))
+        multithreaded_opengl = IS_OPTION_TRUE(buffer[0]);
 
     if (!get_config_key(hkey, appkey, "AllowImmovableWindows", buffer, sizeof(buffer)))
         allow_immovable_windows = IS_OPTION_TRUE(buffer[0]);

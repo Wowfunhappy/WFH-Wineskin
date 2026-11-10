@@ -1175,6 +1175,7 @@ static void macdrv_context_select_drawable(struct macdrv_context *context, struc
 
     if (CGLIsEnabled(context->base.host_context, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError) enabled = 0;
     if (enabled) CGLDisable(context->base.host_context, kCGLCESurfaceBackingSize);
+    macdrv_context_backing_size_disabled(context->context); /* WINESKIN */
     macdrv_make_context_current(context->context, NULL, CGRectNull);
 }
 
@@ -1827,6 +1828,15 @@ static struct opengl_context *macdrv_context_create(const struct opengl_context_
         RtlSetLastWin32Error(ERROR_INVALID_OPERATION);
         free(context);
         return FALSE;
+    }
+
+    /* WINESKIN: the multithreaded OpenGL engine runs the driver's command processing on a
+     * thread of its own, so the thread that issues OpenGL calls (wined3d's command stream)
+     * only queues them. */
+    if (multithreaded_opengl)
+    {
+        err = CGLEnable(context->base.host_context, kCGLCEMPEngine);
+        if (err) WARN("CGLEnable(kCGLCEMPEngine) failed with error %d %s\n", err, CGLErrorString(err));
     }
 
     if (gl_surface_mode == GL_SURFACE_IN_FRONT_TRANSPARENT)

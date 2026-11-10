@@ -43,6 +43,7 @@
 @implementation WineOpenGLContext
 @dynamic view;
 @synthesize latentView, needsUpdate, needsReattach;
+@synthesize backingSizeEnabled; /* WINESKIN */
 
     - (void) dealloc
     {
@@ -96,6 +97,9 @@
                 [super clearDrawable];
                 [super setView:save];
             });
+            /* WINESKIN: the next -wine_updateBackingSize: sets and enables the size again, whatever
+             * became of it with the drawable. */
+            backingSizeEnabled = NO;
 #pragma clang diagnostic pop
         }
     }
@@ -110,8 +114,10 @@
             if (size->width == 0 || size->height == 0)
                 return;
 
-            if (CGLIsEnabled(self.CGLContextObj, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError)
-                enabled = 0;
+            /* WINESKIN: see backingSizeEnabled. */
+            // if (CGLIsEnabled(self.CGLContextObj, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError)
+            //     enabled = 0;
+            enabled = backingSizeEnabled;
 
             if (!enabled || backing_size[0] != size->width || backing_size[1] != size->height)
             {
@@ -122,6 +128,7 @@
 
             if (!enabled)
                 CGLEnable(self.CGLContextObj, kCGLCESurfaceBackingSize);
+            backingSizeEnabled = YES; /* WINESKIN */
 
             [self resetSurfaceIfBackingSizeChanged];
         }
@@ -132,6 +139,7 @@
 
             if (CGLIsEnabled(self.CGLContextObj, kCGLCESurfaceBackingSize, &enabled) == kCGLNoError && enabled)
                CGLDisable(self.CGLContextObj, kCGLCESurfaceBackingSize);
+            backingSizeEnabled = NO; /* WINESKIN */
         }
     }
 
@@ -222,6 +230,16 @@ void macdrv_dispose_opengl_context(WineOpenGLContext *context)
     [context removeFromViews:YES];
     [context release];
 }
+}
+
+/***********************************************************************
+ *              macdrv_context_backing_size_disabled
+ *
+ * WINESKIN: the caller disabled kCGLCESurfaceBackingSize on the context.
+ */
+void macdrv_context_backing_size_disabled(WineOpenGLContext *c)
+{
+    c.backingSizeEnabled = NO;
 }
 
 /***********************************************************************

@@ -634,6 +634,7 @@ extern bool macdrv_set_pasteboard_data(CFStringRef type, CFDataRef data, WineWin
 /* opengl */
 extern WineOpenGLContext *macdrv_create_opengl_context(void* cglctx);
 extern void macdrv_dispose_opengl_context(WineOpenGLContext *context);
+extern void macdrv_context_backing_size_disabled(WineOpenGLContext *c); /* WINESKIN */
 extern void macdrv_make_context_current(WineOpenGLContext *context, WineContentView *view, CGRect r);
 extern void macdrv_update_opengl_context(WineOpenGLContext *context);
 extern void macdrv_flush_opengl_context(WineOpenGLContext *context);

@@ -81,6 +81,7 @@
 extern bool allow_vsync;
 extern bool allow_set_gamma;
 extern bool allow_software_rendering;
+extern bool multithreaded_opengl; /* WINESKIN */
 extern bool native_menu_bar; /* WINESKIN */
 extern UINT64 toolkit_menu_callback; /* WINESKIN */
 struct macdrv_thread_data; /* WINESKIN */
