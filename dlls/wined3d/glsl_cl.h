@@ -19,7 +19,11 @@
  * - buffer view: "__global uchar *cs_<t|u><i>_base", "uint8 cs_<t|u><i>_info";
  * - texture view: an image (two for an unordered access view the shader reads,
  *   "cs_u<i>" write-only and "cs_u<i>_r" read-only), and "uint8 cs_<t|u><i>_info";
- * - sampler i: "sampler_t cs_s<i>", and "uint cs_s<i>_cmp" for comparison samplers;
+ *   a shader resource view read at levels beyond the first has an image for
+ *   each further level n, "cs_t<i>_l<n>", after its information;
+ * - sampler i: "sampler_t cs_s<i>", "uint cs_s<i>_cmp" for comparison samplers,
+ *   and "float4 cs_s<i>_lod" (mip filter, minimum and maximum level of detail,
+ *   bias) for samplers that sample_l or sample_d use;
  * - unordered access view counter i: "__global uchar *cs_u<i>_counter".
  *
  * Buffer view information: s0 byte offset of the view, s1 its size in bytes,
@@ -1139,6 +1143,57 @@ static void shader_cl_append_offset(const struct wined3d_shader_instruction *ins
         shader_addline(ins->ctx->buffer, "%s.z += %d;\n", c, offset->w);
 }
 
+/* Whether the mip level of a load (its address's w) is an immediate 0. */
+static bool shader_cl_ld_level_zero(const struct wined3d_shader_src_param *src)
+{
+    unsigned int component = shader_glsl_swizzle_get_component(src->swizzle, 3);
+
+    if (src->reg.type != WINED3DSPR_IMMCONST)
+        return false;
+    return !src->reg.u.immconst_data[src->reg.immconst_type == WINED3D_IMMCONST_SCALAR ? 0 : component];
+}
+
+/* Marks texture view "idx" as read at levels beyond the first: the kernel
+ * then takes an image per level of it (WINED3D_CL_BINDING_SRV_LEVEL),
+ * "cs_t<idx>_l<n>" for level n > 0, and defines CS_T<idx>_LEVELS, the count
+ * of its level images. */
+static void shader_cl_use_levels(const struct wined3d_shader_instruction *ins, unsigned int idx)
+{
+    struct shader_glsl_ctx_priv *priv = shader_cl_priv(ins);
+
+    priv->cl_level_srvs[idx / 32] |= 1u << (idx % 32);
+}
+
+/* Assigns to the uint4 "dst" the bits read from the level, in the int
+ * variable "level" (within the view's levels), of texture view "idx" at the
+ * float4 coordinate variable "coord", with "sampler". */
+static void shader_cl_append_level_read(const struct wined3d_shader_instruction *ins, unsigned int idx,
+        enum wined3d_shader_resource_type type, uint8_t kind, const char *sampler,
+        const char *dst, const char *level, const char *coord)
+{
+    struct shader_glsl_ctx_priv *priv = shader_cl_priv(ins);
+    struct wined3d_string_buffer *buffer = ins->ctx->buffer;
+    struct wined3d_string_buffer *c = string_buffer_get(priv->string_buffers);
+    char image[32], info[32];
+    unsigned int i;
+
+    sprintf(info, "cs_t%u_info", idx);
+    shader_cl_append_image_coord(c, type, kind, coord, info, true);
+    shader_addline(buffer, "switch (%s)\n{\n", level);
+    for (i = 1; i < WINED3D_CL_MAX_LEVELS; ++i)
+    {
+        sprintf(image, "cs_t%u_l%u", idx, i);
+        shader_addline(buffer, "#if CS_T%u_LEVELS > %u\ncase %u: %s = ", idx, i, i, dst);
+        shader_cl_append_image_read(buffer, image, kind, sampler, c->buffer, NULL);
+        shader_addline(buffer, "; break;\n#endif\n");
+    }
+    sprintf(image, "cs_t%u", idx);
+    shader_addline(buffer, "default: %s = ", dst);
+    shader_cl_append_image_read(buffer, image, kind, sampler, c->buffer, NULL);
+    shader_addline(buffer, "; break;\n}\n");
+    string_buffer_release(priv->string_buffers, c);
+}
+
 static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
 {
     const struct wined3d_shader_reg_maps *reg_maps = ins->ctx->reg_maps;
@@ -1177,6 +1232,38 @@ static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
     {
         shader_cl_unsupported(ins, "a cube texture");
         shader_addline(buffer, "(uint4)(0u);\n");
+    }
+    else if (!is_multisampled(resource_type) && !shader_cl_ld_level_zero(&ins->src[0]))
+    {
+        unsigned int dim = WINED3D_CL_IMAGE_KIND_DIM(kind);
+        struct glsl_src_param lod;
+
+        /* A load at a mip level (srcAddress.w): the level's size bounds the
+         * coordinate and places the texel's centre; see below for why loads
+         * use normalised coordinates. */
+        shader_cl_use_levels(ins, resource_idx);
+        shader_glsl_add_src_param_ext(ins->ctx, &ins->src[0], WINED3DSP_WRITEMASK_3, &lod, WINED3D_DATA_INT);
+        shader_addline(buffer, "(uint4)(0u);\nint wl = %s;\n", lod.param_str);
+        shader_addline(buffer, "uint4 wls = max((uint4)(%s.s0, %s.s1, %s.s2, 1u) >> (uint4)(wl, %s, %s, 0), 1u);\n",
+                info, info, info, dim == WINED3D_CL_IMAGE_1D || dim == WINED3D_CL_IMAGE_1D_ARRAY ? "0" : "wl",
+                dim == WINED3D_CL_IMAGE_3D ? "wl" : "0");
+        shader_addline(buffer, "if ((uint)wl < min(%s.s3, (uint)CS_T%u_LEVELS) && (uint)wc.x < wls.x",
+                info, resource_idx);
+        if (resource_type == WINED3D_SHADER_RESOURCE_TEXTURE_1DARRAY)
+            shader_addline(buffer, " && (uint)wc.y < wls.z");
+        else if (coord_size >= 2)
+            shader_addline(buffer, " && (uint)wc.y < wls.y");
+        if (coord_size >= 3)
+            shader_addline(buffer, " && (uint)wc.z < wls.z");
+        shader_addline(buffer, ")\n{\nfloat4 wn = (float4)(((float)wc.x + 0.5f) / (float)wls.x, ");
+        if (dim == WINED3D_CL_IMAGE_1D || dim == WINED3D_CL_IMAGE_1D_ARRAY)
+            shader_addline(buffer, "(float)wc.y, 0.0f, 0.0f);\n");
+        else if (dim == WINED3D_CL_IMAGE_3D)
+            shader_addline(buffer, "((float)wc.y + 0.5f) / (float)wls.y, ((float)wc.z + 0.5f) / (float)wls.z, 0.0f);\n");
+        else
+            shader_addline(buffer, "((float)wc.y + 0.5f) / (float)wls.y, (float)wc.z, 0.0f);\n");
+        shader_cl_append_level_read(ins, resource_idx, resource_type, kind, "wsmp_ldn", "wv", "wl", "wn");
+        shader_addline(buffer, "}\n");
     }
     else
     {
@@ -1222,8 +1309,10 @@ static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
     shader_addline(buffer, "%s(wv)%s);\n}\n", shader_cl_bits_to(data_type), dst_swizzle);
 }
 
-/* sample, sample_b, sample_l, sample_d, sample_c and sample_c_lz read the
- * view's first level with the bound sampler; a comparison compares one texel. */
+/* sample_l and sample_d read the level their level of detail selects (two,
+ * blended, with a linear mip filter); sample, sample_b, sample_c and
+ * sample_c_lz read the view's first level with the bound sampler; a
+ * comparison compares one texel. */
 static void shader_cl_sample(const struct wined3d_shader_instruction *ins)
 {
     const struct wined3d_shader_reg_maps *reg_maps = ins->ctx->reg_maps;
@@ -1262,22 +1351,74 @@ static void shader_cl_sample(const struct wined3d_shader_instruction *ins)
 
     shader_addline(buffer, "{\n");
     shader_cl_declare_coord(ins, &ins->src[0], coord_size, "wf", true);
+    /* "wo": the texel offset, in level 0's normalised units. */
+    shader_addline(buffer, "float4 wo = (float4)(0.0f);\n");
     if (wined3d_shader_instruction_has_texel_offset(ins))
     {
         const struct wined3d_shader_texel_offset *offset = &ins->texel_offset;
 
-        shader_addline(buffer, "wf.x += %d.0f / (float)%s.s0;\n", offset->u, info);
+        shader_addline(buffer, "wo.x = %d.0f / (float)%s.s0;\n", offset->u, info);
         if (deriv_size >= 2)
-            shader_addline(buffer, "wf.y += %d.0f / (float)%s.s1;\n", offset->v, info);
+            shader_addline(buffer, "wo.y = %d.0f / (float)%s.s1;\n", offset->v, info);
         if (deriv_size >= 3)
-            shader_addline(buffer, "wf.z += %d.0f / (float)%s.s2;\n", offset->w, info);
+            shader_addline(buffer, "wo.z = %d.0f / (float)%s.s2;\n", offset->w, info);
+        shader_addline(buffer, "wf += wo;\n");
     }
-    c = string_buffer_get(priv->string_buffers);
-    shader_cl_append_image_coord(c, resource_type, kind, "wf", info, true);
-    shader_addline(buffer, "uint4 wv = ");
-    shader_cl_append_image_read(buffer, name, kind, sampler, c->buffer, NULL);
-    shader_addline(buffer, ";\n");
-    string_buffer_release(priv->string_buffers, c);
+    if (!compare && sampler_idx < 32 && (ins->handler_idx == WINED3DSIH_SAMPLE_LOD
+            || ins->handler_idx == WINED3DSIH_SAMPLE_GRAD))
+    {
+        unsigned int channel = WINED3D_CL_IMAGE_KIND_CHANNEL(kind);
+        bool blend = channel == WINED3D_CL_CHANNEL_FLOAT || channel == WINED3D_CL_CHANNEL_DEPTH;
+
+        shader_cl_use_levels(ins, resource_idx);
+        priv->cl_lod_samplers |= 1u << sampler_idx;
+        if (ins->handler_idx == WINED3DSIH_SAMPLE_LOD)
+        {
+            struct glsl_src_param lod;
+
+            shader_glsl_add_src_param_ext(ins->ctx, &ins->src[3], WINED3DSP_WRITEMASK_0, &lod, WINED3D_DATA_FLOAT);
+            shader_addline(buffer, "float wlod = %s;\n", lod.param_str);
+        }
+        else
+        {
+            /* The level of detail of the gradients' larger footprint, in
+             * level 0's texels. */
+            shader_cl_declare_coord(ins, &ins->src[3], deriv_size, "wdx", true);
+            shader_cl_declare_coord(ins, &ins->src[4], deriv_size, "wdy", true);
+            shader_addline(buffer, "float4 wsz = (float4)((float)%s.s0, (float)%s.s1, (float)%s.s2, 0.0f);\n",
+                    info, info, info);
+            shader_addline(buffer, "float wlod = log2(fmax(length(wdx * wsz), length(wdy * wsz)));\n");
+        }
+        /* cs_s<i>_lod: the sampler's mip filter (1.0 linear), minimum and
+         * maximum level of detail, and bias. */
+        shader_addline(buffer, "int wlc = min((int)%s.s3, CS_T%u_LEVELS) - 1;\n", info, resource_idx);
+        shader_addline(buffer, "wlod = fmin(fmax(wlod + cs_s%u_lod.w, fmax(cs_s%u_lod.y, 0.0f)), "
+                "fmin(cs_s%u_lod.z, (float)wlc));\n", sampler_idx, sampler_idx, sampler_idx);
+        shader_addline(buffer, "wlod = fmax(wlod, 0.0f);\n");
+        if (blend)
+            shader_addline(buffer, "int wl = cs_s%u_lod.x != 0.0f ? (int)wlod : (int)(wlod + 0.5f);\n"
+                    "float wt = cs_s%u_lod.x != 0.0f ? wlod - (float)wl : 0.0f;\n", sampler_idx, sampler_idx);
+        else
+            shader_addline(buffer, "int wl = (int)(wlod + 0.5f);\nfloat wt = 0.0f;\n");
+        shader_addline(buffer, "float4 wfl = wf + wo * (float)((1 << wl) - 1);\nuint4 wv;\n");
+        shader_cl_append_level_read(ins, resource_idx, resource_type, kind, sampler, "wv", "wl", "wfl");
+        if (blend)
+        {
+            shader_addline(buffer, "if (wt > 0.0f)\n{\nuint4 wb;\nwl = min(wl + 1, wlc);\n"
+                    "wfl = wf + wo * (float)((1 << wl) - 1);\n");
+            shader_cl_append_level_read(ins, resource_idx, resource_type, kind, sampler, "wb", "wl", "wfl");
+            shader_addline(buffer, "wv = as_uint4(mix(as_float4(wv), as_float4(wb), wt));\n}\n");
+        }
+    }
+    else
+    {
+        c = string_buffer_get(priv->string_buffers);
+        shader_cl_append_image_coord(c, resource_type, kind, "wf", info, true);
+        shader_addline(buffer, "uint4 wv = ");
+        shader_cl_append_image_read(buffer, name, kind, sampler, c->buffer, NULL);
+        shader_addline(buffer, ";\n");
+        string_buffer_release(priv->string_buffers, c);
+    }
 
     if (compare)
     {
@@ -1498,7 +1639,8 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
     const struct wined3d_shader_indexable_temp *idx_temp_reg;
     uint32_t samplers = 0, compare_samplers = 0;
     struct shader_glsl_ctx_priv priv_ctx;
-    unsigned int i, count = 0;
+    unsigned int i, j, count = 0, read_images = 0, level_views = 0, levels = 1;
+    struct wined3d_string_buffer body;
     bool first = true;
 
     string_buffer_clear(buffer);
@@ -1526,12 +1668,47 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
             compare_samplers |= 1u << idx;
     }
 
-    /* Bindings: at most two per constant buffer, three per resource view,
-     * four per unordered access view, two per sampler. */
-    kernel->binding_count = 0;
-    count = 2 * WINED3D_MAX_CBS + 2 * MAX_SHADER_RESOURCE_VIEWS + 4 * MAX_UNORDERED_ACCESS_VIEWS + 2 * 32;
-    if (!(kernel->bindings = calloc(count, sizeof(*kernel->bindings))))
+    /* The body first: which views it reads at levels beyond the first
+     * decides the arguments. */
+    if (!string_buffer_init(&body))
         return false;
+    if (FAILED(shader_generate_code(shader, &body, reg_maps, &priv_ctx, NULL, NULL)) || priv_ctx.cl_failed)
+    {
+        string_buffer_free(&body);
+        return false;
+    }
+    /* Read-only image arguments: OpenCL guarantees 128. Each view read at
+     * levels gets an equal share of what the other images leave. */
+    for (i = 0; i < ARRAY_SIZE(reg_maps->resource_info); ++i)
+    {
+        if (reg_maps->resource_info[i].type <= WINED3D_SHADER_RESOURCE_BUFFER)
+            continue;
+        ++read_images;
+        if (priv_ctx.cl_level_srvs[i / 32] & (1u << (i % 32)))
+            ++level_views;
+    }
+    for (i = 0; i < ARRAY_SIZE(reg_maps->uav_resource_info); ++i)
+    {
+        if (reg_maps->uav_resource_info[i].type > WINED3D_SHADER_RESOURCE_BUFFER
+                && (reg_maps->uav_read_mask & (1u << i)))
+            ++read_images;
+    }
+    if (level_views)
+        levels = min(WINED3D_CL_MAX_LEVELS, 1 + (read_images < 128 ? 128 - read_images : 0) / level_views);
+    if (level_views && levels < WINED3D_CL_MAX_LEVELS)
+        FIXME_(d3d_cl)("Compute shader %p: %u views read at %u levels at most.\n", shader, level_views, levels);
+
+    /* Bindings: at most two per constant buffer, three per resource view and
+     * one per further level, four per unordered access view, three per
+     * sampler. */
+    kernel->binding_count = 0;
+    count = 2 * WINED3D_MAX_CBS + 2 * MAX_SHADER_RESOURCE_VIEWS + level_views * (levels - 1)
+            + 4 * MAX_UNORDERED_ACCESS_VIEWS + 3 * 32;
+    if (!(kernel->bindings = calloc(count, sizeof(*kernel->bindings))))
+    {
+        string_buffer_free(&body);
+        return false;
+    }
 
     shader_cl_append_prelude(buffer);
     shader_addline(buffer, "%s", shader_cl_prelude_formats);
@@ -1551,6 +1728,11 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
         shader_addline(buffer, "};\n");
     }
 
+    for (i = 0; i < ARRAY_SIZE(reg_maps->resource_info); ++i)
+    {
+        if (priv_ctx.cl_level_srvs[i / 32] & (1u << (i % 32)))
+            shader_addline(buffer, "#define CS_T%u_LEVELS %u\n", i, levels);
+    }
     shader_addline(buffer, "__kernel __attribute__((reqd_work_group_size(%u, %u, %u)))\nvoid wined3d_cs(",
             group_size->x, group_size->y, group_size->z);
 
@@ -1582,6 +1764,15 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
         shader_cl_add_binding(kernel, WINED3D_CL_BINDING_SRV, i);
         CL_ARG("uint8 cs_t%u_info", i);
         shader_cl_add_binding(kernel, WINED3D_CL_BINDING_SRV_INFO, i);
+        if (type > WINED3D_SHADER_RESOURCE_BUFFER && (priv_ctx.cl_level_srvs[i / 32] & (1u << (i % 32))))
+        {
+            for (j = 1; j < levels; ++j)
+            {
+                CL_ARG("read_only %s cs_t%u_l%u", shader_cl_image_type(key->srv[i]), i, j);
+                shader_cl_add_binding(kernel, WINED3D_CL_BINDING_SRV_LEVEL, i);
+                kernel->bindings[kernel->binding_count - 1].level = j;
+            }
+        }
     }
 
     for (i = 0; i < 32; ++i)
@@ -1594,6 +1785,11 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
         {
             CL_ARG("uint cs_s%u_cmp", i);
             shader_cl_add_binding(kernel, WINED3D_CL_BINDING_SAMPLER_CMP, i);
+        }
+        if (priv_ctx.cl_lod_samplers & (1u << i))
+        {
+            CL_ARG("float4 cs_s%u_lod", i);
+            shader_cl_add_binding(kernel, WINED3D_CL_BINDING_SAMPLER_LOD, i);
         }
     }
 
@@ -1677,9 +1873,8 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
     }
     shader_addline(buffer, "float4 tmp0 = 0.0f, tmp1 = 0.0f, tmp_precise[2];\n");
 
-    if (FAILED(shader_generate_code(shader, buffer, reg_maps, &priv_ctx, NULL, NULL)) || priv_ctx.cl_failed)
-        return false;
-    shader_addline(buffer, "}\n");
+    shader_addline(buffer, "%s}\n", body.buffer);
+    string_buffer_free(&body);
     return true;
 }
 

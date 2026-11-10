@@ -287,6 +287,10 @@ struct shader_glsl_ctx_priv
      * the shader has no OpenCL translation. */
     const struct wined3d_cl_kernel_key *cl_key;
     bool cl_failed;
+    /* WINESKIN: the texture views and samplers the kernel reads at levels
+     * beyond the first (glsl_cl.h shader_cl_append_level_read()). */
+    uint32_t cl_level_srvs[MAX_SHADER_RESOURCE_VIEWS / 32];
+    uint32_t cl_lod_samplers;
 };
 
 struct glsl_context_data

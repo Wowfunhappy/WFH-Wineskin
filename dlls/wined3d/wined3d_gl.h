@@ -1403,12 +1403,20 @@ enum wined3d_cl_binding_type
     WINED3D_CL_BINDING_UAV_READ,
     WINED3D_CL_BINDING_UAV_INFO,
     WINED3D_CL_BINDING_UAV_COUNTER,
+    WINED3D_CL_BINDING_SRV_LEVEL,
+    WINED3D_CL_BINDING_SAMPLER_LOD,
 };
+
+/* OpenCL 1.2 images have one level: a texture view that a kernel samples
+ * with a level of detail, or loads from at a mip level, reaches it as one
+ * image per level, at most WINED3D_CL_MAX_LEVELS of them. */
+#define WINED3D_CL_MAX_LEVELS 12
 
 struct wined3d_cl_binding
 {
     uint8_t type;
     uint8_t slot;
+    uint8_t level; /* WINED3D_CL_BINDING_SRV_LEVEL: the view's level */
 };
 
 struct wined3d_cl_kernel

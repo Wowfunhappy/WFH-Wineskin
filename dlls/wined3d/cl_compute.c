@@ -1526,6 +1526,54 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
                 break;
             }
 
+            case WINED3D_CL_BINDING_SRV_LEVEL:
+            {
+                struct wined3d_shader_resource_view *view = state->shader_resource_view[WINED3D_SHADER_TYPE_COMPUTE][slot];
+                struct cl_texture_view level_image;
+                struct wined3d_view_desc desc;
+
+                /* A further level of the view, as an image of its own; a
+                 * level the view lacks is a null image the kernel never reads. */
+                if (view && srv_images[slot].name && srv_images[slot].kind == key.srv[slot]
+                        && binding->level < view->desc.u.texture.level_count)
+                {
+                    desc = view->desc;
+                    desc.u.texture.level_idx += binding->level;
+                    desc.u.texture.level_count = 1;
+                    if (cl_get_texture_view(context_gl, view->resource, &desc, false, &level_image)
+                            && level_image.kind == key.srv[slot])
+                    {
+                        if (level_image.shadow)
+                            cl_shadow_copy(context_gl, level_image.shadow, level_image.texture_gl, true);
+                        arg->type = WINED3D_CL_ARG_GL_TEXTURE;
+                        arg->gl_name = level_image.name;
+                        arg->gl_target = level_image.target;
+                        arg->level = level_image.level;
+                        break;
+                    }
+                }
+                arg->type = WINED3D_CL_ARG_NULL_IMAGE;
+                arg->image_type = WINED3D_CL_IMAGE_KIND_DIM(key.srv[slot]);
+                arg->channel = WINED3D_CL_IMAGE_KIND_CHANNEL(key.srv[slot]);
+                break;
+            }
+
+            case WINED3D_CL_BINDING_SAMPLER_LOD:
+            {
+                const struct wined3d_sampler *sampler = state->sampler[WINED3D_SHADER_TYPE_COMPUTE][slot];
+                float lod[4] = {0.0f, 0.0f, FLT_MAX, 0.0f};
+
+                if (sampler)
+                {
+                    lod[0] = sampler->desc.mip_filter == WINED3D_TEXF_LINEAR ? 1.0f : 0.0f;
+                    lod[1] = sampler->desc.min_lod;
+                    lod[2] = sampler->desc.max_lod;
+                    lod[3] = sampler->desc.lod_bias;
+                }
+                cl_arg_value(arg, lod, sizeof(lod));
+                break;
+            }
+
             case WINED3D_CL_BINDING_SAMPLER_CMP:
             {
                 const struct wined3d_sampler *sampler = state->sampler[WINED3D_SHADER_TYPE_COMPUTE][slot];

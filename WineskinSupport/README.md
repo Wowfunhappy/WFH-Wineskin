@@ -251,6 +251,11 @@ in place.
 - Kernel arguments: constant buffers and buffer views are OpenGL buffers, or copies of them (below), with
   a byte offset (typed buffer views decode their format in the kernel); texture views are images of the view's first level, with
   out-of-bounds reads returning 0 and writes dropped; samplers take the view's address mode and filter.
+  OpenCL 1.2 images have one level: a view the kernel reads with `sample_l`, `sample_d` or `ld` at a mip
+  level gets one image per level (at most 12), the kernel picks the level from the level of detail
+  (clamped by the sampler's minimum and maximum, plus its bias) and, with a linear mip filter, blends the
+  two nearest levels itself (`shader_cl_append_level_read` in `glsl_cl.h`; checked by
+  `~/WineskinTests/d3d11tools/probe/csmip.c`).
   A texture UAV the shader reads is bound twice, as a write-only and a read-only image.
 - Wine's opengl32 gives each group of contexts that share objects (a wined3d device) object names of its
   own and keeps every context of the process in one share group of the Mac's OpenGL
@@ -278,9 +283,9 @@ in place.
   (`wined3d_cl_release_device`); the OpenCL context goes with the last device, since an OpenCL context
   must never outlive its share group.
 - Uncompressed, non-sRGB color formats report unordered access support.
-- OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
-  view's first level only; cube textures are read one face at a time; subroutines (`call`) don't
-  translate, and the shader's dispatches then do nothing.
+- OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. `sample`, `sample_b`
+  and the comparison samples read the view's first level; cube textures are read one face at a time;
+  subroutines (`call`) don't translate, and the shader's dispatches then do nothing.
 - A memory object made with `clCreateFromGLBuffer` reads what the buffer holds when it is acquired, however
   the buffer was written since (`glBufferSubData`, `glBufferData`, an invalidating map), so it lives as long
   as the buffer (`get_gl_mem`; `~/WineskinTests/d3d11tools/probe/clrename.c`, and in Bit.Trip Rerunner
