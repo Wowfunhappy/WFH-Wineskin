@@ -119,6 +119,15 @@ without a layer, a window-server surface over the view. The same file finishes `
 dealloc]` as an `NSOpenGLContext`, since 10.9's dealloc messages `-clearDrawable` to the half-freed
 subclass.
 
+A program can draw with OpenGL, and so with Direct3D, into a child window whose top-level window
+belongs to another process, as a launcher that runs its game in a window of its own does (Rez
+Infinite). The drawing process has no Cocoa view of that window, so winemac gives the context an
+off-screen window as its drawable and, at each buffer swap, copies the back buffer into one of three
+IOSurfaces shown by a layer of a `CAContext`; the process that owns the top-level window hosts that
+context at the child's place in its content view (a `CALayerHost`), once a `WM_MACDRV_CREATE_REMOTE_LAYER`
+message reaches it (`winemac.drv/remote_gl.c`, `cocoa_remote_gl.m`). Frames go from the drawing process
+to the window server directly.
+
 winemac probes OpenGL with accelerated renderers only, as upstream does. A Mac with no accelerated
 renderer, such as a virtual machine, falls back to the software renderer automatically
 (`opengl.c: has_accelerated_renderer`), so no machine-specific setting lives in a wrapper's prefix.
@@ -584,6 +593,21 @@ limit on every wait.
   "MS Shell Dlg 2", and dialog templates size their controls from it. Its TaskDialog panels are the plain
   window background of a Mac alert; Qt's Windows style paints message boxes and input dialogs with them,
   and a theme without them leaves those dialogs black.
+- **Message boxes.** `MessageBox` lays its dialog out as OS X 10.9 lays out an alert (`user32/msgbox_aqua.c`):
+  a 64-pixel icon at the left (the alert type's, a `MessageBoxIndirect` custom icon, or the program's own;
+  a program's icon at its own size, never scaled up),
+  the text's first paragraph in bold 13-point type and the rest in 11-point type, the default button
+  rightmost with Cancel or No to its left and any other buttons at the left, and no title or close button
+  in the title bar (`__wine_mac_untitled`, honoured by winemac; the window text is still the caption). It
+  stays a Win32 dialog: its controls, IDs, hooks, keyboard handling and Help button are Windows'. It runs
+  in an activation context that asks for comctl32 6 (`msgbox_aqua.manifest`), so its buttons are the themed
+  ones, the default one blue, in any program.
+- **Alert icons.** Windows' stock alert icons (`IDI_HAND`/`IDI_ERROR`, `IDI_EXCLAMATION`/`IDI_WARNING`,
+  `IDI_ASTERISK`/`IDI_INFORMATION`, `IDI_QUESTION`) are the Mac's stop, caution and note icons wherever
+  user32 loads them (`LoadIcon`, `LoadImage`, message boxes, task dialogs): user32 asks winemac.drv's
+  `wineskin_system_icon()` (`include/wine/wineskin_system_icon.h`, `winemac.drv/cocoa_system_icon.m`) to draw
+  the system's own icns from CoreTypes.bundle at the size it loads, so they are sharp at any size. OS X has
+  no question icon; `IDI_QUESTION` is the note icon.
 - **Text smoothing.** The wrapper sets the prefix's Windows text smoothing to match the Mac's: ClearType
   (subpixel) when the Mac uses LCD font smoothing, standard (grayscale) when "Use LCD font smoothing when
   available" is off. `MatchFontSmoothing` writes `HKCU\Control Panel\Desktop` only when the Mac's setting
@@ -633,11 +657,12 @@ in a Space of its own, as with the green button (`-[WineWindow wine_updateFullSc
 `HKCU\Software\Wine\Mac Driver\FullScreenSpace`, on unless set `n`):
 
 - It enters once it has covered the screen for 0.4 seconds, since engines resize and recreate their
-  windows while they start, and only while the app is active on that screen's Space. It leaves when
-  Windows makes it stop covering the screen (the game switches to windowed), when it is hidden, or when
-  it gains an owner window it moves with. A window the user takes out of its Space stays out until it
+  windows while they start, and only while the app is active on that screen's Space. It leaves once
+  Windows has made it stop covering the screen for 0.4 seconds (the game switches to windowed), and at
+  once when it is hidden or gains an owner window it moves with. A window the user takes out of its Space stays out until it
   stops covering the screen.
-- Its Win32 rect stays what the program set; frame changes Cocoa makes for the Space are not posted.
+- Its Win32 rect stays what the program set; frame changes Cocoa makes for the Space are not posted, and
+  the minimum and maximum sizes a program gives its window don't limit it there.
 - The menu bar and Dock stay hidden in the Space, even with the pointer at the top or bottom edge.
   Hot corners still act there.
 - The app's other windows, such as message boxes, appear on the game's Space above it.
