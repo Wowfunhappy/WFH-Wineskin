@@ -64,17 +64,21 @@ else
 	input_apps=$(osascript <<'APPLESCRIPT'
 tell application "System Events"
 	activate
-	set chosenFiles to choose file of type {"com.apple.application-bundle"} with multiple selections allowed with prompt "Select wrappers to update"
-	set posixPaths to ""
-	repeat with aFile in chosenFiles
-		set posixPaths to posixPaths & POSIX path of aFile & linefeed
-	end repeat
-	if posixPaths is not "" then
-		return text 1 thru -2 of posixPaths
-	else
-		return ""
-	end if
+	-- the dialog waits for the user as long as it takes, past the two-minute AppleScript reply timeout
+	with timeout of 86400 seconds
+		set chosenFiles to choose file of type {"com.apple.application-bundle"} with multiple selections allowed with prompt "Select wrappers to update"
+	end timeout
 end tell
+-- the paths are made outside System Events, whose connection can be gone once a long-open dialog closes (-609)
+set posixPaths to ""
+repeat with aFile in chosenFiles
+	set posixPaths to posixPaths & POSIX path of aFile & linefeed
+end repeat
+if posixPaths is not "" then
+	return text 1 thru -2 of posixPaths
+else
+	return ""
+end if
 APPLESCRIPT
 )
 	while IFS= read -r app
