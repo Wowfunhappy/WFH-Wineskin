@@ -38,6 +38,7 @@
 #include "wined3d_gl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
+WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
 #define FILTER_CAPS 32
 #define FILTER_UNITS 256
@@ -84,6 +85,8 @@ static struct
     void (WINAPI *glPolygonMode)(GLenum, GLenum);
     void (WINAPI *glColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     void (WINAPI *glColorMaski)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
+    void (WINAPI *glCompileShader)(GLuint);
+    void (WINAPI *glLinkProgram)(GLuint);
 } gl;
 
 static struct gl_filter *filters[FILTER_CONTEXTS];
@@ -548,17 +551,55 @@ static void WINAPI filter_glColorMaski(GLuint index, GLboolean r, GLboolean g, G
     gl.glColorMaski(index, r, g, b, a);
 }
 
+/* With the d3d_perf channel on, shader compiles and program links are timed: they are what makes a
+ * frame late the first time a game draws something. */
+
+static unsigned int elapsed_us(const LARGE_INTEGER *start)
+{
+    LARGE_INTEGER now, freq;
+
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    return (now.QuadPart - start->QuadPart) * 1000000 / freq.QuadPart;
+}
+
+static void WINAPI timed_glCompileShader(GLuint shader)
+{
+    LARGE_INTEGER start;
+
+    QueryPerformanceCounter(&start);
+    gl.glCompileShader(shader);
+    TRACE_(d3d_perf)("Compiled shader %u in %u us.\n", shader, elapsed_us(&start));
+}
+
+static void WINAPI timed_glLinkProgram(GLuint program)
+{
+    LARGE_INTEGER start;
+
+    QueryPerformanceCounter(&start);
+    gl.glLinkProgram(program);
+    TRACE_(d3d_perf)("Linked program %u in %u us.\n", program, elapsed_us(&start));
+}
+
 /* Replaces the entries of an adapter's OpenGL function table. A setter is
  * replaced only together with every function that changes its state. */
 void wined3d_gl_filter_install(struct wined3d_gl_info *gl_info)
 {
     struct wined3d_gl_funcs *ops = &gl_info->gl_ops;
 
-    if (!wined3d_settings.gl_state_filter)
-        return;
-
 #define SAVE(table, name) do { if (!gl.name) gl.name = (void *)ops->table.p_##name; } while (0)
 #define REPLACE(table, name) do { SAVE(table, name); ops->table.p_##name = (void *)filter_##name; } while (0)
+
+    if (TRACE_ON(d3d_perf) && ops->ext.p_glCompileShader && ops->ext.p_glLinkProgram)
+    {
+        SAVE(ext, glCompileShader);
+        SAVE(ext, glLinkProgram);
+        ops->ext.p_glCompileShader = (void *)timed_glCompileShader;
+        ops->ext.p_glLinkProgram = (void *)timed_glLinkProgram;
+    }
+
+    if (!wined3d_settings.gl_state_filter)
+        return;
 
     if (ops->gl.p_glEnable && ops->gl.p_glDisable)
     {

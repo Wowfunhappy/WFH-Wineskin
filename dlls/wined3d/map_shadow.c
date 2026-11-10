@@ -43,7 +43,7 @@
 
 #include "wined3d_private.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(d3d_perf);
+WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 
 /* A map's writes are not known, so an upload copies the buffer (DISCARD) or
  * the mapped range, which Direct3D 10+ makes the whole buffer: larger buffers,
