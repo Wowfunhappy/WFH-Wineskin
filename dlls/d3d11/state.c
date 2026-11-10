@@ -832,10 +832,17 @@ HRESULT d3d_depthstencil_state_create(struct d3d_device *device, const D3D11_DEP
 
     wined3d_desc.depth = desc->DepthEnable;
     wined3d_desc.depth_write = desc->DepthWriteMask;
+    /* WINESKIN: the comparison functions and stencil operations of a disabled
+     * test come from tmp_desc, where they have defined values: games leave
+     * them uninitialised (The Witness's DepthFunc), and wined3d sets them on
+     * OpenGL whether the test is on or not.
     wined3d_desc.depth_func = wined3d_cmp_func_from_d3d11(desc->DepthFunc);
+    (WINESKIN) */
+    wined3d_desc.depth_func = wined3d_cmp_func_from_d3d11(tmp_desc.DepthFunc); /* WINESKIN */
     wined3d_desc.stencil = desc->StencilEnable;
     wined3d_desc.stencil_read_mask = desc->StencilReadMask;
     wined3d_desc.stencil_write_mask = desc->StencilWriteMask;
+    /* WINESKIN: see depth_func above.
     wined3d_desc.front.fail_op = wined3d_stencil_op_from_d3d11(desc->FrontFace.StencilFailOp);
     wined3d_desc.front.depth_fail_op = wined3d_stencil_op_from_d3d11(desc->FrontFace.StencilDepthFailOp);
     wined3d_desc.front.pass_op = wined3d_stencil_op_from_d3d11(desc->FrontFace.StencilPassOp);
@@ -844,6 +851,15 @@ HRESULT d3d_depthstencil_state_create(struct d3d_device *device, const D3D11_DEP
     wined3d_desc.back.depth_fail_op = wined3d_stencil_op_from_d3d11(desc->BackFace.StencilDepthFailOp);
     wined3d_desc.back.pass_op = wined3d_stencil_op_from_d3d11(desc->BackFace.StencilPassOp);
     wined3d_desc.back.func = wined3d_cmp_func_from_d3d11(desc->BackFace.StencilFunc);
+    (WINESKIN) */
+    wined3d_desc.front.fail_op = wined3d_stencil_op_from_d3d11(tmp_desc.FrontFace.StencilFailOp); /* WINESKIN */
+    wined3d_desc.front.depth_fail_op = wined3d_stencil_op_from_d3d11(tmp_desc.FrontFace.StencilDepthFailOp); /* WINESKIN */
+    wined3d_desc.front.pass_op = wined3d_stencil_op_from_d3d11(tmp_desc.FrontFace.StencilPassOp); /* WINESKIN */
+    wined3d_desc.front.func = wined3d_cmp_func_from_d3d11(tmp_desc.FrontFace.StencilFunc); /* WINESKIN */
+    wined3d_desc.back.fail_op = wined3d_stencil_op_from_d3d11(tmp_desc.BackFace.StencilFailOp); /* WINESKIN */
+    wined3d_desc.back.depth_fail_op = wined3d_stencil_op_from_d3d11(tmp_desc.BackFace.StencilDepthFailOp); /* WINESKIN */
+    wined3d_desc.back.pass_op = wined3d_stencil_op_from_d3d11(tmp_desc.BackFace.StencilPassOp); /* WINESKIN */
+    wined3d_desc.back.func = wined3d_cmp_func_from_d3d11(tmp_desc.BackFace.StencilFunc); /* WINESKIN */
 
     /* We cannot fail after creating a wined3d_depth_stencil_state object. It
      * would lead to double free. */
