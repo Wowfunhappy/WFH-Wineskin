@@ -115,10 +115,21 @@
             if (size->width == 0 || size->height == 0)
                 return;
 
-            /* WINESKIN: see backingSizeEnabled. */
-            // if (CGLIsEnabled(self.CGLContextObj, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError)
-            //     enabled = 0;
-            enabled = backingSizeEnabled;
+            /* WINESKIN: see backingSizeEnabled. Without the multithreaded engine the context is asked, as
+             * it costs nothing then and also sees what other code (a display mode change) did to the size. */
+            if (!mpEngineKnown)
+            {
+                GLint mp = 0;
+
+                if (CGLIsEnabled(self.CGLContextObj, kCGLCEMPEngine, &mp) != kCGLNoError)
+                    mp = 0;
+                mpEngine = mp != 0;
+                mpEngineKnown = YES;
+            }
+            if (mpEngine)
+                enabled = backingSizeEnabled;
+            else if (CGLIsEnabled(self.CGLContextObj, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError)
+                enabled = 0;
 
             if (!enabled || backing_size[0] != size->width || backing_size[1] != size->height)
             {
@@ -154,6 +165,8 @@
         });
         [newView retain];
         [oldView release];
+        /* WINESKIN: a new drawable may come without the backing size (see backingSizeEnabled). */
+        backingSizeEnabled = NO;
     }
 
     - (void) clearDrawable
@@ -353,6 +366,8 @@ void macdrv_update_opengl_context(WineOpenGLContext *context)
             else OnMainThread(^{
                 [context update];
             });
+            /* WINESKIN: an update may leave the drawable without the backing size (see backingSizeEnabled). */
+            context.backingSizeEnabled = NO;
             [context resetSurfaceIfBackingSizeChanged];
         }
     }
