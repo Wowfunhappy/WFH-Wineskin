@@ -343,6 +343,27 @@ static const char shader_cl_prelude_formats[] =
     "    if (fmt & 0x80u) { raw = c[0]; c[0] = c[2]; c[2] = raw; }\n"
     "    return (uint4)(c[0], c[1], c[2], c[3]);\n"
     "}\n"
+    /* Views of 32-bit formats, which the kernel is built for (WINED3D_CL_BUFFER_KEY_32). */
+    "uint4 W wr32_ld(__global const uint *p, uint n, uint idx, uint count, uint one)\n"
+    "{\n"
+    "    uint4 r = (uint4)(0u, 0u, 0u, one);\n"
+    "    if (idx >= n) return (uint4)(0u);\n"
+    "    p += idx * count;\n"
+    "    r.x = p[0];\n"
+    "    if (count > 1u) r.y = p[1];\n"
+    "    if (count > 2u) r.z = p[2];\n"
+    "    if (count > 3u) r.w = p[3];\n"
+    "    return r;\n"
+    "}\n"
+    "void W wr32_st(__global uint *p, uint n, uint idx, uint count, uint4 v)\n"
+    "{\n"
+    "    if (idx >= n) return;\n"
+    "    p += idx * count;\n"
+    "    p[0] = v.x;\n"
+    "    if (count > 1u) p[1] = v.y;\n"
+    "    if (count > 2u) p[2] = v.z;\n"
+    "    if (count > 3u) p[3] = v.w;\n"
+    "}\n"
     "void W wfmt_st(__global uchar *p, uint8 info, uint idx, uint4 v)\n"
     "{\n"
     "    uint fmt = info.s3, count = (fmt & 3u) + 1u, size = (fmt >> 2) & 3u, kind = (fmt >> 4) & 7u;\n"
@@ -530,6 +551,32 @@ static void shader_cl_append_image_write(struct wined3d_string_buffer *buffer, c
     }
 }
 
+/* Loads or stores element "idx" of a typed buffer view: with the view's
+ * format at run time, or as words when the kernel is built for a view of a
+ * 32-bit format ("key", WINED3D_CL_BUFFER_KEY_32). */
+static void shader_cl_append_typed_buffer_access(struct wined3d_string_buffer *buffer, const char *name,
+        uint8_t key, const char *idx, const char *value)
+{
+    if (key & WINED3D_CL_BUFFER_KEY_32)
+    {
+        unsigned int count = (key & WINED3D_CL_BUFFER_KEY_COUNT_MASK) + 1;
+
+        if (value)
+            shader_addline(buffer, "wr32_st(%s, %s_info.s2, %s, %uu, %s);\n", name, name, idx, count, value);
+        else
+            shader_addline(buffer, "wr32_ld(%s, %s_info.s2, %s, %uu, %s);\n", name, name, idx, count,
+                    (key & WINED3D_CL_BUFFER_KEY_FLOAT) ? "0x3f800000u" : "1u");
+    }
+    else if (value)
+    {
+        shader_addline(buffer, "wfmt_st(%s_base, %s_info, %s, %s);\n", name, name, idx, value);
+    }
+    else
+    {
+        shader_addline(buffer, "wfmt_ld(%s_base, %s_info, %s);\n", name, name, idx);
+    }
+}
+
 /* An int4 or float4 named "name" from the source's first "size" components. */
 static void shader_cl_declare_coord(const struct wined3d_shader_instruction *ins,
         const struct wined3d_shader_src_param *src, unsigned int size, const char *name, bool is_float)
@@ -696,7 +743,7 @@ static void shader_cl_ld_uav(const struct wined3d_shader_instruction *ins)
     shader_addline(buffer, "uint4 wv = ");
     if (resource_type == WINED3D_SHADER_RESOURCE_BUFFER)
     {
-        shader_addline(buffer, "wfmt_ld(%s_base, %s, wc.x);\n", name, info);
+        shader_cl_append_typed_buffer_access(buffer, name, kind, "wc.x", NULL);
     }
     else
     {
@@ -743,7 +790,7 @@ static void shader_cl_store_uav(const struct wined3d_shader_instruction *ins)
     shader_addline(buffer, "uint4 wv = as_uint4(%s);\n", data.param_str);
     if (resource_type == WINED3D_SHADER_RESOURCE_BUFFER)
     {
-        shader_addline(buffer, "wfmt_st(%s_base, %s, wc.x, wv);\n", name, info);
+        shader_cl_append_typed_buffer_access(buffer, name, priv->cl_key->uav[uav_idx], "wc.x", "wv");
     }
     else
     {
@@ -1113,7 +1160,7 @@ static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
     shader_addline(buffer, "uint4 wv = ");
     if (resource_type == WINED3D_SHADER_RESOURCE_BUFFER)
     {
-        shader_addline(buffer, "wfmt_ld(%s_base, %s, wc.x);\n", name, info);
+        shader_cl_append_typed_buffer_access(buffer, name, kind, "wc.x", NULL);
     }
     else if (resource_type == WINED3D_SHADER_RESOURCE_TEXTURE_CUBE
             || resource_type == WINED3D_SHADER_RESOURCE_TEXTURE_CUBEARRAY)
@@ -1428,6 +1475,8 @@ static bool shader_glsl_generate_cl_kernel(const struct wined3d_context_gl *cont
     bool first = true;
 
     string_buffer_clear(buffer);
+    /* The same in every run: the driver caches builds by their source. */
+    shader_addline(buffer, "/* compute shader %08x */\n", wined3d_shader_byte_code_hash(shader));
     memset(&priv_ctx, 0, sizeof(priv_ctx));
     priv_ctx.gl_info = context_gl->gl_info;
     priv_ctx.string_buffers = &priv->string_buffers;

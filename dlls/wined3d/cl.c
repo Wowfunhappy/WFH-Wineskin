@@ -314,31 +314,32 @@ static NTSTATUS cl_build(void *args)
     }
 
     err = clBuildProgram(program, 1, &ctx->device, options, NULL, NULL);
+    {
+        /* WINESKIN_CL_DUMP names a directory that receives the source of
+         * every kernel; the first line of a compute shader's kernel
+         * names the shader. */
+        const char *dir = getenv("WINESKIN_CL_DUMP");
+        static unsigned int count;
+        char path[1024];
+        FILE *f;
+
+        if (dir && strlen(dir) < sizeof(path) - 40)
+        {
+            snprintf(path, sizeof(path), "%s/kernel-%u%s.cl", dir, count++, err ? "-failed" : "");
+            if ((f = fopen(path, "w")))
+            {
+                fputs(source, f);
+                fclose(f);
+            }
+        }
+    }
     if (!clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size)
             && log_size > 1 && (log = malloc(log_size + 1)))
     {
         clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         log[log_size] = 0;
         if (err)
-        {
-            /* WINESKIN_CL_DUMP names a directory that receives the source of
-             * kernels that fail to build. */
-            const char *dir = getenv("WINESKIN_CL_DUMP");
-            static unsigned int failed;
-            char path[1024];
-            FILE *f;
-
             ERR("Failed to build an OpenCL kernel, error %d:\n", err);
-            if (dir && strlen(dir) < sizeof(path) - 32)
-            {
-                snprintf(path, sizeof(path), "%s/kernel-%u.cl", dir, failed++);
-                if ((f = fopen(path, "w")))
-                {
-                    fputs(source, f);
-                    fclose(f);
-                }
-            }
-        }
         if (err || TRACE_ON(d3d_cl))
         {
             char *line = log, *end;
@@ -422,17 +423,33 @@ static UINT32 mem_type(const struct wined3d_cl_arg *arg)
     return arg->type == WINED3D_CL_ARG_GL_BUFFER ? WINED3D_CL_OBJECT_BUFFER : WINED3D_CL_OBJECT_TEXTURE;
 }
 
-/* The memory object of a registered OpenGL object, or NULL. */
+/* The memory object of a registered OpenGL object, or NULL.
+ *
+ * A buffer's "level" is wined3d's count of the writes OpenGL made to it
+ * (wined3d_bo.content_serial). The driver gives a buffer a new data store
+ * when it is written while commands that use it are queued, or mapped with
+ * its contents discarded, and a memory object keeps reading the store it was
+ * created on: kernels then saw the constants of some earlier dispatch. A
+ * buffer written since its memory object was made gets a new one. */
 static cl_mem get_gl_mem(struct cl_device_context *ctx, UINT64 group, const struct wined3d_cl_arg *arg)
 {
     UINT32 type = mem_type(arg);
-    struct cl_mem_entry *entry;
+    struct cl_mem_entry *entry, **prev;
 
-    for (entry = ctx->mems[mem_hash(arg->gl_name) % CL_MEM_HASH_SIZE]; entry; entry = entry->next)
+    for (prev = &ctx->mems[mem_hash(arg->gl_name) % CL_MEM_HASH_SIZE]; (entry = *prev); prev = &entry->next)
     {
-        if (entry->group == group && entry->type == type && entry->name == arg->gl_name
-                && (type == WINED3D_CL_OBJECT_BUFFER
-                || (entry->target == arg->gl_target && entry->level == arg->level)))
+        if (entry->group != group || entry->type != type || entry->name != arg->gl_name)
+            continue;
+        if (type == WINED3D_CL_OBJECT_BUFFER)
+        {
+            if (entry->level == arg->level)
+                return entry->mem;
+            clReleaseMemObject(entry->mem);
+            *prev = entry->next;
+            free(entry);
+            return NULL;
+        }
+        if (entry->target == arg->gl_target && entry->level == arg->level)
             return entry->mem;
     }
     return NULL;

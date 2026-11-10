@@ -149,6 +149,30 @@ static uint32_t cl_buffer_format(const struct wined3d_format *format)
     return code;
 }
 
+/* The kernel key of a typed buffer view; see struct wined3d_cl_kernel_key. */
+static uint8_t cl_buffer_key(const struct wined3d_shader_resource_info *info, const struct wined3d_view_desc *desc,
+        const struct wined3d_format *format)
+{
+    uint32_t code;
+
+    if (info->type != WINED3D_SHADER_RESOURCE_BUFFER || info->stride || (info->flags & WINED3D_VIEW_BUFFER_RAW)
+            || desc->format_id == WINED3DFMT_UNKNOWN)
+        return 0;
+    code = cl_buffer_format(format);
+    if ((code & (3u << 2)) != WINED3D_CL_FORMAT_32 || (code & WINED3D_CL_FORMAT_BGRA))
+        return 0;
+    switch (code & (7u << 4))
+    {
+        case WINED3D_CL_FORMAT_FLOAT:
+            return WINED3D_CL_BUFFER_KEY_32 | WINED3D_CL_BUFFER_KEY_FLOAT | (code & 3u);
+        case WINED3D_CL_FORMAT_UINT:
+        case WINED3D_CL_FORMAT_SINT:
+            return WINED3D_CL_BUFFER_KEY_32 | (code & 3u);
+        default:
+            return 0;
+    }
+}
+
 /* The information argument of a buffer view (glsl_cl.h). */
 static void cl_buffer_view_info(const struct wined3d_buffer *buffer, const struct wined3d_view_desc *desc,
         const struct wined3d_format *format, uint32_t *data)
@@ -410,6 +434,27 @@ static struct cl_shadow *cl_get_shadow(struct wined3d_context_gl *context_gl, st
     list_add_head(&cl_shadows, &shadow->entry);
     LeaveCriticalSection(&cl_shadows_cs);
     return shadow;
+}
+
+/* The shadow texture of a texture level, or 0, for the frame capture (frame_dump_gl.c). */
+GLuint wined3d_cl_get_shadow_name(const struct wined3d_device *device, GLuint source, unsigned int level,
+        GLenum *target)
+{
+    struct cl_shadow *shadow;
+    GLuint name = 0;
+
+    EnterCriticalSection(&cl_shadows_cs);
+    LIST_FOR_EACH_ENTRY(shadow, &cl_shadows, struct cl_shadow, entry)
+    {
+        if (shadow->device == device && shadow->source == source && shadow->level == level)
+        {
+            name = shadow->name;
+            *target = shadow->target;
+            break;
+        }
+    }
+    LeaveCriticalSection(&cl_shadows_cs);
+    return name;
 }
 
 /* Copies one layer by drawing; see wined3d_context_gl_copy_texels(). */
@@ -760,6 +805,8 @@ static void cl_arg_gl_buffer(struct wined3d_cl_arg *arg, struct wined3d_bo_gl *b
 {
     arg->type = WINED3D_CL_ARG_GL_BUFFER;
     arg->gl_name = bo_gl->id;
+    /* See get_gl_mem() in cl.c. */
+    arg->level = bo_gl->b.content_serial;
 }
 
 static void cl_arg_value(struct wined3d_cl_arg *arg, const void *data, unsigned int size)
@@ -856,6 +903,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
             buffer = buffer_from_resource(view->resource);
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_context_gl_reference_buffer(context_gl, buffer);
+            key.srv[i] = cl_buffer_key(&reg_maps->resource_info[i], &view->desc, view->format);
         }
         else
         {
@@ -881,6 +929,7 @@ bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const st
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_BUFFER);
             wined3d_context_gl_reference_buffer(context_gl, buffer);
+            key.uav[i] = cl_buffer_key(&reg_maps->uav_resource_info[i], &view->desc, view->format);
         }
         else
         {

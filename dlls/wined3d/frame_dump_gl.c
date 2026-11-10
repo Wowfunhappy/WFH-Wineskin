@@ -2,15 +2,19 @@
  * WINESKIN: a frame capture for debugging rendering on the OpenGL backend.
  *
  * With WINESKIN_D3D_FRAME_DUMP set to a directory (a Windows path, such as
- * Z:\tmp\dump), creating a file named "go" in it captures the next frame:
+ * Z:\tmp\dump), creating a file named "go" in it captures the next frame (a
+ * file named "go-indirect" the frame after the next one that dispatches a
+ * compute shader with indirect arguments):
  * - frame.txt lists the frame's draws and compute dispatches in order, with
  *   their shaders, the render target, and the textures the pixel or compute
  *   shader reads; draws to one render target in a row are a pass. After each
  *   draw come the samples it passed, the OpenGL draw buffers, color masks,
  *   depth state and program it ran with, and its OpenGL errors;
  * - pNNNN.ppm is the first render target (or the depth buffer) as each pass
- *   left it (pNNNN-K.ppm the other render targets), and cNNNN-uK.ppm an unordered access view after a dispatch, at
- *   most 960 pixels wide; float targets are tone-mapped (x / (1 + x)) and
+ *   left it (pNNNN-K.ppm the other render targets), cNNNN-cbK.bin and
+ *   cNNNN-tK.bin the constant buffers and buffer views a dispatch reads (at
+ *   most 1 MB of each), cNNNN-tK.ppm its small textures, and cNNNN-uK.ppm an unordered access view after a dispatch, at
+ *   most 1920 pixels wide; float targets are tone-mapped (x / (1 + x)) and
  *   gamma-encoded. frame.txt has each image's range, mean and count of
  *   values that are not finite.
  * Reading the targets back waits for the GPU; nothing runs when the variable
@@ -50,6 +54,8 @@ static struct
     int enabled; /* 0: not looked up, 1: on, -1: off */
     char dir[MAX_PATH];
     bool active;
+    /* Waiting for a frame with an indirect dispatch, and having seen one. */
+    bool armed, triggered;
     FILE *log;
     unsigned int pass, draw, dispatch;
     struct dump_target target;
@@ -61,6 +67,19 @@ static struct
 } dump;
 
 bool wined3d_gl_frame_dump_active;
+
+/* A name for a shader that is the same in every run (FNV-1a of its byte code). */
+unsigned int wined3d_shader_byte_code_hash(const struct wined3d_shader *shader)
+{
+    const uint8_t *data = (const uint8_t *)shader->byte_code;
+    unsigned int hash = 0x811c9dc5, i;
+
+    if (!data)
+        return 0;
+    for (i = 0; i < shader->byte_code_size; ++i)
+        hash = (hash ^ data[i]) * 0x01000193;
+    return hash;
+}
 
 static bool dump_enabled(void)
 {
@@ -222,7 +241,7 @@ static void dump_write(struct wined3d_context_gl *context_gl, const struct dump_
                     sum[c] / ((double)target->width * target->height));
         fprintf(dump.log, "\n");
 
-        step = (target->width + 959) / 960;
+        step = (target->width + 1919) / 1920;
         w = target->width / step;
         h = target->height / step;
         sprintf(path, "%s\\%s.ppm", dump.dir, name);
@@ -262,6 +281,65 @@ static void dump_write(struct wined3d_context_gl *context_gl, const struct dump_
     gl_info->fbo_ops.glDeleteFramebuffers(1, &fbo);
     while (gl_info->gl_ops.gl.p_glGetError());
     context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+    free(data);
+}
+
+/* Prints the first words of a buffer's OpenGL buffer object. */
+static void dump_buffer_words(struct wined3d_context_gl *context_gl, struct wined3d_buffer *buffer,
+        unsigned int offset, unsigned int count)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_bo_gl *bo_gl;
+    uint32_t words[32] = {0};
+    unsigned int i;
+
+    if (!buffer->buffer_object)
+    {
+        fprintf(dump.log, " (no buffer object)\n");
+        return;
+    }
+    bo_gl = wined3d_bo_gl(buffer->buffer_object);
+    count = min(count, ARRAY_SIZE(words));
+    if (offset >= buffer->resource.size)
+        count = 0;
+    count = min(count, (buffer->resource.size - offset) / 4);
+    wined3d_context_gl_bind_bo(context_gl, bo_gl->binding, bo_gl->id);
+    GL_EXTCALL(glGetBufferSubData(bo_gl->binding, bo_gl->b.buffer_offset + offset, count * 4, words));
+    wined3d_context_gl_bind_bo(context_gl, bo_gl->binding, 0);
+    while (gl_info->gl_ops.gl.p_glGetError());
+    fprintf(dump.log, " bo %u +%u:", bo_gl->id, offset);
+    for (i = 0; i < count; ++i)
+        fprintf(dump.log, " %#x", words[i]);
+    fprintf(dump.log, "\n");
+}
+
+/* Writes up to 1 MB of a buffer's OpenGL buffer object to "name".bin. */
+static void dump_buffer_file(struct wined3d_context_gl *context_gl, struct wined3d_buffer *buffer,
+        unsigned int offset, const char *name)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_bo_gl *bo_gl;
+    char path[MAX_PATH + 64];
+    unsigned int size;
+    void *data;
+    FILE *f;
+
+    if (!buffer->buffer_object || offset >= buffer->resource.size)
+        return;
+    size = min(buffer->resource.size - offset, 0x100000);
+    if (!(data = malloc(size)))
+        return;
+    bo_gl = wined3d_bo_gl(buffer->buffer_object);
+    wined3d_context_gl_bind_bo(context_gl, bo_gl->binding, bo_gl->id);
+    GL_EXTCALL(glGetBufferSubData(bo_gl->binding, bo_gl->b.buffer_offset + offset, size, data));
+    wined3d_context_gl_bind_bo(context_gl, bo_gl->binding, 0);
+    while (gl_info->gl_ops.gl.p_glGetError());
+    sprintf(path, "%s\\%s.bin", dump.dir, name);
+    if ((f = fopen(path, "wb")))
+    {
+        fwrite(data, 1, size, f);
+        fclose(f);
+    }
     free(data);
 }
 
@@ -470,23 +548,97 @@ void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const
     char name[32];
     unsigned int i;
 
+    if (dump.armed && parameters->indirect)
+        dump.triggered = true;
     if (!dump.active || !shader)
         return;
 
     if (!done)
     {
         dump_end_pass(context_gl);
-        fprintf(dump.log, "dispatch %u: cs %p", dump.dispatch, shader);
+        fprintf(dump.log, "dispatch %u: cs %p (%08x)", dump.dispatch, shader, wined3d_shader_byte_code_hash(shader));
         if (parameters->indirect)
-            fprintf(dump.log, " indirect\n");
+        {
+            fprintf(dump.log, " indirect, buffer %p", parameters->u.indirect.buffer);
+            wined3d_cl_finish();
+            dump_buffer_words(context_gl, parameters->u.indirect.buffer, parameters->u.indirect.offset, 3);
+        }
         else
             fprintf(dump.log, " %ux%ux%u groups\n", parameters->u.direct.group_count_x,
                     parameters->u.direct.group_count_y, parameters->u.direct.group_count_z);
         dump_shader_resources(state, WINED3D_SHADER_TYPE_COMPUTE);
+        for (i = 0; i < WINED3D_MAX_CBS; ++i)
+        {
+            const struct wined3d_constant_buffer_state *cb = &state->cb[WINED3D_SHADER_TYPE_COMPUTE][i];
+
+            if (!shader->reg_maps.cb_sizes[i] || !cb->buffer)
+                continue;
+            fprintf(dump.log, "      cb%u: buffer %p, %u bytes, offset %u, locations %#x;", i, cb->buffer,
+                    cb->buffer->resource.size, cb->offset, (unsigned int)cb->buffer->locations);
+            dump_buffer_words(context_gl, cb->buffer, cb->offset, 16);
+            fprintf(dump.log, "      cb%u words 112..:", i);
+            dump_buffer_words(context_gl, cb->buffer, cb->offset + 448, 16);
+        }
         return;
     }
 
     wined3d_cl_finish();
+    /* Small textures the shader reads, and the shadow textures OpenCL reads in their place. */
+    for (i = 0; i < ARRAY_SIZE(shader->reg_maps.resource_info); ++i)
+    {
+        const struct wined3d_shader_resource_view *view = state->shader_resource_view[WINED3D_SHADER_TYPE_COMPUTE][i];
+        struct dump_target shadow;
+
+        if (shader->reg_maps.resource_info[i].type <= WINED3D_SHADER_RESOURCE_BUFFER || !view
+                || view->resource->type == WINED3D_RTYPE_BUFFER)
+            continue;
+        dump_get_target(&target, view->resource, view->desc.u.texture.level_idx, view->desc.u.texture.layer_idx,
+                view->format);
+        shadow = target;
+        if ((shadow.name = wined3d_cl_get_shadow_name(context_gl->c.device, target.name, target.level,
+                &shadow.target)))
+        {
+            shadow.level = 0;
+            shadow.depth = false;
+            sprintf(name, "c%04u-t%u-shadow", dump.dispatch, i);
+            dump_write(context_gl, &shadow, name);
+        }
+        if (target.width * target.height <= 4096)
+        {
+            sprintf(name, "c%04u-t%u", dump.dispatch, i);
+            dump_write(context_gl, &target, name);
+        }
+    }
+    for (i = 0; i < WINED3D_MAX_CBS; ++i)
+    {
+        const struct wined3d_constant_buffer_state *cb = &state->cb[WINED3D_SHADER_TYPE_COMPUTE][i];
+
+        if (!shader->reg_maps.cb_sizes[i] || !cb->buffer)
+            continue;
+        fprintf(dump.log, "      cb%u after:", i);
+        dump_buffer_words(context_gl, cb->buffer, cb->offset, 16);
+        sprintf(name, "c%04u-cb%u", dump.dispatch, i);
+        dump_buffer_file(context_gl, cb->buffer, cb->offset, name);
+    }
+    for (i = 0; i < ARRAY_SIZE(shader->reg_maps.resource_info); ++i)
+    {
+        const struct wined3d_shader_resource_view *view = state->shader_resource_view[WINED3D_SHADER_TYPE_COMPUTE][i];
+
+        if (!shader->reg_maps.resource_info[i].type || !view || view->resource->type != WINED3D_RTYPE_BUFFER)
+            continue;
+        sprintf(name, "c%04u-t%u", dump.dispatch, i);
+        dump_buffer_file(context_gl, buffer_from_resource(view->resource), 0, name);
+    }
+    for (i = 0; i < 16; ++i)
+    {
+        const struct wined3d_sampler *sampler = state->sampler[WINED3D_SHADER_TYPE_COMPUTE][i];
+
+        if (sampler)
+            fprintf(dump.log, "      s%u: address %u %u %u, filter min %u mag %u mip %u, compare %u\n", i,
+                    sampler->desc.address_u, sampler->desc.address_v, sampler->desc.address_w,
+                    sampler->desc.min_filter, sampler->desc.mag_filter, sampler->desc.mip_filter,
+                    sampler->desc.compare);
+    }
     for (i = 0; i < MAX_UNORDERED_ACCESS_VIEWS; ++i)
     {
         const struct wined3d_unordered_access_view *view = state->unordered_access_view[WINED3D_PIPELINE_COMPUTE][i];
@@ -495,8 +647,9 @@ void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const
             continue;
         if (view->resource->type == WINED3D_RTYPE_BUFFER)
         {
-            fprintf(dump.log, "      u%u: buffer %p %s, %u bytes\n", i, view->resource,
+            fprintf(dump.log, "      u%u: buffer %p %s, %u bytes;", i, view->resource,
                     debug_d3dformat(view->format->id), view->resource->size);
+            dump_buffer_words(context_gl, buffer_from_resource(view->resource), 0, 32);
             continue;
         }
         dump_get_target(&target, view->resource, view->desc.u.texture.level_idx,
@@ -528,11 +681,28 @@ void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl)
         return;
     }
 
-    sprintf(path, "%s\\go", dump.dir);
-    if (!(f = fopen(path, "rb")))
-        return;
-    fclose(f);
-    remove(path);
+    if (dump.armed)
+    {
+        if (!dump.triggered)
+            return;
+        dump.armed = dump.triggered = false;
+    }
+    else
+    {
+        sprintf(path, "%s\\go", dump.dir);
+        if (!(f = fopen(path, "rb")))
+        {
+            sprintf(path, "%s\\go-indirect", dump.dir);
+            if (!(f = fopen(path, "rb")))
+                return;
+            fclose(f);
+            remove(path);
+            dump.armed = wined3d_gl_frame_dump_active = true;
+            return;
+        }
+        fclose(f);
+        remove(path);
+    }
     sprintf(path, "%s\\frame.txt", dump.dir);
     if (!(dump.log = fopen(path, "w")))
         return;

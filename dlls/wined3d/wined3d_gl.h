@@ -1318,6 +1318,16 @@ static inline GLuint wined3d_gl_get_internal_format(struct wined3d_resource *res
 
 /* A kernel is generated for each combination of image kinds bound to the
  * shader's texture views. Buffer views and unbound slots are 0. */
+/* A kernel is built for the kinds of the images bound (WINED3D_CL_IMAGE_KIND).
+ * For a typed buffer view the key is 0, or WINED3D_CL_BUFFER_KEY_32 with the
+ * component count less one and WINED3D_CL_BUFFER_KEY_FLOAT for a view of a
+ * format of 32-bit components, whose elements the kernel then reads and
+ * writes as words: one that takes every format at run time is many times
+ * larger, and the driver's compiler gives up on large ones. */
+#define WINED3D_CL_BUFFER_KEY_COUNT_MASK 0x3u
+#define WINED3D_CL_BUFFER_KEY_FLOAT      0x4u
+#define WINED3D_CL_BUFFER_KEY_32         0x8u
+
 struct wined3d_cl_kernel_key
 {
     uint8_t srv[MAX_SHADER_RESOURCE_VIEWS];
@@ -1372,10 +1382,13 @@ void wined3d_cl_release_kernel(uint64_t handle);
 bool wined3d_cl_dispatch_compute(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
         const struct wined3d_dispatch_parameters *parameters);
 void wined3d_cl_finish(void);
+GLuint wined3d_cl_get_shadow_name(const struct wined3d_device *device, GLuint source, unsigned int level,
+        GLenum *target);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
 void wined3d_cl_release_device(struct wined3d_context_gl *context_gl);
 
 /* WINESKIN: a frame capture for debugging (frame_dump_gl.c). */
+unsigned int wined3d_shader_byte_code_hash(const struct wined3d_shader *shader);
 extern bool wined3d_gl_frame_dump_active;
 void wined3d_gl_frame_dump_draw(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
         const struct wined3d_draw_parameters *parameters);
