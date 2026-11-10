@@ -241,6 +241,26 @@ replaces a buffer the GPU still reads with a new OpenGL buffer. Two files change
   `glGenBuffers`/`glDeleteBuffers` each time. A reused buffer keeps its name and its OpenCL memory
   object.
 
+#### The cost of an OpenGL call, and the state filter
+
+A 64-bit Windows thread keeps its TEB in `%gs`, which macOS's libraries use for their own thread data, so
+Wine switches the `%gs` base on every call from Windows code into a Unix library and back. 10.9 has no
+user-mode `wrgsbase`: each switch is a kernel trap, and a call costs about 0.3 microseconds before it
+does anything (`~/WineskinTests/perf/tools/ucall.c` measures it). 32-bit programs keep their TEB in `%fs`
+and pay nothing. wined3d makes one such call per OpenGL function, tens per draw.
+
+`dlls/wined3d/gl_filter.c` replaces the state setting entries of wined3d's OpenGL function table
+(`glEnable`/`glDisable`, texture, sampler and uniform buffer bindings, vertex attribute divisors, face,
+depth and colour mask state) with functions that remember, per OpenGL context, what was last set and
+return without calling OpenGL when nothing changes. wined3d applies Direct3D state an object at a time,
+so a game that sets the same state before every draw otherwise has it reissued: on Ori and the Will of
+the Wisps' title screen the filter takes 71 OpenGL calls per draw down to 31. Deleting an object forgets
+the bindings that name it, in every context. `HKCU\Software\Wine\Direct3D\GLStateFilter` = `n` (or
+`WINE_D3D_CONFIG=GLStateFilter=n`) turns the filter off.
+
+10.9's OpenGL offers no program binary formats (`GL_NUM_PROGRAM_BINARY_FORMATS` is 0), so linked shader
+programs can't be kept on disk: a shader is compiled the first time each run draws with it.
+
 An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
 which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
 time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).

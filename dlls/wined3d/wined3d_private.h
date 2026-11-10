@@ -496,6 +496,7 @@ struct wined3d_settings
     bool ffp_hlsl;
     bool opencl_compute; /* WINESKIN: compute shaders on OpenCL (cl_compute.c) */
     bool map_shadows; /* WINESKIN: client-side map shadows (map_shadow.c) */
+    bool gl_state_filter; /* WINESKIN: redundant OpenGL state call filter (gl_filter.c) */
 };
 
 extern struct wined3d_settings wined3d_settings;

@@ -135,6 +135,7 @@ struct wined3d_settings wined3d_settings =
     .decoder_backend = WINED3D_DECODER_BACKEND_AUTO,
     .opencl_compute = TRUE, /* WINESKIN */
     .map_shadows = TRUE, /* WINESKIN */
+    .gl_state_filter = TRUE, /* WINESKIN */
 };
 
 enum wined3d_renderer CDECL wined3d_get_renderer(void)
@@ -507,6 +508,14 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
             wined3d_settings.map_shadows = strcmp(buffer, "n") && strcmp(buffer, "N")
                     && strcmp(buffer, "0") && strcmp(buffer, "disabled");
             ERR_(winediag)("Client-side map shadows %s.\n", wined3d_settings.map_shadows ? "on" : "off");
+        }
+        /* WINESKIN: redundant OpenGL state call filter (gl_filter.c), on unless "n", "0" or "disabled". */
+        if (!get_config_key(hkey, appkey, env, "GLStateFilter", buffer, size)
+                && (!strcmp(buffer, "n") || !strcmp(buffer, "N") || !strcmp(buffer, "0")
+                || !strcmp(buffer, "disabled")))
+        {
+            ERR_(winediag)("Disabling the OpenGL state filter.\n");
+            wined3d_settings.gl_state_filter = FALSE;
         }
     }
 

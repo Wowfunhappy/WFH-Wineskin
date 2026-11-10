@@ -5121,6 +5121,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         return FALSE;
     }
+    wined3d_gl_filter_install(gl_info); /* WINESKIN: see gl_filter.c */
 
     for (unsigned int i = 0; i < ARRAY_SIZE(required_extensions); ++i)
     {

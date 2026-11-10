@@ -9,12 +9,13 @@ UNIX_LIBS = -lwin32u -framework OpenCL -framework OpenGL
 
 VER_FILEDESCRIPTION_STR = "Wine D3D"
 
-# WINESKIN: compute shaders on OpenCL (cl_compute.c, and cl.c on the Unix side); dynamic buffer
-# maps from the client thread (map_shadow.c); reuse of retired OpenGL buffers (bo_pool_gl.c).
+# WINESKIN: compute shaders on OpenCL (cl_compute.c, cl.c on the Unix side); client thread buffer
+# maps (map_shadow.c); OpenGL buffer reuse (bo_pool_gl.c); redundant state calls dropped (gl_filter.c).
 SOURCES = \
 	cl.c \
 	cl_compute.c \
 	bo_pool_gl.c \
+	gl_filter.c \
 	map_shadow.c \
 	adapter_gl.c \
 	adapter_vk.c \

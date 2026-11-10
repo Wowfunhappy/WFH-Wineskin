@@ -1495,6 +1495,7 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
     else if (wglGetCurrentContext() && !wglMakeCurrent(NULL, NULL))
         ERR("Failed to disable GL context.\n");
 
+    wined3d_gl_filter_remove_context(context_gl->gl_ctx); /* WINESKIN */
     if (!wglDeleteContext(context_gl->gl_ctx))
     {
         unsigned int err = GetLastError();
@@ -1973,6 +1974,7 @@ static BOOL wined3d_context_gl_create_wgl_ctx(struct wined3d_context_gl *context
     context_gl->needs_set = 1;
     context_gl->valid = 1;
     context_gl->gl_ctx = ctx;
+    wined3d_gl_filter_add_context(ctx); /* WINESKIN */
 
     return TRUE;
 }
@@ -2073,6 +2075,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
     {
         ERR("Cannot activate context to set up defaults.\n");
         context_release(context);
+        wined3d_gl_filter_remove_context(context_gl->gl_ctx); /* WINESKIN */
         if (!wglDeleteContext(context_gl->gl_ctx))
             ERR("wglDeleteContext(%p) failed, last error %#lx.\n", context_gl->gl_ctx, GetLastError());
         goto fail;

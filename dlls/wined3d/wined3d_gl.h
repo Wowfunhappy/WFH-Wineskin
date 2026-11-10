@@ -897,6 +897,11 @@ struct wined3d_device_gl
     struct wined3d_bo_pool_gl *bo_pool; /* WINESKIN: see bo_pool_gl.c */
 };
 
+/* WINESKIN: gl_filter.c */
+void wined3d_gl_filter_install(struct wined3d_gl_info *gl_info);
+void wined3d_gl_filter_add_context(HGLRC rc);
+void wined3d_gl_filter_remove_context(HGLRC rc);
+
 /* WINESKIN: bo_pool_gl.c */
 GLuint wined3d_device_gl_take_pooled_bo(struct wined3d_device_gl *device_gl,
         GLsizeiptr size, GLenum usage, bool coherent);
