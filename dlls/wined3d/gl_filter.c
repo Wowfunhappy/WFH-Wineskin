@@ -438,9 +438,11 @@ static void WINAPI filter_glVertexAttribDivisor(GLuint index, GLuint divisor)
 {
     struct gl_filter *filter = get_filter();
 
+    /* A divisor is kept plus one, 0 meaning not known; ~0u (an instance step rate of 0, all instances
+     * reading the first element) has no such value and is always passed on. */
     if (filter && index < FILTER_ATTRIBS)
     {
-        if (filter->divisors[index] == divisor + 1)
+        if (divisor != ~0u && filter->divisors[index] == divisor + 1)
             return;
         filter->divisors[index] = divisor + 1;
     }
