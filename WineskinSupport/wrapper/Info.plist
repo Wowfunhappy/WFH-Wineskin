@@ -8,8 +8,6 @@
 	<string>Wineskin</string>
 	<key>CFBundleIconFile</key>
 	<string>Wineskin</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.wowfunhappy.wfhwineskin.WFH-Wineskin</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

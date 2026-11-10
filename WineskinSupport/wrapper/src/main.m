@@ -68,44 +68,76 @@ static NSString *const kConfigureArgument = @"--configure";
 
 #pragma mark - Wrapper identity
 
-static NSString *IdentifierForName(NSString *name)
+/* A wrapper's bundle identifier comes from its program, so no two wrappers share one and Launch
+   Services never opens one wrapper for another: the program's file name, then a hash of its path in
+   the prefix, which tells apart programs with the same name (launcher.exe, setup.exe). A wrapper with
+   no program has no identifier. */
+static NSString *IdentifierForProgram(NSString *storedProgram)
 {
+    if (!storedProgram.length) return nil;
+
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
         @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"];
+    NSString *name = [[storedProgram lastPathComponent] stringByDeletingPathExtension];
     NSMutableString *component = [NSMutableString string];
     for (NSUInteger i = 0; i < name.length; i++) {
         unichar c = [name characterAtIndex:i];
         [component appendString:[allowed characterIsMember:c] ? [NSString stringWithCharacters:&c length:1] : @"-"];
     }
-    return [NSString stringWithFormat:@"%@.%@", kBundleIdentifierBase, component];
+
+    /* FNV-1a of the path, case-insensitive as Windows paths are */
+    const char *path = [storedProgram lowercaseString].UTF8String;
+    uint32_t hash = 2166136261u;
+    for (; *path; path++) hash = (hash ^ (uint8_t)*path) * 16777619u;
+
+    return [NSString stringWithFormat:@"%@.%@-%08x", kBundleIdentifierBase, component, hash];
 }
 
-/* Gives the bundle the name and identifier its file name calls for. Returns YES when they changed: this
-   launch was registered under the old identity. */
-static BOOL UpdateIdentity(void)
+typedef enum { IdentityUnchanged, IdentityNameChanged, IdentityIdentifierChanged } IdentityChange;
+
+/* Gives the bundle the name its file name calls for and the identifier its program calls for, and
+   says what changed: this launch was registered under the old identity. */
+static IdentityChange UpdateIdentity(NSString *storedProgram)
 {
     NSURL *bundleURL = [[NSBundle mainBundle] bundleURL];
     NSString *name = [[bundleURL lastPathComponent] stringByDeletingPathExtension];
-    NSString *identifier = IdentifierForName(name);
+    NSString *identifier = IdentifierForProgram(storedProgram);
     NSString *plistPath = [[bundleURL path] stringByAppendingPathComponent:@"Contents/Info.plist"];
     NSMutableDictionary *info = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
-    if (!info || ([info[@"CFBundleName"] isEqualToString:name] && [info[@"CFBundleIdentifier"] isEqualToString:identifier]))
-        return NO;
+    if (!info) return IdentityUnchanged;
+    BOOL sameIdentifier = identifier ? [info[@"CFBundleIdentifier"] isEqualToString:identifier] : !info[@"CFBundleIdentifier"];
+    if (sameIdentifier && [info[@"CFBundleName"] isEqualToString:name]) return IdentityUnchanged;
     info[@"CFBundleName"] = name;
-    info[@"CFBundleIdentifier"] = identifier;
+    if (identifier) info[@"CFBundleIdentifier"] = identifier;
+    else [info removeObjectForKey:@"CFBundleIdentifier"];
     if (![info writeToFile:plistPath atomically:YES])
-        return NO;
+        return IdentityUnchanged;
     LSRegisterURL((__bridge CFURLRef)bundleURL, true);
-    return YES;
+    return sameIdentifier ? IdentityNameChanged : IdentityIdentifierChanged;
 }
 
-/* Opens this wrapper again through Launch Services, under its current identity. */
+/* Opens this wrapper again through Launch Services, under its new name. */
 static BOOL Relaunch(BOOL configure)
 {
     NSDictionary *configuration = @{ NSWorkspaceLaunchConfigurationArguments: configure ? @[ kConfigureArgument ] : @[] };
     return [[NSWorkspace sharedWorkspace] launchApplicationAtURL:[[NSBundle mainBundle] bundleURL]
                                                          options:NSWorkspaceLaunchNewInstance
                                                    configuration:configuration error:NULL] != nil;
+}
+
+/* After the identifier changed, asks the user to open the wrapper again, under the identity Launch
+   Services now has for it, and quits. */
+static void AskToOpenAgain(void)
+{
+    NSString *name = [[[[NSBundle mainBundle] bundleURL] lastPathComponent] stringByDeletingPathExtension];
+    NSAlert *alert = [[NSAlert alloc] init];
+
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [NSApp activateIgnoringOtherApps:YES];
+    alert.messageText = [NSString stringWithFormat:@"%@ was updated. Please open it again.", name];
+    [alert runModal];
+    exit(0);
 }
 
 #pragma mark - Wrapper paths and configuration
@@ -1032,6 +1064,8 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     self.wrapper.config[kProgramKey] = [self.wrapper storedPathForUnixPath:path];
     [self.wrapper save];
     MatchBundleIcon(self.wrapper);
+    if (UpdateIdentity(self.wrapper.config[kProgramKey]) == IdentityIdentifierChanged)
+        AskToOpenAgain();
     [self refresh];
     self.status.stringValue = [NSString stringWithFormat:@"%@ will run when this app opens.", path.lastPathComponent];
 }
@@ -1168,10 +1202,13 @@ int main(int argc, const char *argv[])
         BOOL optionHeld = (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & kCGEventFlagMaskAlternate) != 0;
         for (int i = 1; i < argc; i++)
             if (!strcmp(argv[i], kConfigureArgument.UTF8String)) optionHeld = YES;
-        if (UpdateIdentity() && Relaunch(optionHeld))
+        Wrapper *wrapper = [[Wrapper alloc] init];
+        IdentityChange change = UpdateIdentity(wrapper.config[kProgramKey]);
+        if (change == IdentityIdentifierChanged)
+            AskToOpenAgain();
+        if (change == IdentityNameChanged && Relaunch(optionHeld))
             return 0;
 
-        Wrapper *wrapper = [[Wrapper alloc] init];
         NSString *program = [wrapper programUnixPath];
         if (!optionHeld && program && [[NSFileManager defaultManager] fileExistsAtPath:program] && [wrapper prefixExists])
             ExecProgram(wrapper, @[]);

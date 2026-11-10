@@ -399,6 +399,14 @@ limit on every wait.
 - **Command keys.** A wrapper maps both Command keys to Control (`CommandAsControl` in `Wineskin.plist`, on
   unless set off), so Command-C copies and Command-S saves; the app menu then takes Command-H and
   Command-Q.
+- **Access keys.** Controls and in-window menus draw their access key underlines ("&High") only while the
+  Alt key is held (Option, with "Option keys act as Alt"), as Windows does with its default keyboard cues
+  setting (`SPI_GETKEYBOARDCUES` off). win32u keeps each window's UI state (`WM_CHANGEUISTATE`,
+  `WM_UPDATEUISTATE`, `WM_QUERYUISTATE`): a top-level window starts with underlines and focus
+  rectangles hidden and a child takes its parent's state; Alt shows the underlines and its release hides
+  them again (`win32u/defwnd.c`). Buttons, check boxes, radio buttons, group boxes, static text, tabs and
+  menus draw with `DT_HIDEPREFIX` (which `user32/text.c` honours) while the state hides them, and repaint
+  when it changes.
 
 ## Full screen and display modes
 
@@ -536,10 +544,14 @@ start as agents, as unbundled Wine processes do, and become Dock apps only when 
 bundle on disk stays an ordinary application. The Run button in the configuration window execs the
 program the same way.
 
-A wrapper is named by its file name. On the first launch after a copy or rename, the launcher writes
-`CFBundleName` and a `CFBundleIdentifier` of its own (`com.wowfunhappy.wfhwineskin.<name>`) into
-Info.plist, registers the bundle, and relaunches once through LaunchServices, so the menu bar, Cmd-Tab,
-Keep in Dock and Recent Items all name and open this wrapper, never another copy.
+A wrapper is named by its file name, and identified by its program. The blank wrapper has no
+`CFBundleIdentifier`; once a program is chosen, the launcher writes one made from the program's file name
+and a hash of its path in the prefix (`com.wowfunhappy.wfhwineskin.<program>-<hash>`), so no two wrappers
+share an identifier and LaunchServices never opens one wrapper for another. When the program changes,
+the identifier follows: the launcher rewrites Info.plist, registers the bundle, says "<name> was updated.
+Please open it again." and quits. On the first launch after a copy or rename, it writes the new
+`CFBundleName`, registers the bundle and relaunches once, so the menu bar, Cmd-Tab, Keep in Dock and
+Recent Items show the wrapper's name.
 
 Each user's Desktop folder in the prefix is a directory of its own, not Wine's link to the Mac's
 Desktop, so the shortcuts installers leave there stay out of Finder. The launcher makes it so when it

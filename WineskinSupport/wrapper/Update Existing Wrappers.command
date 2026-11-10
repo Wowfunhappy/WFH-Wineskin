@@ -129,11 +129,16 @@ do
 
 	rsync -a --delete "${exclude_options[@]}" "$template_contents/" "$app_contents/"
 
-	# Info.plist is the template's with the wrapper's own name and identifier.
+	# Info.plist is the template's with the wrapper's own name and identifier (a wrapper with no
+	# program has none; the wrapper sets it from its program at its next launch).
 	name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$app_contents/Info.plist")
-	identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app_contents/Info.plist")
+	identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app_contents/Info.plist" 2>/dev/null || true)
 	cp "$template_contents/Info.plist" "$app_contents/Info.plist"
-	/usr/libexec/PlistBuddy -c "Set :CFBundleName $name" -c "Set :CFBundleIdentifier $identifier" "$app_contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleName $name" "$app_contents/Info.plist"
+	if [ -n "$identifier" ]
+	then
+		/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $identifier" "$app_contents/Info.plist"
+	fi
 
 	if [ -d "$prefix" ]
 	then
