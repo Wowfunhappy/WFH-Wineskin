@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# WINESKIN: part of WFH Wineskin, not of Wine.
+#
 # Update wrappers made from WFH Wineskin.app to the engine and launcher of this build, preserving each
 # wrapper's Windows environment, settings, name and icon. Every wrapper carries its own engine; this
 # replaces that copy, then has Wine update the wrapper's prefix, which refreshes the files a prefix

@@ -2765,6 +2765,13 @@ static inline BOOL stage_manager_enabled(void)
         shapeLayer.anchorPoint = self.contentView.layer.anchorPoint;
         shapeLayer.fillColor = CGColorGetConstantColor(kCGColorBlack);
 
+        /* WINESKIN: the rectangle is in Windows pixels and the layer in points (marzent/winecx
+           ff-wine-11.17, Feifan He) */
+        rect.origin.x /= self.contentView.layer.contentsScale;
+        rect.origin.y /= self.contentView.layer.contentsScale;
+        rect.size.width /= self.contentView.layer.contentsScale;
+        rect.size.height /= self.contentView.layer.contentsScale;
+
         CGMutablePathRef path = CGPathCreateMutable();
         /* left/right */
         if (rect.origin.x > 0.0)
@@ -2776,11 +2783,15 @@ static inline BOOL stage_manager_enabled(void)
                                                  shapeLayer.bounds.size.height));
 
         /* top/bottom */
+        /* WINESKIN: the layer's origin is its bottom edge (marzent/winecx ff-wine-11.17, Feifan He) */
         if (rect.origin.y > 0.0)
-            CGPathAddRect(path, NULL, CGRectMake(0, 0, shapeLayer.bounds.size.width, rect.origin.y));
+            /* CGPathAddRect(path, NULL, CGRectMake(0, 0, shapeLayer.bounds.size.width, rect.origin.y)); */
+            CGPathAddRect(path, NULL, CGRectMake(0, shapeLayer.bounds.size.height - rect.origin.y,
+                                                 shapeLayer.bounds.size.width, rect.origin.y));
         if (rect.origin.y + rect.size.height < shapeLayer.bounds.size.height)
             CGPathAddRect(path, NULL, CGRectMake(0,
-                                                 rect.origin.y + rect.size.height,
+                                                 /* WINESKIN: rect.origin.y + rect.size.height, */
+                                                 0,
                                                  shapeLayer.bounds.size.width,
                                                  shapeLayer.bounds.size.height - (rect.origin.y + rect.size.height)));
 
