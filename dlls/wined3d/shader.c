@@ -1239,6 +1239,16 @@ static HRESULT shader_get_registers_used(struct wined3d_shader *shader, DWORD co
                 FIXME("Invalid instruction %#x for shader type %#x.\n",
                         ins.handler_idx, shader_version.type);
         }
+        /* WINESKIN: system values a pixel shader reads from a varying (the render target array
+         * index without ARB_fragment_layer_viewport) are integers: constant interpolation. */
+        else if ((ins.handler_idx == WINED3DSIH_DCL_INPUT_PS_SGV || ins.handler_idx == WINED3DSIH_DCL_INPUT_PS_SIV)
+                && shader_version.type == WINED3D_SHADER_TYPE_PIXEL
+                && ins.declaration.register_semantic.sysval_semantic == WINED3D_SIV_RENDER_TARGET_ARRAY_INDEX
+                && ins.declaration.register_semantic.reg.reg.idx[0].offset < MAX_REG_INPUT)
+        {
+            wined3d_insert_interpolation_mode(shader->u.ps.interpolation_mode,
+                    ins.declaration.register_semantic.reg.reg.idx[0].offset, WINED3DSIM_CONSTANT);
+        }
         else if (ins.handler_idx == WINED3DSIH_DCL_OUTPUT)
         {
             if (ins.declaration.dst.reg.type == WINED3DSPR_DEPTHOUT

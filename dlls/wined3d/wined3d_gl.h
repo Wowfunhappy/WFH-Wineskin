@@ -1375,6 +1375,15 @@ void wined3d_cl_finish(void);
 void wined3d_cl_forget_gl_object(bool texture, GLuint name);
 void wined3d_cl_release_device(struct wined3d_context_gl *context_gl);
 
+/* WINESKIN: a frame capture for debugging (frame_dump_gl.c). */
+extern bool wined3d_gl_frame_dump_active;
+void wined3d_gl_frame_dump_draw(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        const struct wined3d_draw_parameters *parameters);
+void wined3d_gl_frame_dump_draw_done(struct wined3d_context_gl *context_gl, const struct wined3d_state *state);
+void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+        const struct wined3d_dispatch_parameters *parameters, bool done);
+void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl);
+
 /* WINESKIN: unordered access views of graphics shaders as textures, without
  * ARB_shader_image_load_store (shader_glsl_declare_image_emulation). */
 unsigned int wined3d_gl_limits_get_uav_texture_unit(const struct wined3d_gl_limits *gl_limits,

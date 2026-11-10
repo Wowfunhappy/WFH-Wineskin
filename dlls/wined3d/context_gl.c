@@ -4474,8 +4474,12 @@ void dispatch_compute(struct wined3d_device *device, const struct wined3d_state 
     if (!gl_info->supported[ARB_COMPUTE_SHADER])
     {
         /* WINESKIN: the dispatch runs on OpenCL (cl_compute.c). */
+        if (wined3d_gl_frame_dump_active) /* WINESKIN: frame_dump_gl.c */
+            wined3d_gl_frame_dump_dispatch(context_gl, state, parameters, false);
         if (wined3d_cl_dispatch_compute(context_gl, state, parameters))
         {
+            if (wined3d_gl_frame_dump_active) /* WINESKIN: frame_dump_gl.c */
+                wined3d_gl_frame_dump_dispatch(context_gl, state, parameters, true);
             context_release(&context_gl->c);
             return;
         }
@@ -4754,6 +4758,9 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     }
     gl_info = context_gl->gl_info;
 
+    if (wined3d_gl_frame_dump_active) /* WINESKIN: frame_dump_gl.c */
+        wined3d_gl_frame_dump_draw(context_gl, state, parameters);
+
     if (!use_transform_feedback(state))
         wined3d_context_gl_pause_transform_feedback(context_gl, TRUE);
 
@@ -4893,6 +4900,9 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
                 parameters->u.direct.index_count, parameters->u.direct.start_instance,
                 parameters->u.direct.instance_count);
     }
+
+    if (wined3d_gl_frame_dump_active) /* WINESKIN: frame_dump_gl.c */
+        wined3d_gl_frame_dump_draw_done(context_gl, state);
 
     /* WINESKIN: OpenGL without images has no barriers, and such draws write no views. */
     if (context->uses_uavs && gl_info->supported[ARB_SHADER_IMAGE_LOAD_STORE])

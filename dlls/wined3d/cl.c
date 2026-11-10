@@ -33,6 +33,7 @@
 #ifdef __APPLE__
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <OpenCL/opencl.h>
@@ -319,7 +320,25 @@ static NTSTATUS cl_build(void *args)
         clGetProgramBuildInfo(program, ctx->device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
         log[log_size] = 0;
         if (err)
+        {
+            /* WINESKIN_CL_DUMP names a directory that receives the source of
+             * kernels that fail to build. */
+            const char *dir = getenv("WINESKIN_CL_DUMP");
+            static unsigned int failed;
+            char path[1024];
+            FILE *f;
+
             ERR("Failed to build an OpenCL kernel, error %d:\n", err);
+            if (dir && strlen(dir) < sizeof(path) - 32)
+            {
+                snprintf(path, sizeof(path), "%s/kernel-%u.cl", dir, failed++);
+                if ((f = fopen(path, "w")))
+                {
+                    fputs(source, f);
+                    fclose(f);
+                }
+            }
+        }
         if (err || TRACE_ON(d3d_cl))
         {
             char *line = log, *end;

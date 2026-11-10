@@ -2350,6 +2350,14 @@ static const char *shader_glsl_interpolation_qualifiers(enum wined3d_shader_inte
             return "flat ";
         case WINED3DSIM_LINEAR_NOPERSPECTIVE:
             return "noperspective ";
+        /* WINESKIN: the centroid and sample modes interpolate at the pixel centre; the ones
+         * without perspective stay without perspective. */
+        case WINED3DSIM_LINEAR_NOPERSPECTIVE_CENTROID:
+        case WINED3DSIM_LINEAR_NOPERSPECTIVE_SAMPLE:
+            return "noperspective ";
+        case WINED3DSIM_LINEAR_CENTROID:
+        case WINED3DSIM_LINEAR_SAMPLE:
+            return "";
         default:
             FIXME("Unhandled interpolation mode %#x.\n", mode);
         case WINED3DSIM_NONE:
@@ -7436,8 +7444,17 @@ static void shader_glsl_input_pack(const struct wined3d_shader *shader, struct w
                 if (gl_info->supported[ARB_FRAGMENT_LAYER_VIEWPORT])
                     shader_addline(buffer, "ps_in[%u]%s = intBitsToFloat(gl_Layer);\n",
                             input->register_idx, reg_mask);
+                /* WINESKIN: upstream's branch:
                 else
-                    FIXME("ARB_fragment_layer_viewport is not supported.\n");
+                    FIXME("ARB_fragment_layer_viewport is not supported.\n"); */
+                else
+                    /* WINESKIN: without the extension (macOS's OpenGL 4.1) the layer is read from
+                     * the varying the geometry shader writes for the register; its interpolation
+                     * is constant. */
+                    shader_addline(buffer, unroll ? "ps_in[%u]%s = %s%u%s;\n" : "ps_in[%u]%s = %s[%u]%s;\n",
+                            shader->u.ps.input_reg_map[input->register_idx], reg_mask,
+                            shader_glsl_shader_input_name(gl_info),
+                            shader->u.ps.input_reg_map[input->register_idx], reg_mask);
             }
             else if (input->sysval_semantic == WINED3D_SV_VIEWPORT_ARRAY_INDEX && !semantic_idx)
             {
