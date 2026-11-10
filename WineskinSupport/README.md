@@ -153,7 +153,13 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
 - Shader model 4 and 5 graphics shaders translate; the GLSL they need and 10.9 lacks (integer `mix()`,
   `packHalf2x16()`, coarse/fine derivatives) is declared in each shader
   (`shader_glsl_declare_missing_builtins`). Cull distances are dropped: primitives are drawn, not culled.
-- Compute shaders run on OpenCL 1.2 (see below). Indirect draws do nothing.
+- Compute shaders run on OpenCL 1.2 (see below).
+- There is no base instance (`ARB_base_instance`): a draw with a start instance points each per-instance
+  vertex attribute array start instance elements further for the draw (`base_instance_gl.c`);
+  Direct3D's `SV_InstanceID` starts at 0 either way. Indirect draws (`ARB_draw_indirect`) read their
+  arguments on the GPU, where OpenGL 4.1 reserves the start instance field; NVIDIA's driver honours it
+  (`~/WineskinTests/d3d11tools/probe/baseinst.c`). An indirect draw whose arguments are current in system
+  memory with a start instance other than 0 is drawn as a direct draw with them, whatever the driver.
 - There is no BPTC texture compression. BC6H and BC7 textures are decoded when they are uploaded
   (`bptc_decompress.c`), through wined3d's own decompress-on-upload path (`WINED3D_FORMAT_CAP_DECOMPRESS`):
   the texture keeps its blocks in system memory, where `Map`, `UpdateSubresource` and
@@ -213,7 +219,10 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   one is allowed, so a resolve into a typeless texture goes straight into it (`wined3d_gl_linear_internal`);
   resolves between other formats go through an intermediate texture of the resolve format, which the CPU
   blitter copies (there is no `ARB_copy_image`). The driver averages sRGB samples as stored, not in linear
-  space, so the edge pixels of resolved sRGB targets come out a little darker than on Windows.
+  space, so an unscaled sRGB resolve from a multisample texture into a texture is a draw instead
+  (`resolve_gl.c`): it fetches the samples, decodes them (the fetch does for an sRGB internal format),
+  averages and encodes. Resolves through renderbuffers still average the stored bytes, so their edge pixels
+  come out a little darker than on Windows.
 - R11G11B10_FLOAT vertex elements can be declared; constant (stride 0) ones are decoded, arrays of them
   read as (0, 0, 0, 1) (there is no `ARB_vertex_type_10f_11f_11f_rev`).
 - A fragment shader gets 16 texture units, and shader model 5 shaders can sample more (resource, sampler)
@@ -324,7 +333,9 @@ in place.
   through OpenGL or copying a texture the batch uses to its shadow, and the command stream thread before
   it waits for work. The copy of a shadow a batched kernel wrote back to its texture is made when the
   batch is enqueued (`cl_copy_back_shadows`); until then the texture is among the batch's resources.
-  `WINESKIN_CL_NOBATCH=1` enqueues each dispatch on its own.
+  `WINESKIN_CL_NOBATCH=1` enqueues each dispatch on its own. Waits for the queue (`cl_finish_bounded`) look
+  every few microseconds instead of blocking in `clFinish`; after `WINESKIN_CL_WAIT_MS` (2000) they log
+  what they wait for, and go on, except before memory objects are released, where they keep waiting.
 - NVIDIA's OpenCL on 10.9 has one coordinate mode per image in a kernel: once a kernel samples an image
   with normalised coordinates, a load from that image with integer coordinates, or without a sampler,
   returns texel (0, 0) at (0, 0) and zero elsewhere. Loads from resource views therefore address texel

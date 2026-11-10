@@ -36,6 +36,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,6 +168,57 @@ struct cl_kernel
 };
 
 static void batch_flush(struct cl_device_context *ctx);
+
+/* Waits for everything enqueued on the context's queue, as clFinish() does,
+ * but looks every so often instead of blocking: after WINESKIN_CL_WAIT_MS
+ * (2000 by default) it logs what it waits for, and keeps waiting where
+ * "must_finish" (memory objects about to go), or gives up otherwise, so that
+ * a GPU that stopped shows in the log instead of as a hung game. */
+static void cl_finish_bounded(struct cl_device_context *ctx, const char *why, BOOL must_finish)
+{
+    static long timeout_ms = -1;
+    struct timespec pause = {0, 20000};
+    cl_int status = CL_QUEUED, err;
+    struct timeval start, now;
+    cl_event marker;
+    long waited;
+    int spins = 0;
+
+    if (timeout_ms < 0)
+    {
+        const char *env = getenv("WINESKIN_CL_WAIT_MS");
+        timeout_ms = env ? atol(env) : 2000;
+    }
+    if ((err = clEnqueueMarkerWithWaitList(ctx->queue, 0, NULL, &marker)))
+    {
+        clFinish(ctx->queue);
+        return;
+    }
+    clFlush(ctx->queue);
+    gettimeofday(&start, NULL);
+    for (;;)
+    {
+        if ((err = clGetEventInfo(marker, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(status), &status, NULL))
+                || status <= CL_COMPLETE)
+            break;
+        if (++spins < 64)
+            continue;
+        nanosleep(&pause, NULL);
+        gettimeofday(&now, NULL);
+        waited = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_usec - start.tv_usec) / 1000;
+        if (timeout_ms && waited >= timeout_ms)
+        {
+            ERR("OpenCL work has not finished after %ld ms (%s); %s.\n", waited, why,
+                    must_finish ? "still waiting" : "going on without it");
+            if (must_finish)
+                clWaitForEvents(1, &marker);
+            break;
+        }
+    }
+    if (status < 0)
+        ERR("OpenCL work failed with status %d (%s).\n", status, why);
+    clReleaseEvent(marker);
+}
 
 static pthread_mutex_t cl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct cl_device_context *cl_contexts;
@@ -1356,7 +1408,7 @@ static void batch_flush(struct cl_device_context *ctx)
             force_sync = getenv("WINESKIN_CL_SYNC") != NULL;
         if (force_sync || !ctx->implicit_sync)
         {
-            clFinish(ctx->queue);
+            cl_finish_bounded(ctx, "batch without implicit sync", FALSE);
             ctx->pending = FALSE;
         }
         else
@@ -1584,7 +1636,7 @@ static NTSTATUS cl_dispatch(void *args)
         batch_flush(ctx);
     if (params->sync && ctx->pending)
     {
-        clFinish(ctx->queue);
+        cl_finish_bounded(ctx, "dispatch", FALSE);
         ctx->pending = FALSE;
     }
     if (cl_stats)
@@ -1623,7 +1675,7 @@ static NTSTATUS cl_finish(void *args)
         batch_flush(ctx);
         if (ctx->pending)
         {
-            clFinish(ctx->queue);
+            cl_finish_bounded(ctx, "flush", FALSE);
             ctx->pending = FALSE;
         }
     }
@@ -1652,7 +1704,7 @@ static NTSTATUS cl_forget(void *args)
                 batch_flush(ctx);
                 if (ctx->pending)
                 {
-                    clFinish(ctx->queue);
+                    cl_finish_bounded(ctx, "memory object release", TRUE);
                     ctx->pending = FALSE;
                 }
                 clReleaseMemObject(entry->mem);
@@ -1694,7 +1746,7 @@ static NTSTATUS cl_release_context(void *args)
 
         /* The group's OpenGL objects go with it: nothing may be in flight. */
         batch_flush(ctx);
-        clFinish(ctx->queue);
+        cl_finish_bounded(ctx, "share group release", TRUE);
         ctx->pending = FALSE;
         for (i = 0; i < CL_MEM_HASH_SIZE; ++i)
         {

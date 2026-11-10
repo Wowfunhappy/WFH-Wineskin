@@ -1280,12 +1280,10 @@ static enum wined3d_feature_level feature_level_from_caps(const struct wined3d_g
                 && gl_info->supported[ARB_TEXTURE_COMPRESSION_BPTC])
             return WINED3D_FEATURE_LEVEL_11_1;
 
-        /* WINESKIN: macOS has no BPTC texture compression, and no
-         * ARB_base_instance, without which indirect draws are disabled
-         * (wined3d_adapter_init_gl_caps). BC6H and BC7 are unsupported formats
-         * there and an indirect draw does nothing, like a compute dispatch
-         * (see shader_glsl_get_shader_model), which leaves the rest of
-         * feature level 11_0 to the programs that need it. */
+        /* WINESKIN: macOS has no BPTC texture compression (BC6H and BC7 are
+         * decoded on upload, bptc_decompress.c) and no ARB_base_instance
+         * (base_instance_gl.c stands in), which keeps feature level 11_1 out
+         * of reach and leaves 11_0 to the programs that need it. */
         if (shader_model >= 5)
             return WINED3D_FEATURE_LEVEL_11;
 
@@ -3684,14 +3682,16 @@ static BOOL wined3d_adapter_init_gl_caps(struct wined3d_adapter_gl *adapter_gl,
         ERR("Disabling APPLE_ycbcr_422 because of ARB_texture_storage.\n");
         gl_info->supported[APPLE_YCBCR_422] = FALSE;
     }
-    if (gl_info->supported[ARB_DRAW_INDIRECT] && !gl_info->supported[ARB_BASE_INSTANCE])
-    {
-        /* If ARB_base_instance is not supported the baseInstance field
-         * in indirect draw parameters must be 0 or behavior is undefined.
-         */
-        WARN("Disabling ARB_draw_indirect because ARB_base_instance is not supported.\n");
-        gl_info->supported[ARB_DRAW_INDIRECT] = FALSE;
-    }
+    /* WINESKIN: indirect draws stay; base_instance_gl.c draws those whose
+     * arguments start at another instance as direct draws, where it can see them. */
+    // if (gl_info->supported[ARB_DRAW_INDIRECT] && !gl_info->supported[ARB_BASE_INSTANCE])
+    // {
+    //     /* If ARB_base_instance is not supported the baseInstance field
+    //      * in indirect draw parameters must be 0 or behavior is undefined.
+    //      */
+    //     WARN("Disabling ARB_draw_indirect because ARB_base_instance is not supported.\n");
+    //     gl_info->supported[ARB_DRAW_INDIRECT] = FALSE;
+    // }
     if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE] && !wined3d_settings.multisample_textures)
         gl_info->supported[ARB_TEXTURE_MULTISAMPLE] = FALSE;
     /* WINESKIN: macOS's OpenGL (the implementation with APPLE_rgb_422) allocates multisample textures

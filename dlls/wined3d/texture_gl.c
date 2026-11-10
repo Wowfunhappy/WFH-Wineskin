@@ -734,6 +734,7 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
     struct wined3d_texture *required_texture, *restore_texture, *dst_save_texture = dst_texture;
     unsigned int restore_idx, dst_save_sub_resource_idx = dst_sub_resource_idx;
     bool resolve, scaled_resolve, restore_context = false;
+    bool srgb_resolve = false; /* WINESKIN: see resolve_gl.c */
     struct wined3d_texture *src_staging_texture = NULL;
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
@@ -792,6 +793,12 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
             resolve_internal = dst_internal;
             resolve_format_id = dst_texture->resource.format->id;
         }
+
+        /* WINESKIN: see resolve_gl.c. */
+        srgb_resolve = wined3d_gl_linear_internal(resolve_internal) != resolve_internal
+                && blit_op == WINED3D_BLIT_OP_COLOR_BLIT && !scaled_resolve
+                && src_location != WINED3D_LOCATION_RB_MULTISAMPLE && src_location != WINED3D_LOCATION_DRAWABLE
+                && dst_location != WINED3D_LOCATION_DRAWABLE;
 
         /* In case of typeless resolve the texture type may not match the resolve type.
          * To handle that, allocate intermediate texture(s) to resolve from/to.
@@ -946,6 +953,10 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
     gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
     context_invalidate_state(context, STATE_RASTERIZER);
 
+    /* WINESKIN: see resolve_gl.c. */
+    if (!srgb_resolve || !wined3d_context_gl_resolve_srgb(context_gl, wined3d_texture_gl(src_texture),
+            src_location == WINED3D_LOCATION_TEXTURE_SRGB, src_sub_resource_idx / src_texture->level_count,
+            src_rect, dst_rect))
     gl_info->fbo_ops.glBlitFramebuffer(src_rect->left, src_rect->top, src_rect->right, src_rect->bottom,
             dst_rect->left, dst_rect->top, dst_rect->right, dst_rect->bottom, GL_COLOR_BUFFER_BIT, gl_filter);
     checkGLcall("glBlitFramebuffer()");

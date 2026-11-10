@@ -4580,8 +4580,19 @@ static void wined3d_context_gl_draw_primitive_arrays(struct wined3d_context_gl *
         return;
     }
 
-    if (start_instance && !(gl_info->supported[ARB_BASE_INSTANCE] && gl_info->supported[ARB_INSTANCED_ARRAYS]))
+    if (start_instance && !(gl_info->supported[ARB_BASE_INSTANCE] && gl_info->supported[ARB_INSTANCED_ARRAYS])
+            && !gl_info->supported[ARB_INSTANCED_ARRAYS]) /* WINESKIN: see base_instance_gl.c */
         FIXME("Start instance (%u) not supported.\n", start_instance);
+
+    /* WINESKIN: see base_instance_gl.c. */
+    if (start_instance && !gl_info->supported[ARB_BASE_INSTANCE] && gl_info->supported[ARB_INSTANCED_ARRAYS])
+    {
+        wined3d_context_gl_offset_instanced_arrays(context_gl, state, start_instance);
+        wined3d_context_gl_draw_primitive_arrays(context_gl, state, idx_data, idx_size, base_vertex_idx,
+                start_idx, count, 0, instance_count);
+        wined3d_context_gl_offset_instanced_arrays(context_gl, state, 0);
+        return;
+    }
 
     if (gl_info->supported[ARB_INSTANCED_ARRAYS])
     {
@@ -4686,6 +4697,34 @@ static void wined3d_context_gl_draw_indirect(struct wined3d_context_gl *context_
     {
         FIXME("OpenGL implementation does not support indirect draws.\n");
         return;
+    }
+
+    /* WINESKIN: see base_instance_gl.c. */
+    if (!gl_info->supported[ARB_BASE_INSTANCE])
+    {
+        uint32_t args[5];
+
+        if (wined3d_context_gl_indirect_start_instance(context_gl, parameters, !!idx_size, args))
+        {
+            const struct wined3d_bo *idx_bo = idx_size ? state->index_buffer->buffer_object : NULL;
+            const uint8_t *idx_data = NULL;
+
+            /* No instances draw nothing, where a direct draw's 0 means not instanced. */
+            if (!args[1])
+                return;
+            /* As wined3d_context_gl_draw_primitive() finds it for direct draws. */
+            if (idx_size)
+                idx_data = (!idx_bo || !context_gl->c.stream_info.all_vbo
+                        ? (const uint8_t *)state->index_buffer->resource.heap_memory
+                        : (const uint8_t *)idx_bo->buffer_offset) + state->index_offset;
+            if (idx_size)
+                wined3d_context_gl_draw_primitive_arrays(context_gl, state, idx_data, idx_size,
+                        (int)args[3], args[2], args[0], args[4], args[1]);
+            else
+                wined3d_context_gl_draw_primitive_arrays(context_gl, state, NULL, 0, 0,
+                        args[2], args[0], args[3], args[1]);
+            return;
+        }
     }
 
     GL_EXTCALL(glBindBuffer(GL_DRAW_INDIRECT_BUFFER, bo_gl->id));

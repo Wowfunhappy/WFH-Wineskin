@@ -646,7 +646,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
     TRACE("Presenting DC %p.\n", context_gl->dc);
 
-    wined3d_gl_frame_dump_present(context_gl); /* WINESKIN: frame_dump_gl.c */
+    wined3d_gl_frame_dump_present(context_gl, swapchain, src_rect, dst_rect); /* WINESKIN: frame_dump_gl.c */
 
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
     if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc

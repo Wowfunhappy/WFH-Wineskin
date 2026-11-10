@@ -663,9 +663,13 @@ void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const
     ++dump.dispatch;
 }
 
-void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl)
+void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl, const struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect)
 {
+    const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
+    const struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
     char path[MAX_PATH + 64];
+    RECT client, context_client;
     FILE *f;
 
     if (!dump_enabled())
@@ -674,6 +678,15 @@ void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl)
     if (dump.active)
     {
         dump_end_pass(context_gl);
+        /* What the present blits from and to, and the windows' sizes it goes by. */
+        GetClientRect(swapchain->win_handle, &client);
+        GetClientRect(context_gl->window, &context_client);
+        fprintf(dump.log, "present src %s dst %s, swap chain window %p client %s, context window %p client %s, "
+                "back buffer %ux%u, desc %ux%u, windowed %d, swap effect %#x\n",
+                wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect), swapchain->win_handle,
+                wine_dbgstr_rect(&client), context_gl->window, wine_dbgstr_rect(&context_client),
+                back_buffer->resource.width, back_buffer->resource.height, desc->backbuffer_width,
+                desc->backbuffer_height, desc->windowed, desc->swap_effect);
         fprintf(dump.log, "present\n");
         fclose(dump.log);
         dump.log = NULL;

@@ -855,6 +855,11 @@ void wined3d_context_gl_so_emu_end(struct wined3d_context_gl *context_gl, const 
         const struct wined3d_so_emu_draw *draw);
 void wined3d_context_gl_so_emu_reset(struct wined3d_context_gl *context_gl);
 void wined3d_context_gl_so_emu_cleanup(struct wined3d_context_gl *context_gl);
+/* WINESKIN: start instances without ARB_base_instance (base_instance_gl.c). */
+void wined3d_context_gl_offset_instanced_arrays(struct wined3d_context_gl *context_gl,
+        const struct wined3d_state *state, unsigned int start_instance);
+unsigned int wined3d_context_gl_indirect_start_instance(struct wined3d_context_gl *context_gl,
+        const struct wined3d_indirect_draw_parameters *parameters, bool indexed, uint32_t *args);
 GLuint wined3d_so_emu_build_program(const struct wined3d_context_gl *context_gl, GLuint vs_id,
         const struct wined3d_shader *vshader, const struct wined3d_shader *gshader,
         enum wined3d_primitive_type primitive_type, unsigned int *components, GLint *scale_location);
@@ -987,6 +992,7 @@ struct wined3d_device_gl
 
     struct wined3d_bo_pool_gl *bo_pool; /* WINESKIN: see bo_pool_gl.c */
     struct wined3d_gl_copy_state *copy_state; /* WINESKIN: see texture_copy_gl.c */
+    struct wined3d_gl_resolve_state *resolve_state; /* WINESKIN: see resolve_gl.c */
     struct wined3d_gl_buffer_convert_state *buffer_convert_state; /* WINESKIN: see buffer_convert_gl.c */
 };
 
@@ -1036,6 +1042,10 @@ bool wined3d_context_gl_pool_bo(struct wined3d_context_gl *context_gl, const str
 void wined3d_device_gl_destroy_bo_pool(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
 /* WINESKIN: texture_copy_gl.c */
 void wined3d_device_gl_destroy_copy_state(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
+/* WINESKIN: resolve_gl.c */
+bool wined3d_context_gl_resolve_srgb(struct wined3d_context_gl *context_gl, struct wined3d_texture_gl *texture_gl,
+        bool srgb, unsigned int layer, const RECT *src_rect, const RECT *dst_rect);
+void wined3d_device_gl_destroy_resolve_state(struct wined3d_device_gl *device_gl, struct wined3d_context_gl *context_gl);
 bool wined3d_gl_sampler_srgb_decode_works(const struct wined3d_gl_info *gl_info);
 /* WINESKIN: buffer_convert_gl.c */
 struct wined3d_format_gl;
@@ -1472,7 +1482,8 @@ void wined3d_gl_frame_dump_draw(struct wined3d_context_gl *context_gl, const str
 void wined3d_gl_frame_dump_draw_done(struct wined3d_context_gl *context_gl, const struct wined3d_state *state);
 void wined3d_gl_frame_dump_dispatch(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
         const struct wined3d_dispatch_parameters *parameters, bool done);
-void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl);
+void wined3d_gl_frame_dump_present(struct wined3d_context_gl *context_gl, const struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect);
 
 /* WINESKIN: unordered access views of graphics shaders as textures, without
  * ARB_shader_image_load_store (shader_glsl_declare_image_emulation). */

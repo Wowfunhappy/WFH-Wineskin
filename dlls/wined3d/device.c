@@ -1490,6 +1490,7 @@ void wined3d_device_gl_delete_opengl_contexts_cs(void *object)
     context_gl = wined3d_context_gl(context);
     wined3d_cl_release_device(context_gl); /* WINESKIN */
     wined3d_device_gl_destroy_copy_state(device_gl, context_gl); /* WINESKIN */
+    wined3d_device_gl_destroy_resolve_state(device_gl, context_gl); /* WINESKIN */
     wined3d_device_gl_destroy_buffer_convert_state(device_gl, context_gl); /* WINESKIN */
     device->blitter->ops->blitter_destroy(device->blitter, context);
     device->shader_backend->shader_free_private(device, context);
