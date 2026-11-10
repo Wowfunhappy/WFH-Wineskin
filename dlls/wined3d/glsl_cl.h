@@ -61,7 +61,9 @@ static const char shader_cl_prelude_head[] =
     "typedef uint2 uvec2; typedef uint3 uvec3; typedef uint4 uvec4;\n"
     /* Booleans are ints holding 1 or 0, as GLSL converts them. */
     "typedef int2 bvec2; typedef int3 bvec3; typedef int4 bvec4;\n"
-    "__constant sampler_t wsmp_ld = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;\n";
+    "__constant sampler_t wsmp_ld = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;\n"
+    /* For loads from images a kernel may also sample; see shader_cl_ld(). */
+    "__constant sampler_t wsmp_ldn = CLK_NORMALIZED_COORDS_TRUE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;\n";
 
 /* Constructors: a single argument converts (or splats, or truncates); several
  * are concatenated, each converted component-wise. */
@@ -1175,7 +1177,16 @@ static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
         unsigned int dim = WINED3D_CL_IMAGE_KIND_DIM(kind);
 
         shader_cl_append_image_coord(c, resource_type, kind, "wc", info, false);
-        shader_addline(buffer, "(");
+        /* "wn": the texel's centre, normalised; array layers stay indices. */
+        shader_addline(buffer, "(uint4)(0u);\nfloat4 wn = (float4)(((float)wc.x + 0.5f) / (float)%s.s0, ", info);
+        if (dim == WINED3D_CL_IMAGE_1D || dim == WINED3D_CL_IMAGE_1D_ARRAY)
+            shader_addline(buffer, "(float)wc.y, 0.0f, 0.0f);\n");
+        else if (dim == WINED3D_CL_IMAGE_3D)
+            shader_addline(buffer, "((float)wc.y + 0.5f) / (float)%s.s1, ((float)wc.z + 0.5f) / (float)%s.s2, 0.0f);\n",
+                    info, info);
+        else
+            shader_addline(buffer, "((float)wc.y + 0.5f) / (float)%s.s1, (float)wc.z, 0.0f);\n", info);
+        shader_addline(buffer, "wv = (");
         shader_cl_append_image_bounds(buffer, resource_type, "wc", info);
         shader_addline(buffer, ") ? ");
         if (dim == WINED3D_CL_IMAGE_2D_MSAA || dim == WINED3D_CL_IMAGE_2D_ARRAY_MSAA)
@@ -1185,7 +1196,15 @@ static void shader_cl_ld(const struct wined3d_shader_instruction *ins)
         }
         else
         {
-            shader_cl_append_image_read(buffer, name, kind, "wsmp_ld", c->buffer, NULL);
+            /* NVIDIA's OpenCL on macOS 10.9 reads an image with normalised
+             * coordinates everywhere in a kernel that samples it with
+             * normalised coordinates anywhere: a load with integer
+             * coordinates (or without a sampler) then returns texel (0, 0)
+             * or nothing. Loads from resource views therefore address texel
+             * centres with normalised coordinates and a nearest filter. */
+            string_buffer_clear(c);
+            shader_cl_append_image_coord(c, resource_type, kind, "wn", info, true);
+            shader_cl_append_image_read(buffer, name, kind, "wsmp_ldn", c->buffer, NULL);
         }
         shader_addline(buffer, " : (uint4)(0u);\n");
         string_buffer_release(priv->string_buffers, c);
