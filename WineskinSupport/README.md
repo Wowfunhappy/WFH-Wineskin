@@ -151,6 +151,11 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   `CopySubresourceRegion` work on them, and is B8G8R8A8 (sRGB for `BC7_UNORM_SRGB`) or R16G16B16A16_FLOAT
   in OpenGL, mip levels, array layers and cube faces included. The decoder is bcdec by Sergii Kudlai
   (`dlls/wined3d/bcdec.h`, MIT or Unlicense, the same file Wine has in `dlls/d3dx9_36`).
+- A pixel shader that reads `SV_RenderTargetArrayIndex` takes it from the varying the geometry shader
+  writes for that register, with constant interpolation (`shader_glsl_input_pack`): OpenGL 4.1 has no
+  `gl_Layer` in fragment shaders. Unreal Engine renders its colour grading table one layer at a time and
+  takes the blue coordinate from the layer. The centroid and sample interpolation modes interpolate at
+  the pixel centre.
 - A draw without a pixel shader (a depth prepass, a shadow map) links an empty fragment shader
   (`shader_glsl_get_empty_fragment_shader`): 10.9's core profile fails every draw of a program that has
   none with `GL_INVALID_OPERATION`.
@@ -263,6 +268,31 @@ in place.
 - OpenCL 1.2 has no image atomics: atomics on texture UAVs run as a read and a write. Sampling reads the
   view's first level only; cube textures are read one face at a time; subroutines (`call`) don't
   translate, and the shader's dispatches then do nothing.
+- The driver gives an OpenGL buffer a new data store when the buffer is written while commands that use
+  it are queued, and a memory object made with `clCreateFromGLBuffer` keeps reading the old store. Unreal
+  Engine rewrites one constant buffer before every dispatch, so its kernels would run with the constants
+  of an earlier dispatch (its temporal upscaler then draws 2x2 blocks). A dispatch passes each buffer
+  object's write count (`wined3d_bo.content_serial`), and `cl.c` makes the memory object of a buffer
+  written since again (`get_gl_mem`).
+- NVIDIA's OpenCL on 10.9 has one coordinate mode per image in a kernel: once a kernel samples an image
+  with normalised coordinates, a load from that image with integer coordinates, or without a sampler,
+  returns texel (0, 0) at (0, 0) and zero elsewhere. Loads from resource views therefore address texel
+  centres with normalised coordinates and a nearest filter (`wsmp_ldn` in `shader_cl_ld`). Unreal's
+  motion blur loads and samples one texture, and draws black where it only loads.
+- A typed buffer view of a format of 32-bit components is read and written as words: the kernel key
+  holds its component count (`WINED3D_CL_BUFFER_KEY_32`). The path for any format (`wfmt_ld`, `wfmt_st`)
+  is large, and the driver's compiler gives up on a kernel that has hundreds of them ("Error getting
+  function data from server", after two minutes during which the game stands still).
+- The driver's compile server caches builds by source text, so a kernel's source is the same in every
+  run; its first line names the shader by a hash of its byte code. A first run compiles for about half a
+  minute in total, spread over the first minutes of play.
+- Debugging aids: `WINESKIN_CL_DUMP=<directory>` receives every kernel's source;
+  `WINESKIN_D3D_FRAME_DUMP=<Windows path of a directory>` captures a frame when a file named `go` (or
+  `go-indirect`, for the frame after an indirect dispatch) appears there: `frame.txt` lists the draws and
+  dispatches with shaders, bound textures, samples passed, OpenGL state and errors, and each pass's render
+  targets, each dispatch's unordered access views, shadow textures and buffers are written as images and
+  files (`frame_dump_gl.c`). `~/WineskinTests/d3d11tools/probe/clrun.c` runs a dumped kernel natively with
+  those files as inputs, and `clbuild.c` times a kernel's build.
 - `HKCU\Software\Wine\Direct3D\OpenCLCompute` = `n` (or `WINE_D3D_CONFIG=OpenCLCompute=n`) turns it off;
   dispatches then do nothing. `WINEDEBUG=+d3d_cl` logs each kernel's source and build log.
 
