@@ -393,6 +393,7 @@ static inline BOOL stage_manager_enabled(void)
         WineWindow* window = (WineWindow*)[self window];
         CGImageRef image, maskedImage;
         CGRect imageRect;
+        BOOL letterboxed; /* WINESKIN */
         CALayer* layer = [self layer];
 
         if ([window contentView] != self)
@@ -405,7 +406,17 @@ static inline BOOL stage_manager_enabled(void)
            with its own guess unless -updateLayer sets it too. */
         layer.contentsScale = retina_on ? 2.0 : 1.0;
 
+        /* WINESKIN: in a letterboxed window (see -setMask:) the surface starts at the window's offset
+           in the visible rect. The layer also holds the bars, so it stays in place and contentsRect puts
+           the image at that offset; the area it gives beyond the image lies under the bars. */
+        letterboxed = window.contentViewMaskLayer && !CGPointEqualToPoint(surfaceRect.origin, CGPointZero);
+
         imageRect = layer.bounds;
+        if (letterboxed) /* WINESKIN */
+        {
+            imageRect.size.width -= surfaceRect.origin.x;
+            imageRect.size.height -= surfaceRect.origin.y;
+        }
         imageRect.origin.x *= layer.contentsScale;
         imageRect.origin.y *= layer.contentsScale;
         imageRect.size.width *= layer.contentsScale;
@@ -418,7 +429,22 @@ static inline BOOL stage_manager_enabled(void)
 
         if (image)
         {
-            layer.position = surfaceRect.origin;
+            /* WINESKIN: see letterboxed */
+            /* layer.position = surfaceRect.origin; */
+            if (letterboxed)
+            {
+                CGFloat width = CGImageGetWidth(image) / layer.contentsScale;
+                CGFloat height = CGImageGetHeight(image) / layer.contentsScale;
+
+                layer.position = CGPointZero;
+                layer.contentsRect = CGRectMake(-surfaceRect.origin.x / width, -surfaceRect.origin.y / height,
+                                                layer.bounds.size.width / width, layer.bounds.size.height / height);
+            }
+            else
+            {
+                layer.position = surfaceRect.origin;
+                layer.contentsRect = CGRectMake(0, 0, 1, 1);
+            }
             layer.contents = (id)image;
             CFRelease(image);
             [window windowDidDrawContent];

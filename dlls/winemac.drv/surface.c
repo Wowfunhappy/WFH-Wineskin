@@ -84,6 +84,27 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
     CGColorSpaceRef colorspace;
     CGImageRef image;
     struct macdrv_win_data *data;
+    RECT color_rect = *rect, color_dirty = *dirty; /* WINESKIN */
+
+    /* WINESKIN: a full-screen window in an emulated display mode has its visible rect widened to the
+       whole monitor (letterboxed, see macdrv_set_window_mask), but its surface holds only the window
+       itself, so the surface sits at the window's offset in the visible rect. A visible rect that
+       contains the window is a widened one; an ordinary visible rect lies within the window. */
+    if ((data = get_win_data(window_surface->hwnd)))
+    {
+        RECT window_in_visible;
+
+        if (intersect_rect(&window_in_visible, &data->rects.window, &data->rects.visible) &&
+            EqualRect(&window_in_visible, &data->rects.window) &&
+            !EqualRect(&data->rects.window, &data->rects.visible))
+        {
+            OffsetRect(&color_rect, data->rects.window.left - data->rects.visible.left,
+                       data->rects.window.top - data->rects.visible.top);
+            OffsetRect(&color_dirty, data->rects.window.left - data->rects.visible.left,
+                       data->rects.window.top - data->rects.visible.top);
+        }
+        release_win_data(data);
+    }
 
     colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     image = CGImageCreate(color_info->bmiHeader.biWidth, abs(color_info->bmiHeader.biHeight), 8, 32,
@@ -91,7 +112,9 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
                           alpha_info | kCGBitmapByteOrder32Little, surface->provider, NULL, retina_on, kCGRenderingIntentDefault);
     CGColorSpaceRelease(colorspace);
 
-    macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(*rect), cgrect_from_rect(*dirty));
+    /* WINESKIN: color_rect, color_dirty */
+    /* macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(*rect), cgrect_from_rect(*dirty)); */
+    macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(color_rect), cgrect_from_rect(color_dirty));
     CGImageRelease(image);
 
     if (shape_changed)
