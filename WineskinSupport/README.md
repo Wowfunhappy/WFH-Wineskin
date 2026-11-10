@@ -33,8 +33,7 @@ WineskinSupport/
 │   ├── build_deps.sh       third-party libraries Wine's Unix side loads (FreeType, GnuTLS, and the media
 │   │                       runtime through build_media.sh), universal i386 + x86_64, and the wine-mono tarball
 │   ├── build_media.sh      the media runtime: GLib, GStreamer and FFmpeg (see "Video and compressed audio")
-│   ├── patches/            patches build_media.sh applies to upstream sources
-│   └── ca/cacert.pem       COMMITTED: Mozilla's root certificates (see "TLS")
+│   └── patches/            patches build_media.sh applies to upstream sources
 ├── polyfill/               the 10.9 gap layer: libwineskin_polyfill.a + a header overlay (see below)
 ├── scripts/
 │   ├── env.sh              (sourced) toolchain PATH, sysroot, deployment target, per-arch host flags
@@ -610,14 +609,12 @@ holds it, which the wrapper and the test scripts put on `DYLD_FALLBACK_LIBRARY_P
 
 GnuTLS checks no certificates, and neither does Wine's Schannel: a program that asks Schannel to
 validate the server (`SCH_CRED_AUTO_CRED_VALIDATION`, such as libcurl's Schannel backend) gets any
-certificate accepted. WinHTTP and WinINet check the chain themselves with crypt32, and programs that
-bring their own TLS library (curl's Windows builds, with OpenSSL) take the Windows root store as their
-trust anchors. That store (`dlls/crypt32/unixlib.c`) holds the roots `SecTrustSettingsCopyCertificates`
-returns for the system, admin and user domains, plus Mozilla's root certificates from the engine's
-`share/wine/cacert.pem`: 10.9's own set predates ISRG Root X1, SSL.com's and other current roots.
-`deps/ca/cacert.pem` is curl's extract of Mozilla's list (https://curl.se/docs/caextract.html, MPL 2.0),
-committed because 10.9's own curl can't reach curl.se; staging copies it into the engine. Wine's
-Schannel offers TLS 1.0 to 1.2; a server that speaks only TLS 1.3 fails the handshake.
+certificate accepted. WinHTTP and WinINet check the chain themselves with crypt32, against the roots
+`SecTrustSettingsCopyCertificates` returns for the system, admin and user domains
+(`dlls/crypt32/unixlib.c`): the roots this Mac has, plus any an administrator added. 10.9's own set
+predates ISRG Root X1 and other current roots, so sites issued from those verify only on a Mac that has
+them installed. Wine's Schannel offers TLS 1.0 to 1.2; a server that speaks only TLS 1.3 fails the
+handshake.
 
 ## The wrapper
 

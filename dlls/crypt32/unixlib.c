@@ -957,28 +957,6 @@ static const char * const CRYPT_knownLocations[] = {
  "/etc/security/cacerts",  /* Android */
 };
 
-#ifdef __APPLE__
-/* WINESKIN: the engine's share/wine/cacert.pem, Mozilla's root certificates, which this library finds
-   three directories up from its own (lib/wine/<arch>-unix). OS X 10.9's own roots predate many that
-   sites are issued from today. */
-static void wineskin_import_engine_roots(void)
-{
-    static const char rel[] = "/../../../share/wine/cacert.pem";
-    Dl_info info;
-    char *path, *slash;
-
-    if (!dladdr(wineskin_import_engine_roots, &info) || !info.dli_fname) return;
-    if (!(path = malloc(strlen(info.dli_fname) + sizeof(rel)))) return;
-    strcpy(path, info.dli_fname);
-    if ((slash = strrchr(path, '/')))
-    {
-        strcpy(slash, rel);
-        import_certs_from_path(path, FALSE);
-    }
-    free(path);
-}
-#endif
-
 static void load_root_certs(void)
 {
     unsigned int i;
@@ -1014,7 +992,6 @@ static void load_root_certs(void)
             CFRelease(certs);
         }
     }
-    wineskin_import_engine_roots(); /* WINESKIN */
 #endif
 
     for (i = 0; i < ARRAY_SIZE(CRYPT_knownLocations) && list_empty(&root_cert_list); i++)
