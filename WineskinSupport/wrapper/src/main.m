@@ -55,8 +55,6 @@ static NSString *const kDocumentsInSupportKey = @"DocumentsInApplicationSupport"
 static NSString *const kDataFolderKey = @"DataFolder";
 /* Whether the prefix's text smoothing is set to ClearType (subpixel), as last matched to the Mac's. */
 static NSString *const kLCDFontSmoothingKey = @"LCDFontSmoothing";
-/* A fingerprint of the engine the prefix was last updated for. */
-static NSString *const kEngineStampKey = @"EngineStamp";
 /* The program (as stored in kProgramKey) the bundle's icon was last made from. */
 static NSString *const kIconProgramKey = @"IconProgram";
 
@@ -651,40 +649,6 @@ static void MatchFontSmoothing(Wrapper *w)
     }
 }
 
-/* The prefix holds copies of engine files (the visual style, placeholder DLLs, registry defaults from
-   wine.inf) that Wine refreshes only when wine.inf's date changes. So that any change of engine reaches
-   the prefix, the wrapper fingerprints the engine by the dates of wine.inf and of the directories of
-   Windows modules, and has Wine update the prefix when the fingerprint differs from the one recorded
-   when the prefix was created or last updated. */
-static NSString *EngineStamp(Wrapper *w)
-{
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableString *stamp = [NSMutableString string];
-
-    for (NSString *item in @[ @"share/wine/wine.inf", @"lib/wine/x86_64-windows", @"lib/wine/i386-windows" ])
-    {
-        NSDate *date = [fm attributesOfItemAtPath:[w.enginePath stringByAppendingPathComponent:item] error:NULL][NSFileModificationDate];
-        [stamp appendFormat:@"%.0f ", date.timeIntervalSince1970];
-    }
-    return stamp;
-}
-
-static void RecordEngineStamp(Wrapper *w)
-{
-    w.config[kEngineStampKey] = EngineStamp(w);
-    [w save];
-}
-
-static void UpdatePrefixForEngine(Wrapper *w)
-{
-    if ([w.config[kEngineStampKey] isEqual:EngineStamp(w)]) return;
-
-    NSTask *task = StartWine(w, @[ @"wineboot", @"--update" ], nil, @"Prefix Update");
-    [task waitUntilExit];
-    WaitForWineserver(w);
-    if (task.terminationStatus == 0) RecordEngineStamp(w);
-}
-
 /* Replace this process with Wine running the configured program. */
 static void ExecProgram(Wrapper *w, NSArray *extraArgs)
 {
@@ -692,7 +656,6 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
     NSMutableDictionary *env = [[w environment] mutableCopy];
     NSString *log = LogFilePath(w, @"Last Run");
 
-    UpdatePrefixForEngine(w);
     KeepDesktopInPrefix(w);
     ApplyDataFolders(w);
     MatchFontSmoothing(w);
@@ -911,7 +874,6 @@ static void ExecProgram(Wrapper *w, NSArray *extraArgs)
             [alert runModal];
             return;
         }
-        RecordEngineStamp(self.wrapper);
         KeepDesktopInPrefix(self.wrapper);
         ApplyDataFolders(self.wrapper);
         ApplyRegistryOptions(self.wrapper, [self.wrapper.config[kRetinaModeKey] boolValue]);
