@@ -17,6 +17,8 @@ cp "$WS_DEPS/lib/libfreetype.6.dylib" "$WS_DEPS/lib/libgnutls.30.dylib" "$ENGINE
 MONO_VERSION="$(sed -n 's/^#define WINE_MONO_VERSION "\(.*\)"$/\1/p' "$WS_REPO/dlls/mscoree/mscoree_private.h")"
 MONO_TARBALL="$WS_SUPPORT/deps/work/src/wine-mono-$MONO_VERSION-x86.tar.xz"
 [ -f "$MONO_TARBALL" ] || { echo "no $MONO_TARBALL; run deps/build_deps.sh" >&2; exit 1; }
+# Mozilla's root certificates (deps/ca/cacert.pem), which crypt32 adds to the Mac's.
+cp "$WS_SUPPORT/deps/ca/cacert.pem" "$ENGINE/Contents/Resources/Engine/share/wine/"
 mkdir -p "$ENGINE/Contents/Resources/Engine/share/wine/mono"
 tar xJf "$MONO_TARBALL" -C "$ENGINE/Contents/Resources/Engine/share/wine/mono"
 # The media runtime (deps/build_media.sh): its libraries in lib/, GStreamer's plugins in
