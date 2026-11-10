@@ -1460,6 +1460,10 @@ pooled: /* WINESKIN */
     bo->b.cl_serial = wined3d_cl_new_serial(); /* WINESKIN */
     bo->b.cl_mirror_serial = 0; /* WINESKIN */
     bo->b.cl_mirror = NULL; /* WINESKIN */
+    /* WINESKIN: a value no copy of another buffer object's contents was made at
+     * (struct wined3d_bo), also for the buffer object that takes a busy one's
+     * place on a DISCARD map (wined3d_bo_gl_map). */
+    bo->b.content_serial = wined3d_cl_new_serial();
 
     return true;
 }
