@@ -229,6 +229,9 @@ counters or pipeline statistics. wined3d (`dlls/wined3d`) still offers feature l
   (`resolve_gl.c`): it fetches the samples, decodes them (the fetch does for an sRGB internal format),
   averages and encodes. Resolves through renderbuffers still average the stored bytes, so their edge pixels
   come out a little darker than on Windows.
+- A rasterizer state's `DepthBiasClamp` is ignored (there is no polygon offset clamp): the depth bias is
+  applied unclamped. Clamping it would mean writing depth from the fragment shader, which turns early depth
+  testing off for those draws; shadow passes, which use depth bias, mostly leave the clamp at 0.
 - R11G11B10_FLOAT vertex elements can be declared; constant (stride 0) ones are decoded, arrays of them
   read as (0, 0, 0, 1) (there is no `ARB_vertex_type_10f_11f_11f_rev`).
 - A fragment shader gets 16 texture units, and shader model 5 shaders can sample more (resource, sampler)

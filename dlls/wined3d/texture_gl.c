@@ -755,8 +755,16 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
 
     if (resolve && blit_op == WINED3D_BLIT_OP_COLOR_BLIT)
     {
+        /* WINESKIN: formats that differ only as typeless and typed, or linear and sRGB, keep the
+         * multisample texture path, so that an sRGB resolve can be a draw (resolve_gl.c). */
+        /* if ((scaled_resolve && !context->d3d_info->scaled_resolve)
+                || src_texture->resource.format->id != dst_texture->resource.format->id) */
         if ((scaled_resolve && !context->d3d_info->scaled_resolve)
-                || src_texture->resource.format->id != dst_texture->resource.format->id)
+                || (src_texture->resource.format->id != dst_texture->resource.format->id /* WINESKIN */
+                && wined3d_gl_linear_internal(wined3d_gl_get_internal_format(&src_texture->resource,
+                        wined3d_format_gl(src_texture->resource.format), false))
+                != wined3d_gl_linear_internal(wined3d_gl_get_internal_format(&dst_texture->resource,
+                        wined3d_format_gl(dst_texture->resource.format), false))))
         {
             src_location = WINED3D_LOCATION_RB_RESOLVED;
             resolve = scaled_resolve = false;
@@ -794,9 +802,19 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
             resolve_format_id = dst_texture->resource.format->id;
         }
 
-        /* WINESKIN: see resolve_gl.c. */
+        /* WINESKIN: see resolve_gl.c. The draw reads a multisample texture: samples held in the
+         * multisample renderbuffer are copied to it first (a blit between multisample framebuffers
+         * copies samples; it doesn't average). */
+        if (wined3d_gl_linear_internal(resolve_internal) != resolve_internal
+                && (blit_op == WINED3D_BLIT_OP_COLOR_BLIT || (blit_op == WINED3D_BLIT_OP_RAW_BLIT && resolve_format))
+                && !scaled_resolve && src_location == WINED3D_LOCATION_RB_MULTISAMPLE && dst_location != WINED3D_LOCATION_DRAWABLE
+                && wined3d_texture_gl(src_texture)->target == GL_TEXTURE_2D_MULTISAMPLE
+                && wined3d_texture_load_location(src_texture, src_sub_resource_idx, context, WINED3D_LOCATION_TEXTURE_RGB))
+            src_location = WINED3D_LOCATION_TEXTURE_RGB;
+        /* An explicit resolve between typeless and typed formats arrives as a raw blit. */
         srgb_resolve = wined3d_gl_linear_internal(resolve_internal) != resolve_internal
-                && blit_op == WINED3D_BLIT_OP_COLOR_BLIT && !scaled_resolve
+                && (blit_op == WINED3D_BLIT_OP_COLOR_BLIT || (blit_op == WINED3D_BLIT_OP_RAW_BLIT && resolve_format))
+                && !scaled_resolve
                 && src_location != WINED3D_LOCATION_RB_MULTISAMPLE && src_location != WINED3D_LOCATION_DRAWABLE
                 && dst_location != WINED3D_LOCATION_DRAWABLE;
 
