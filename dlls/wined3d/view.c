@@ -1569,9 +1569,72 @@ static void shader_resource_view_gl_bind_and_dirtify(struct wined3d_shader_resou
     wined3d_context_gl_bind_texture(context_gl, view_gl->gl_view.target, view_gl->gl_view.name);
 }
 
+/* WINESKIN: attaches level "level" (and layer "layer") of a texture to the framebuffer bound to "target". */
+static void generate_mipmap_attach(const struct wined3d_gl_info *gl_info, GLenum target,
+        const struct wined3d_texture_gl *texture_gl, GLuint name, unsigned int level, unsigned int layer)
+{
+    switch (texture_gl->target)
+    {
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            gl_info->fbo_ops.glFramebufferTextureLayer(target, GL_COLOR_ATTACHMENT0, name, level, layer);
+            break;
+        case GL_TEXTURE_CUBE_MAP:
+            gl_info->fbo_ops.glFramebufferTexture2D(target, GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_CUBE_MAP_POSITIVE_X + layer, name, level);
+            break;
+        default:
+            gl_info->fbo_ops.glFramebufferTexture2D(target, GL_COLOR_ATTACHMENT0, texture_gl->target, name, level);
+            break;
+    }
+}
+
+/* WINESKIN: a texture allocated with its format's srgb_view_internal holds
+ * sRGB-encoded storage whatever its views are, and glGenerateMipmap() on it
+ * averages in linear space. A view without sRGB reads averages the stored
+ * values: each level is a linear blit of the one above, which 10.9's
+ * glBlitFramebuffer() does without sRGB conversion. */
+static void generate_mipmap_blit(struct wined3d_context_gl *context_gl, struct wined3d_texture_gl *texture_gl,
+        unsigned int base_level, unsigned int level_count, unsigned int base_layer, unsigned int layer_count)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    GLuint name = wined3d_texture_gl_get_gl_texture(texture_gl, FALSE)->name;
+    unsigned int i, level;
+    GLuint fbos[2];
+
+    gl_info->fbo_ops.glGenFramebuffers(2, fbos);
+    gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+    if (gl_info->supported[ARB_FRAMEBUFFER_SRGB])
+        gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
+    for (i = 0; i < layer_count; ++i)
+    {
+        for (level = base_level + 1; level < base_level + level_count; ++level)
+        {
+            gl_info->fbo_ops.glBindFramebuffer(GL_READ_FRAMEBUFFER, fbos[0]);
+            generate_mipmap_attach(gl_info, GL_READ_FRAMEBUFFER, texture_gl, name, level - 1, base_layer + i);
+            gl_info->fbo_ops.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbos[1]);
+            generate_mipmap_attach(gl_info, GL_DRAW_FRAMEBUFFER, texture_gl, name, level, base_layer + i);
+            gl_info->fbo_ops.glBlitFramebuffer(0, 0,
+                    wined3d_texture_get_level_width(&texture_gl->t, level - 1),
+                    wined3d_texture_get_level_height(&texture_gl->t, level - 1), 0, 0,
+                    wined3d_texture_get_level_width(&texture_gl->t, level),
+                    wined3d_texture_get_level_height(&texture_gl->t, level), GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        }
+    }
+    gl_info->fbo_ops.glBindFramebuffer(GL_READ_FRAMEBUFFER, context_gl->fbo_read_binding);
+    gl_info->fbo_ops.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_gl->fbo_draw_binding);
+    gl_info->fbo_ops.glDeleteFramebuffers(2, fbos);
+    checkGLcall("generate mipmaps by blits");
+    context_invalidate_state(&context_gl->c, STATE_RASTERIZER);
+    context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+}
+
 void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resource_view_gl *view_gl,
         struct wined3d_context_gl *context_gl)
 {
+    const struct wined3d_format_gl *format_gl; /* WINESKIN */
+    bool srgb_storage, srgb_view; /* WINESKIN */
     unsigned int i, j, layer_count, level_count, base_level, base_layer, sub_resource_idx;
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct wined3d_texture_gl *texture_gl;
@@ -1588,6 +1651,14 @@ void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resou
 
     texture_gl = wined3d_texture_gl(texture_from_resource(view_gl->v.resource));
     srgb = !!(texture_gl->t.flags & WINED3D_TEXTURE_IS_SRGB);
+    /* WINESKIN: see generate_mipmap_blit() */
+    format_gl = wined3d_format_gl(texture_gl->t.resource.format);
+    srgb_storage = format_gl->srgb_view_internal && !view_gl->gl_view.copy
+            && wined3d_gl_get_internal_format(&texture_gl->t.resource, format_gl, false) == format_gl->srgb_view_internal
+            && texture_gl->target != GL_TEXTURE_1D && texture_gl->target != GL_TEXTURE_3D
+            && texture_gl->target != GL_TEXTURE_2D_MULTISAMPLE
+            && texture_gl->target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    srgb_view = !!(view_gl->v.format->caps[texture_gl->t.resource.gl_type] & WINED3D_FORMAT_CAP_SRGB_READ);
     location = srgb ? WINED3D_LOCATION_TEXTURE_SRGB : WINED3D_LOCATION_TEXTURE_RGB;
     for (i = 0; i < layer_count; ++i)
     {
@@ -1601,6 +1672,12 @@ void wined3d_shader_resource_view_gl_generate_mipmap(struct wined3d_shader_resou
     if (view_gl->gl_view.copy)
     {
         wined3d_gl_view_copy_generate_mipmap(&view_gl->gl_view, context_gl);
+        goto generated;
+    }
+
+    if (srgb_storage && !srgb_view) /* WINESKIN */
+    {
+        generate_mipmap_blit(context_gl, texture_gl, base_level, level_count, base_layer, layer_count);
         goto generated;
     }
 
@@ -1643,7 +1720,7 @@ generated: /* WINESKIN */
     if (view_gl->gl_view.copy) /* WINESKIN: the view's texture and the texture hold the same. */
         wined3d_gl_view_copy_set_current(&view_gl->gl_view);
 
-    if (!view_gl->gl_view.name)
+    if (!view_gl->gl_view.name && !(srgb_storage && !srgb_view)) /* WINESKIN: the blits leave the texture as it was */
     {
         gl_tex->sampler_desc.mip_base_level = base_level;
         gl_info->gl_ops.gl.p_glTexParameteri(texture_gl->target,

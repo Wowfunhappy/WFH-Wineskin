@@ -2241,7 +2241,10 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
     gl_info->gl_ops.gl.p_glScissor(0, 0, 0, 0);
     checkGLcall("glScissor");
 
-    if (new_drawable)
+    /* WINESKIN: a window not yet on screen (a hidden video window, a context made before its window
+     * is shown) has no drawable yet, and its default framebuffer is incomplete. */
+    // if (new_drawable)
+    if (new_drawable && gl_info->fbo_ops.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
     {
         gl_info->gl_ops.gl.p_glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         gl_info->gl_ops.gl.p_glClearDepth(1.0f);
