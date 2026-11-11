@@ -3232,7 +3232,8 @@ static bool shader_glsl_imm_has_nan_bits(const struct wined3d_shader_register *r
 {
     unsigned int i, count = reg->immconst_type == WINED3D_IMMCONST_SCALAR ? 1 : 4;
 
-    if (version->major < 4)
+    /* Compute shaders become OpenCL kernels (glsl_cl.h), which have no such uniform. */
+    if (version->major < 4 || version->type == WINED3D_SHADER_TYPE_COMPUTE)
         return false;
     for (i = 0; i < count; ++i)
     {
