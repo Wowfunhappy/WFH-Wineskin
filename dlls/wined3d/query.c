@@ -289,8 +289,19 @@ enum wined3d_fence_result wined3d_fence_wait(const struct wined3d_fence *fence,
          * possibly because macOS internally adds some slop to the timer. To avoid this,
          * we use a large number that isn't near the point of overflow (macOS 10.12.5).
          */
+        /* WINESKIN: the wait goes in slices of 2 s, and a fence still unsignalled after the first is
+         * logged once, so that a GPU that stops shows in the log instead of a silent freeze. */
+        // GLenum gl_ret = GL_EXTCALL(glClientWaitSync(fence->object.sync,
+        //         GL_SYNC_FLUSH_COMMANDS_BIT, ~(GLuint64)0 >> 1));
         GLenum gl_ret = GL_EXTCALL(glClientWaitSync(fence->object.sync,
-                GL_SYNC_FLUSH_COMMANDS_BIT, ~(GLuint64)0 >> 1));
+                GL_SYNC_FLUSH_COMMANDS_BIT, (GLuint64)2000000000)); /* WINESKIN */
+        if (gl_ret == GL_TIMEOUT_EXPIRED)
+        {
+            ERR("Fence %p not signalled after 2 s; still waiting.\n", fence);
+            do
+                gl_ret = GL_EXTCALL(glClientWaitSync(fence->object.sync, 0, (GLuint64)2000000000));
+            while (gl_ret == GL_TIMEOUT_EXPIRED);
+        }
         checkGLcall("glClientWaitSync");
 
         switch (gl_ret)
