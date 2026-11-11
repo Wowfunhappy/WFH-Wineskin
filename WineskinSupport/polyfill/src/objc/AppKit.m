@@ -19,6 +19,8 @@
  * context as it does to a view without a layer: a window server surface that -update keeps over the
  * view's frame. -setView: also detaches the context from its current view by whether that view has a
  * layer, so the current view, attached the same way, is treated as having none too.
+ * WFH Wineskin's Mac driver gives its views no layer on 10.9 (wineskin_layer_views in winemac.drv's
+ * cocoa_window.m), so this applies to its views only with WINESKIN_LAYER_VIEWS=1.
  *
  * -[NSWindow release] on 10.9, releasing the last reference off the main thread, marks the window as
  * deallocating and queues its -dealloc to the main thread. Until that runs, main-thread code that reaches

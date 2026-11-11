@@ -194,6 +194,24 @@ static inline BOOL stage_manager_enabled(void)
 @end
 
 
+/* WINESKIN: on AppKit before 10.10 the content views are not layer-backed: a view draws its window surface
+   in -drawRect:, an OpenGL context attaches to it the way AppKit attaches one to a view without a layer (a
+   window server surface that follows the view), and window shapes and letterbox bars are drawn with the
+   surface. 10.9's AppKit gives a context attached to a layer-backed view no surface of its own.
+   WINESKIN_LAYER_VIEWS=1 makes them layer-backed, for comparison. */
+static BOOL wineskin_layer_views(void)
+{
+    static int layer_views = -1;
+
+    if (layer_views < 0)
+    {
+        const char *env = getenv("WINESKIN_LAYER_VIEWS");
+        layer_views = floor(NSAppKitVersionNumber) >= 1343 /* 10.10 */ || (env && *env == '1');
+    }
+    return layer_views;
+}
+
+
 @interface CAShapeLayer (WineShapeMaskExtensions)
 
 @property(readonly, nonatomic, getter=isEmptyShaped) BOOL emptyShaped;
@@ -291,6 +309,10 @@ static inline BOOL stage_manager_enabled(void)
 @property (readonly, copy, nonatomic) NSArray* childWineWindows;
 
 @property (retain, nonatomic) CAShapeLayer* contentViewMaskLayer;
+/* WINESKIN: see wineskin_layer_views */
+@property (nonatomic) CGPathRef wineskinShape;
+@property (nonatomic) CGRect wineskinLetterbox;
+@property (retain, nonatomic) NSView* wineskinLayerHostView;
 
     - (void) setShape:(CGPathRef)newShape;
 
@@ -359,9 +381,13 @@ static inline BOOL stage_manager_enabled(void)
         self = [super initWithFrame:frame];
         if (self)
         {
+            /* WINESKIN: see wineskin_layer_views */
+            if (wineskin_layer_views())
+            {
             [self setLayerContentsPlacement:NSViewLayerContentsPlacementTopLeft];
             [self setWantsLayer:YES];
             [self setLayerRetinaProperties:retina_on];
+            } /* WINESKIN */
             [self setAutoresizesSubviews:NO];
         }
         return self;
@@ -385,7 +411,9 @@ static inline BOOL stage_manager_enabled(void)
 
     - (BOOL) wantsUpdateLayer
     {
-        return YES /*!_everHadGLContext*/;
+        /* WINESKIN: see wineskin_layer_views */
+        // return YES /*!_everHadGLContext*/;
+        return wineskin_layer_views();
     }
 
     - (void) updateLayer
@@ -453,6 +481,70 @@ static inline BOOL stage_manager_enabled(void)
             // shadow every time we draw.  Also, if this is the first time we've
             // drawn since changing from transparent to opaque.
             if (shapeImage || window.usePerPixelAlpha || window.shapeChangedSinceLastDraw)
+            {
+                window.shapeChangedSinceLastDraw = FALSE;
+                [window invalidateShadow];
+            }
+        }
+    }
+
+    /* WINESKIN: the window surface of a view without a layer (see wineskin_layer_views): the window's
+       shape clips it, and letterbox bars cover what lies outside the picture. */
+    - (void) drawRect:(NSRect)dirtyRect
+    {
+        WineWindow* window = (WineWindow*)[self window];
+        CGContextRef cg = [[NSGraphicsContext currentContext] graphicsPort];
+        CGFloat scale = retina_on ? 2.0 : 1.0;
+        CGRect letterbox, bounds = NSRectToCGRect([self bounds]);
+        CGImageRef image;
+
+        if ([window contentView] != self || window.closing || !cg)
+            return;
+
+        CGContextSaveGState(cg);
+        if (![window isOpaque])
+            CGContextClearRect(cg, NSRectToCGRect(dirtyRect));
+        if (window.wineskinShape)
+        {
+            CGContextAddPath(cg, window.wineskinShape);
+            CGContextClip(cg);
+        }
+
+        image = shapeImage ? CGImageCreateWithMask(colorImage, shapeImage) : CGImageRetain(colorImage);
+        if (image)
+        {
+            CGRect dst = CGRectMake(surfaceRect.origin.x, surfaceRect.origin.y,
+                                    CGImageGetWidth(image) / scale, CGImageGetHeight(image) / scale);
+
+            /* the view is flipped and CGContextDrawImage draws bottom-up */
+            CGContextSaveGState(cg);
+            CGContextSetBlendMode(cg, kCGBlendModeCopy);
+            CGContextSetInterpolationQuality(cg, kCGInterpolationNone);
+            CGContextTranslateCTM(cg, dst.origin.x, dst.origin.y + dst.size.height);
+            CGContextScaleCTM(cg, 1, -1);
+            CGContextDrawImage(cg, CGRectMake(0, 0, dst.size.width, dst.size.height), image);
+            CGContextRestoreGState(cg);
+            CGImageRelease(image);
+        }
+
+        letterbox = window.wineskinLetterbox;
+        if (!CGRectIsEmpty(letterbox))
+        {
+            CGRect bars[4] = {
+                CGRectMake(0, 0, CGRectGetMinX(letterbox), bounds.size.height),
+                CGRectMake(CGRectGetMaxX(letterbox), 0, bounds.size.width - CGRectGetMaxX(letterbox), bounds.size.height),
+                CGRectMake(0, 0, bounds.size.width, CGRectGetMinY(letterbox)),
+                CGRectMake(0, CGRectGetMaxY(letterbox), bounds.size.width, bounds.size.height - CGRectGetMaxY(letterbox)),
+            };
+            CGContextSetRGBFillColor(cg, 0, 0, 0, 1);
+            CGContextFillRects(cg, bars, 4);
+        }
+        CGContextRestoreGState(cg);
+
+        if (colorImage)
+        {
+            [window windowDidDrawContent];
+            if (shapeImage || window.wineskinShape || window.usePerPixelAlpha || window.shapeChangedSinceLastDraw)
             {
                 window.shapeChangedSinceLastDraw = FALSE;
                 [window invalidateShadow];
@@ -668,13 +760,36 @@ static inline BOOL stage_manager_enabled(void)
         [self removeCALayerHostView:contextId];
 
         CALayerHost* host = [CALayerHost layer];
+        CALayer* superlayer = self.layer; /* WINESKIN */
+
+        /* WINESKIN: a view without a layer (see wineskin_layer_views) hosts the context in a layer-hosting
+           subview of its own. */
+        if (!superlayer)
+        {
+            WineWindow* window = (WineWindow*)self.window;
+            NSView* hostView = window.wineskinLayerHostView;
+
+            if (!hostView || [hostView superview] != self)
+            {
+                hostView = [[[NSView alloc] initWithFrame:[self bounds]] autorelease];
+                [hostView setLayer:[CALayer layer]];
+                [hostView setWantsLayer:YES];
+                [hostView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+                [self setAutoresizesSubviews:YES];
+                [self addSubview:hostView];
+                window.wineskinLayerHostView = hostView;
+            }
+            superlayer = hostView.layer;
+        }
         [host setContextId:contextId];
         host.magnificationFilter = kCAFilterNearest;
         host.contentsScale = retina_on ? 2.0 : 1.0;
-        host.frame = self.layer.bounds;
+        // host.frame = self.layer.bounds;
+        host.frame = superlayer.bounds; /* WINESKIN */
         host.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
 
-        [self.layer addSublayer:host];
+        // [self.layer addSublayer:host];
+        [superlayer addSublayer:host]; /* WINESKIN */
         [_caLayerHosts setObject:host forKey:@(contextId)];
 
         [(WineWindow*)self.window windowDidDrawContent];
@@ -978,6 +1093,7 @@ static inline BOOL stage_manager_enabled(void)
     @synthesize usePerPixelAlpha;
     @synthesize ime_update, commandDone;
     @synthesize contentViewMaskLayer;
+    @synthesize wineskinShape, wineskinLetterbox, wineskinLayerHostView; /* WINESKIN */
 
     + (WineWindow*) createWindowWithFeatures:(const struct macdrv_window_features*)wf
                                  windowFrame:(NSRect)window_frame
@@ -1065,6 +1181,8 @@ static inline BOOL stage_manager_enabled(void)
         [latentChildWindows release];
         [latentParentWindow release];
         [contentViewMaskLayer release];
+        CGPathRelease(wineskinShape); /* WINESKIN */
+        [wineskinLayerHostView release]; /* WINESKIN */
         [super dealloc];
     }
 
@@ -2195,7 +2313,7 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) needsTransparency
     {
         WineContentView *view = self.contentView;
-        return self.contentView.layer.mask || [view hasShapeImage] || self.usePerPixelAlpha ||
+        return self.contentView.layer.mask || self.wineskinShape /* WINESKIN */ || [view hasShapeImage] || self.usePerPixelAlpha ||
                 (gl_surface_mode == GL_SURFACE_BEHIND && [view hasGLDescendant]);
     }
 
@@ -2220,6 +2338,25 @@ static inline BOOL stage_manager_enabled(void)
     - (void) setShape:(CGPathRef)newShape
     {
         CALayer* layer = [[self contentView] layer];
+
+        /* WINESKIN: see wineskin_layer_views */
+        if (!wineskin_layer_views())
+        {
+            CGPathRef oldShape = self.wineskinShape;
+
+            if ((!newShape && !oldShape) || (newShape && oldShape && CGPathEqualToPath(newShape, oldShape))) return;
+            if (oldShape)
+                [[self contentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(oldShape))];
+            if (newShape)
+                [[self contentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(newShape))];
+            self.wineskinShape = newShape ? CGPathCreateCopy(newShape) : NULL;
+            CGPathRelease(oldShape);
+            self.shapeChangedSinceLastDraw = TRUE;
+
+            [self checkTransparency];
+            [self checkEmptyShaped];
+            return;
+        }
         CAShapeLayer* mask = (CAShapeLayer*)layer.mask;
         if (CGPathEqualToPath(newShape, mask.path)) return;
 
@@ -2372,6 +2509,9 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) isEmptyShaped
     {
         CAShapeLayer* mask = (CAShapeLayer*)[[self contentView] layer].mask;
+        /* WINESKIN: see wineskin_layer_views */
+        if (self.wineskinShape)
+            return CGRectEqualToRect(CGPathGetBoundingBox(self.wineskinShape), CGRectZero);
         return ([mask isEmptyShaped]);
     }
 
@@ -2808,6 +2948,17 @@ static inline BOOL stage_manager_enabled(void)
         {
             [self.contentViewMaskLayer removeFromSuperlayer];
             self.contentViewMaskLayer = nil;
+        }
+
+        /* WINESKIN: see wineskin_layer_views; the rectangle is in Windows pixels */
+        if (!wineskin_layer_views())
+        {
+            CGFloat scale = retina_on ? 2.0 : 1.0;
+
+            self.wineskinLetterbox = CGRectIsEmpty(rect) ? CGRectZero :
+                CGRectMake(rect.origin.x / scale, rect.origin.y / scale, rect.size.width / scale, rect.size.height / scale);
+            [[self contentView] setNeedsDisplay:YES];
+            return;
         }
 
         if (CGRectIsEmpty(rect))

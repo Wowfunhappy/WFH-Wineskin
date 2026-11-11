@@ -250,7 +250,6 @@ struct macdrv_win_data
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
-    unsigned int        live_resize : 1;        /* WINESKIN: is the user resizing the window? */
 };
 
 struct macdrv_client_surface
@@ -260,8 +259,6 @@ struct macdrv_client_surface
     WineMetalSwapChain_id   metal_swapchain;
     WineRemoteGLSurface    *remote;            /* WINESKIN: see remote_gl.c */
     HWND                    remote_toplevel;   /* WINESKIN */
-    SIZE                    virtual_size;      /* WINESKIN: see macdrv_client_surface_update */
-    SIZE                    monitor_size;      /* WINESKIN */
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);

@@ -81,6 +81,10 @@
     BOOL fakingClose;
 
     CAShapeLayer* contentViewMaskLayer;
+    /* WINESKIN: see wineskin_layer_views in cocoa_window.m */
+    CGPathRef wineskinShape;
+    CGRect wineskinLetterbox;
+    NSView* wineskinLayerHostView;
 
     /* WINESKIN: see -wine_updateFullScreenSpace. */
     BOOL wantsFullScreenSpace;      /* should be in (or entering) a full-screen Space of its own */

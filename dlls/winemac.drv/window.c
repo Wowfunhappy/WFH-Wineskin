@@ -1144,37 +1144,6 @@ static void macdrv_client_surface_update(struct client_surface *client)
         return;
     }
     macdrv_remote_gl_detach(surface);
-    /* WINESKIN: on 10.9 a view's OpenGL surface can keep showing the drawable at the size it was made
-       with, whatever the context sets later: after a display mode change under a full-screen window, and
-       after a program resizes a window that started full screen. The surface gets a new view when its
-       drawable changes scale, or changes size other than in the user's live resize of the window. */
-    {
-        SIZE size = { client->virtual_rect.right - client->virtual_rect.left,
-                      client->virtual_rect.bottom - client->virtual_rect.top };
-        SIZE monitor = { client->monitor_rect.right - client->monitor_rect.left,
-                         client->monitor_rect.bottom - client->monitor_rect.top };
-
-        if (surface->virtual_size.cx && surface->virtual_size.cy && !surface->metal_swapchain &&
-            (monitor.cx * surface->virtual_size.cx != surface->monitor_size.cx * size.cx ||
-             monitor.cy * surface->virtual_size.cy != surface->monitor_size.cy * size.cy ||
-             ((size.cx != surface->virtual_size.cx || size.cy != surface->virtual_size.cy) &&
-              !data->live_resize)))
-        {
-            WineContentView *old_view = surface->cocoa_view;
-
-            TRACE("%s: new view for %dx%d in %dx%d\n", debugstr_client_surface(client), (int)size.cx, (int)size.cy,
-                  (int)monitor.cx, (int)monitor.cy);
-            surface->cocoa_view = macdrv_create_view(cgrect_from_rect(client->monitor_rect));
-            if (data->client_view == old_view)
-            {
-                data->client_view = surface->cocoa_view;
-                macdrv_set_view_hidden(surface->cocoa_view, FALSE);
-            }
-            macdrv_dispose_view(old_view);
-        }
-        surface->virtual_size = size;
-        surface->monitor_size = monitor;
-    }
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
     release_win_data(data);
@@ -1853,7 +1822,6 @@ void macdrv_window_frame_changed(HWND hwnd, const macdrv_event *event)
               data->rects.window.bottom - data->rects.window.top, width, height);
 
     being_dragged = data->drag_event != NULL;
-    data->live_resize = event->window_frame_changed.in_resize; /* WINESKIN */
     release_win_data(data);
 
     if (event->window_frame_changed.fullscreen)
@@ -2036,14 +2004,7 @@ void macdrv_window_brought_forward(HWND hwnd)
  */
 void macdrv_window_resize_ended(HWND hwnd)
 {
-    struct macdrv_win_data *data; /* WINESKIN */
-
     TRACE("hwnd %p\n", hwnd);
-    if ((data = get_win_data(hwnd))) /* WINESKIN */
-    {
-        data->live_resize = FALSE;
-        release_win_data(data);
-    }
     send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
 }
 
