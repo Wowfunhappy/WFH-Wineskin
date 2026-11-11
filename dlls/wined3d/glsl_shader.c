@@ -2615,6 +2615,9 @@ static void shader_glsl_declare_missing_builtins(struct wined3d_string_buffer *b
     static const char components[] = "xyzw";
     unsigned int i, j;
 
+    /* see shader_glsl_imm_has_nan_bits() */
+    shader_addline(buffer, "uniform int wined3d_nan_guard;\n");
+
     if (!gl_info->supported[ARB_DERIVATIVE_CONTROL])
     {
         shader_addline(buffer, "#define dFdxCoarse dFdx\n");
@@ -3220,6 +3223,25 @@ static void shader_glsl_fixup_scalar_register_variable(struct wined3d_string_buf
 
 /** Writes the GLSL variable name that corresponds to the register that the
  * DX opcode parameter is trying to access */
+/* WINESKIN: 10.9's GLSL compiler folds a constant whose bits are a NaN into a float variable as a
+ * canonical NaN, so integer and float immediates with such bits (-1 and every small negative
+ * integer among them) reached registers changed. An immediate with such bits gets
+ * wined3d_nan_guard (an unset uniform: 0) added, which the compiler can't fold. */
+static bool shader_glsl_imm_has_nan_bits(const struct wined3d_shader_register *reg,
+        const struct wined3d_shader_version *version)
+{
+    unsigned int i, count = reg->immconst_type == WINED3D_IMMCONST_SCALAR ? 1 : 4;
+
+    if (version->major < 4)
+        return false;
+    for (i = 0; i < count; ++i)
+    {
+        if ((reg->u.immconst_data[i] & 0x7f800000) == 0x7f800000 && (reg->u.immconst_data[i] & 0x007fffff))
+            return true;
+    }
+    return false;
+}
+
 static void shader_glsl_get_register_name(const struct wined3d_shader_register *reg,
         enum wined3d_data_type data_type, struct wined3d_string_buffer *register_name,
         BOOL *is_swizzled, const struct wined3d_shader_context *ctx)
@@ -3467,15 +3489,35 @@ static void shader_glsl_get_register_name(const struct wined3d_shader_register *
                         case WINED3D_DATA_UNORM:
                         case WINED3D_DATA_SNORM:
                         case WINED3D_DATA_FLOAT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name, "intBitsToFloat(%#x + wined3d_nan_guard)",
+                                        reg->u.immconst_data[0]);
+                                break;
+                            }
                             string_buffer_clear(register_name);
                             shader_glsl_append_imm_vec(register_name, (const float *)reg->u.immconst_data, 1, gl_info);
                             break;
                         case WINED3D_DATA_INT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name, "(%#x + wined3d_nan_guard)", reg->u.immconst_data[0]);
+                                break;
+                            }
                             string_buffer_sprintf(register_name, "%#x", reg->u.immconst_data[0]);
                             break;
                         case WINED3D_DATA_RESOURCE:
                         case WINED3D_DATA_SAMPLER:
                         case WINED3D_DATA_UINT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name, "(%#xu + uint(wined3d_nan_guard))",
+                                        reg->u.immconst_data[0]);
+                                break;
+                            }
                             string_buffer_sprintf(register_name, "%#xu", reg->u.immconst_data[0]);
                             break;
                         default:
@@ -3490,10 +3532,27 @@ static void shader_glsl_get_register_name(const struct wined3d_shader_register *
                         case WINED3D_DATA_UNORM:
                         case WINED3D_DATA_SNORM:
                         case WINED3D_DATA_FLOAT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name,
+                                        "intBitsToFloat(ivec4(%#x, %#x, %#x, %#x) + wined3d_nan_guard)",
+                                        reg->u.immconst_data[0], reg->u.immconst_data[1],
+                                        reg->u.immconst_data[2], reg->u.immconst_data[3]);
+                                break;
+                            }
                             string_buffer_clear(register_name);
                             shader_glsl_append_imm_vec(register_name, (const float *)reg->u.immconst_data, 4, gl_info);
                             break;
                         case WINED3D_DATA_INT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name, "(ivec4(%#x, %#x, %#x, %#x) + wined3d_nan_guard)",
+                                        reg->u.immconst_data[0], reg->u.immconst_data[1],
+                                        reg->u.immconst_data[2], reg->u.immconst_data[3]);
+                                break;
+                            }
                             string_buffer_sprintf(register_name, "ivec4(%#x, %#x, %#x, %#x)",
                                     reg->u.immconst_data[0], reg->u.immconst_data[1],
                                     reg->u.immconst_data[2], reg->u.immconst_data[3]);
@@ -3501,6 +3560,15 @@ static void shader_glsl_get_register_name(const struct wined3d_shader_register *
                         case WINED3D_DATA_RESOURCE:
                         case WINED3D_DATA_SAMPLER:
                         case WINED3D_DATA_UINT:
+                            /* WINESKIN: see shader_glsl_imm_has_nan_bits() */
+                            if (shader_glsl_imm_has_nan_bits(reg, version))
+                            {
+                                string_buffer_sprintf(register_name,
+                                        "(uvec4(%#xu, %#xu, %#xu, %#xu) + uint(wined3d_nan_guard))",
+                                        reg->u.immconst_data[0], reg->u.immconst_data[1],
+                                        reg->u.immconst_data[2], reg->u.immconst_data[3]);
+                                break;
+                            }
                             string_buffer_sprintf(register_name, "uvec4(%#xu, %#xu, %#xu, %#xu)",
                                     reg->u.immconst_data[0], reg->u.immconst_data[1],
                                     reg->u.immconst_data[2], reg->u.immconst_data[3]);
