@@ -74,7 +74,7 @@ WineskinSupport/
 On 10.9, CoreFoundation decides which compatibility behaviours a process gets from the libraries its main
 executable links (later systems read the SDK version instead). The main executable of a Wine process is
 the preloader, so it links libSystem: AppKit then behaves as for any app built with the 10.9 SDK, which is
-what winemac.drv's drawing (`-updateLayer`) depends on.
+what winemac.drv's window drawing depends on.
 
 libSystem initializes before the preloader runs, so the address ranges Wine needs are taken before it can
 allocate there: the x86_64 low 8GB and, on i386, the low 64k, the DOS area, the low memory below
@@ -112,12 +112,16 @@ include (`stdio.h`, `unistd.h`, …) or an rsp change relinks the tools, and wit
 
 ## OpenGL on 10.9
 
-winemac's views are layer-backed, and 10.9's AppKit gives an `NSOpenGLContext` attached to a
-layer-backed view no drawable (its default framebuffer is `GL_FRAMEBUFFER_UNDEFINED`). The AppKit
-polyfill (`polyfill/src/objc/AppKit.m`) has `-setView:` attach the context the way it attaches to a view
-without a layer, a window-server surface over the view. The same file finishes `-[NSOpenGLContext
-dealloc]` as an `NSOpenGLContext`, since 10.9's dealloc messages `-clearDrawable` to the half-freed
-subclass.
+On 10.9 winemac's content views have no layer (`wineskin_layer_views` in `cocoa_window.m`): a view
+draws its window surface in `-drawRect:`, with the window's shape as a clip and letterbox bars drawn
+over it, and an `NSOpenGLContext` attaches to it as to any view without a layer, a window-server
+surface that AppKit keeps over the view. That surface is in front of the window's other content, so
+OpenGL drawing covers sibling and child windows over it. 10.9's AppKit gives a context attached to a
+layer-backed view no drawable (its default framebuffer is `GL_FRAMEBUFFER_UNDEFINED`); with
+`WINESKIN_LAYER_VIEWS=1` the views are layer-backed, for comparison, and the AppKit polyfill
+(`polyfill/src/objc/AppKit.m`) then has `-setView:` attach the context the way it attaches to a view
+without a layer. The same file finishes `-[NSOpenGLContext dealloc]` as an `NSOpenGLContext`, since
+10.9's dealloc messages `-clearDrawable` to the half-freed subclass.
 
 A program can draw with OpenGL, and so with Direct3D, into a child window whose top-level window
 belongs to another process, as a launcher that runs its game in a window of its own does (Rez
@@ -488,18 +492,20 @@ into the stream output buffer bound as the pixel pack buffer; both are queued, a
 stream output uses transform feedback. `HKCU\Software\Wine\Direct3D\StreamOutputEmulation` = `n` (or
 `WINE_D3D_CONFIG=StreamOutputEmulation=n`) turns it off.
 
-`HKCU\Software\Wine\Mac Driver\MultithreadedOpenGL` = `y` turns on the multithreaded OpenGL engine
-(`kCGLCEMPEngine`) for every context: the driver's work for each call runs on a thread of its own, and
-the thread that makes the calls, wined3d's command stream, only queues them. It is off unless set. Calls
+The multithreaded OpenGL engine (`kCGLCEMPEngine`) is on for every context: the driver's work for each
+call runs on a thread of its own, and the thread that makes the calls, wined3d's command stream, only
+queues them. It speeds up programs bound by the driver's work (Ori and the Will of the Wisps' title
+79 -> 93 fps, Bit.Trip Rerunner's 41 -> 50) and costs a few percent in light ones running at hundreds
+of frames a second. `HKCU\Software\Wine\Mac Driver\MultithreadedOpenGL` = `n` turns it off. Calls
 that ask OpenGL for something wait for that thread, which is why winemac remembers whether the surface
 backing size is enabled instead of asking at every buffer swap (`backingSizeEnabled`).
 
 10.9's OpenGL offers no program binary formats (`GL_NUM_PROGRAM_BINARY_FORMATS` is 0), so linked shader
 programs can't be kept on disk: a shader is compiled the first time each run draws with it.
 
-An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`,
-which a layer-backed view that shows only OpenGL may never get on 10.9; such a context attaches the next
-time it is made current with its window visible (`macdrv_attach_pending_view_opengl_context`).
+An OpenGL context made current before its window is on screen waits for the view's next `-viewWillDraw`;
+such a context also attaches the next time it is made current with its window visible
+(`macdrv_attach_pending_view_opengl_context`).
 
 ### Other GPUs
 
