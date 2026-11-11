@@ -126,8 +126,10 @@ without a layer. The same file finishes `-[NSOpenGLContext dealloc]` as an `NSOp
 A program can draw with OpenGL, and so with Direct3D, into a child window whose top-level window
 belongs to another process, as a launcher that runs its game in a window of its own does (Rez
 Infinite). The drawing process has no Cocoa view of that window, so winemac gives the context an
-off-screen window as its drawable and, at each buffer swap, copies the back buffer into one of three
-IOSurfaces shown by a layer of a `CAContext`; the process that owns the top-level window hosts that
+off-screen window as its drawable. The pixels of a window that isn't on screen fail OpenGL's pixel
+ownership test, so for such a window win32u gives the program a framebuffer surface (framebuffer
+objects standing in for the default framebuffer), and at each buffer swap winemac copies the frame from
+it into one of three IOSurfaces shown by a layer of a `CAContext`; the process that owns the top-level window hosts that
 context at the child's place in its content view (a `CALayerHost`), once a `WM_MACDRV_CREATE_REMOTE_LAYER`
 message reaches it (`winemac.drv/remote_gl.c`, `cocoa_remote_gl.m`). Frames go from the drawing process
 to the window server directly.

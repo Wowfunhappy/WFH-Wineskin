@@ -7,7 +7,10 @@
  * drawing process has no view of it to attach its context to.
  *
  * The drawing process gives the context an off-screen window of its own, as the drawable, and
- * at each buffer swap copies the back buffer into an IOSurface. A layer of a CAContext shows the
+ * at each buffer swap copies the frame into an IOSurface. The pixels of a window that isn't on
+ * screen fail OpenGL's pixel ownership test, so the program draws into a framebuffer object
+ * instead (win32u's framebuffer surface, which win32u uses for such windows), and the copy reads
+ * that framebuffer: win32u has it bound for reading when it swaps the window's drawable. A layer of a CAContext shows the
  * IOSurfaces; the process that owns the top-level window hosts that context in its window's
  * content view (a CALayerHost, as for the Metal swap chains of such windows) once a
  * WM_MACDRV_CREATE_REMOTE_LAYER message reaches it. Frames then go from the drawing process to
@@ -394,10 +397,14 @@ void macdrv_remote_gl_present(WineOpenGLContext *context)
     srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
     if (core) discard = glIsEnabled(GL_RASTERIZER_DISCARD);
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glGetIntegerv(GL_READ_BUFFER, &read_buffer);
-    glGetBooleanv(GL_DOUBLEBUFFER, &doublebuffer);
-    glReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
+    if (read_fbo)
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+    else
+    {
+        glGetBooleanv(GL_DOUBLEBUFFER, &doublebuffer);
+        glReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
+    }
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, remote->fbos[i]);
     if (scissor) glDisable(GL_SCISSOR_TEST);
     if (srgb) glDisable(GL_FRAMEBUFFER_SRGB);

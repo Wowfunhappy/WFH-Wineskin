@@ -2226,7 +2226,10 @@ static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format
             if (!(driver_funcs->p_surface_create( client, format, &drawable )))
                 WARN( "Failed to create a drawable for window %p, format %d\n", hwnd, format );
 #ifdef __APPLE__
-            else if (0) /* WINESKIN: see above */
+            /* WINESKIN: see above; a child of another process's window draws into a framebuffer
+               surface, whose frames winemac copies to the other process (winemac's cocoa_remote_gl.m). */
+            else if (!is_current_process_window( NtUserGetAncestor( hwnd, GA_ROOT ) ) &&
+                     drawable->funcs != &framebuffer_surface_funcs)
 #else
             else if (!raw && emulate_modeset && drawable->funcs != &framebuffer_surface_funcs)
 #endif /* WINESKIN */
